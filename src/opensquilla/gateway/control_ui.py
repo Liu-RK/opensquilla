@@ -1,0 +1,65 @@
+"""Control UI route factory — serves embedded HTML console with SPA fallback."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import jinja2
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+
+from opensquilla.gateway.config import GatewayConfig
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
+
+# Process-start timestamp baked into the template-only version string so every
+# gateway restart busts the browser cache for static JS/CSS. config.version
+# itself is preserved for protocol/RPC consumers that expect a stable string.
+_TEMPLATE_VERSION_SUFFIX = str(int(time.time()))
+
+_jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=True,
+)
+# Register tojson filter used in index.html template
+_jinja_env.filters["tojson"] = lambda v, **kw: json.dumps(v)
+
+
+def _build_bootstrap_context(config: GatewayConfig) -> dict:
+    """Build the template context for bootstrap config injection."""
+    return {
+        "version": f"{config.version}+{_TEMPLATE_VERSION_SUFFIX}",
+        "ws_url": f"ws://{config.host}:{config.port}/ws",
+        "auth_mode": config.auth.mode,
+        "base_path": config.control_ui.base_path,
+        "features": {
+            "diagnostics": config.diagnostics_enabled,
+        },
+    }
+
+
+def create_control_ui_routes(config: GatewayConfig) -> list[Route | Mount]:
+    """Create routes for the Control UI. Returns empty list if disabled."""
+    if not config.control_ui.enabled:
+        return []
+
+    base = config.control_ui.base_path
+    ctx = _build_bootstrap_context(config)
+    template = _jinja_env.get_template("index.html")
+
+    async def serve_index(request: Request) -> HTMLResponse:
+        html = template.render(**ctx)
+        return HTMLResponse(html)
+
+    return [
+        Mount(
+            f"{base}/static", app=StaticFiles(directory=str(_STATIC_DIR)), name="control_ui_static"
+        ),
+        Route(f"{base}/{{path:path}}", serve_index, methods=["GET"]),
+        Route(f"{base}/", serve_index, methods=["GET"]),
+    ]

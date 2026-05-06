@@ -1,0 +1,645 @@
+import pytest
+
+from opensquilla.contrib.squilla_router.v4_phase3 import V4Phase3Strategy
+from opensquilla.engine.pipeline import TurnContext
+from opensquilla.engine.steps import squilla_router as squilla_router_step
+from opensquilla.engine.steps.squilla_router import apply_squilla_router
+from opensquilla.gateway.config import GatewayConfig
+
+
+class FakeStrategy:
+    def __init__(self, tier: str, confidence: float, extra: dict) -> None:
+        self.tier = tier
+        self.confidence = confidence
+        self.extra = extra
+        self.calls = 0
+        self.messages: list[str] = []
+
+    async def classify(
+        self,
+        message: str,
+        valid_tiers: list[str],
+        routing_history: list[dict] | None = None,
+    ) -> tuple[str, float, str, dict]:
+        self.calls += 1
+        self.messages.append(message)
+        assert self.tier in valid_tiers
+        return self.tier, self.confidence, "v4_phase3", dict(self.extra)
+
+
+class ContextAwareFakeStrategy(FakeStrategy):
+    def __init__(self, tier: str, confidence: float, extra: dict) -> None:
+        super().__init__(tier, confidence, extra)
+        self.contexts: list[dict] = []
+
+    async def classify(
+        self,
+        message: str,
+        valid_tiers: list[str],
+        routing_history: list[dict] | None = None,
+        prev_assistant_text: str | None = None,
+        prev_assistant_usage: dict | None = None,
+        history_user_texts: list[str] | None = None,
+        flags_text_override: str | None = None,
+    ) -> tuple[str, float, str, dict]:
+        self.calls += 1
+        self.messages.append(message)
+        self.contexts.append(
+            {
+                "routing_history": [dict(entry) for entry in routing_history or []],
+                "prev_assistant_text": prev_assistant_text,
+                "prev_assistant_usage": dict(prev_assistant_usage or {}),
+                "history_user_texts": list(history_user_texts or []),
+                "flags_text_override": flags_text_override,
+            }
+        )
+        assert self.tier in valid_tiers
+        return self.tier, self.confidence, "v4_phase3", dict(self.extra)
+
+
+@pytest.fixture(autouse=True)
+def reset_squilla_router_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    squilla_router_step._history_store.clear()
+    yield
+    squilla_router_step._history_store.clear()
+    monkeypatch.undo()
+
+
+def make_context(
+    message: str,
+    *,
+    rollout_phase: str = "full",
+    session_key: str = "test-session",
+    raw_message: str | None = None,
+    attachments: list[dict] | None = None,
+) -> TurnContext:
+    config = GatewayConfig()
+    config.squilla_router.rollout_phase = rollout_phase
+    return TurnContext(
+        message=message,
+        session_key=session_key,
+        config=config,
+        provider=None,
+        model=config.llm.model,
+        tool_defs=[],
+        system_prompt="system",
+        raw_message=raw_message,
+        attachments=attachments or [],
+    )
+
+
+def require_runtime_router() -> None:
+    try:
+        V4Phase3Strategy(require_router_runtime=True)
+    except Exception as exc:
+        pytest.skip(f"V4 model router runtime unavailable: {exc}")
+
+
+def fake_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    tier: str,
+    confidence: float,
+    extra: dict,
+) -> FakeStrategy:
+    strategy = FakeStrategy(tier, confidence, extra)
+    monkeypatch.setattr(squilla_router_step, "_get_strategy", lambda _config: strategy)
+    return strategy
+
+
+def context_aware_fake_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    tier: str,
+    confidence: float,
+    extra: dict,
+) -> ContextAwareFakeStrategy:
+    strategy = ContextAwareFakeStrategy(tier, confidence, extra)
+    monkeypatch.setattr(squilla_router_step, "_get_strategy", lambda _config: strategy)
+    return strategy
+
+
+@pytest.mark.asyncio
+async def test_full_rollout_applies_routed_model_thinking_and_p0_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.91,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx = make_context("Summarize this short note.")
+    baseline_model = ctx.model
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.model == "deepseek/deepseek-v4-flash"
+    assert routed.metadata["routed_tier"] == "t1"
+    assert routed.metadata["routed_model"] == "deepseek/deepseek-v4-flash"
+    assert routed.metadata["routing_applied"] is True
+    assert routed.metadata["applied_model"] == "deepseek/deepseek-v4-flash"
+    assert routed.metadata["baseline_model"] == baseline_model
+    assert routed.metadata["routing_confidence"] == 0.91
+    assert routed.metadata["routing_source"] == "v4_phase3"
+    assert "savings_pct" in routed.metadata
+    assert "savings_max_price_per_m" in routed.metadata
+    assert "savings_routed_price_per_m" in routed.metadata
+    assert routed.metadata["thinking_mode"] == "T1"
+    assert routed.metadata["thinking_requested"] is True
+    assert routed.metadata["thinking_level"] == "low"
+    assert routed.metadata["prompt_policy"] == "P0"
+    assert "[RESPONSE_POLICY: Answer directly" in routed.message
+
+
+@pytest.mark.asyncio
+async def test_p2_prompt_hint_is_recorded_but_not_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t3",
+        0.97,
+        {
+            "route_class": "R3",
+            "thinking_mode": "T3",
+            "prompt_policy": "P2",
+            "prompt_hint": "Use a careful plan before answering.",
+        },
+    )
+    ctx = make_context("Plan a risky multi-step migration.")
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.model == "anthropic/claude-opus-4.7"
+    assert routed.metadata["routed_tier"] == "t3"
+    assert routed.metadata["thinking_level"] == "high"
+    assert routed.metadata["prompt_policy"] == "P2"
+    assert routed.metadata["routing_extra"]["prompt_hint"] == "Use a careful plan before answering."
+    assert "[RESPONSE_POLICY:" not in routed.message
+
+
+@pytest.mark.asyncio
+async def test_confidence_gate_promotes_low_confidence_t0_to_default_t1_and_reconciles_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t0",
+        0.1,
+        {
+            "route_class": "R0",
+            "thinking_mode": "T0",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx = make_context("Maybe simple, but classifier is uncertain.")
+
+    routed = await apply_squilla_router(ctx)
+    extra = routed.metadata["routing_extra"]
+
+    assert routed.metadata["routed_tier"] == "t1"
+    assert routed.model == "deepseek/deepseek-v4-flash"
+    assert extra["confidence_gate_applied"] is True
+    assert extra["base_tier"] == "t0"
+    assert extra["final_tier"] == "t1"
+    assert routed.metadata["thinking_mode"] == "T1"
+    assert routed.metadata["thinking_level"] == "low"
+    assert "[RESPONSE_POLICY: Answer directly" in routed.message
+
+
+@pytest.mark.asyncio
+async def test_confidence_gate_falls_back_low_confidence_non_default_text_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.1,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    ctx = make_context("Classifier is uncertain but picked an expensive tier.")
+
+    routed = await apply_squilla_router(ctx)
+    extra = routed.metadata["routing_extra"]
+
+    assert routed.metadata["routed_tier"] == "t1"
+    assert routed.model == "deepseek/deepseek-v4-flash"
+    assert extra["confidence_gate_applied"] is True
+    assert extra["pre_confidence_tier"] == "t2"
+    assert extra["final_tier"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_anti_downgrade_keeps_recent_higher_tier_despite_confidence_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx1 = make_context("Hard first turn.", session_key="test-confidence-history")
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.9,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    routed1 = await apply_squilla_router(ctx1)
+    assert routed1.metadata["routed_tier"] == "t2"
+
+    fake_strategy(
+        monkeypatch,
+        "t0",
+        0.1,
+        {
+            "route_class": "R0",
+            "thinking_mode": "T0",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx2 = make_context("Uncertain follow-up.", session_key="test-confidence-history")
+
+    routed2 = await apply_squilla_router(ctx2)
+    extra = routed2.metadata["routing_extra"]
+
+    assert routed2.metadata["routed_tier"] == "t2"
+    assert routed2.model == "z-ai/glm-5.1"
+    assert extra["confidence_gate_applied"] is True
+    assert extra["pre_confidence_tier"] == "t0"
+    assert extra["final_tier"] == "t2"
+    assert extra["anti_downgrade_applied"] is True
+    assert extra["previous_tier"] == "t2"
+
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.9,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P1",
+        },
+    )
+    ctx3 = make_context("Normal follow-up.", session_key="test-confidence-history")
+
+    routed3 = await apply_squilla_router(ctx3)
+    extra3 = routed3.metadata["routing_extra"]
+
+    assert routed3.metadata["routed_tier"] == "t2"
+    assert routed3.model == "z-ai/glm-5.1"
+    assert extra3["confidence_gate_applied"] is False
+    assert extra3["anti_downgrade_applied"] is True
+    assert extra3["previous_tier"] == "t2"
+
+
+@pytest.mark.asyncio
+async def test_anti_downgrade_uses_previous_turn_not_window_highest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "test-previous-not-highest"
+    fake_strategy(
+        monkeypatch,
+        "t3",
+        0.9,
+        {
+            "route_class": "R3",
+            "thinking_mode": "T3",
+            "prompt_policy": "P2",
+        },
+    )
+    routed1 = await apply_squilla_router(make_context("Very hard turn.", session_key=session_key))
+    assert routed1.metadata["routed_tier"] == "t3"
+
+    ctx2 = make_context("Less hard turn.", session_key=session_key)
+    ctx2.config.squilla_router.kv_cache_anti_downgrade_enabled = False
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.9,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    routed2 = await apply_squilla_router(ctx2)
+    assert routed2.metadata["routed_tier"] == "t2"
+
+    ctx3 = make_context("Easy follow-up.", session_key=session_key)
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.9,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P1",
+        },
+    )
+    routed3 = await apply_squilla_router(ctx3)
+    extra3 = routed3.metadata["routing_extra"]
+
+    assert routed3.metadata["routed_tier"] == "t2"
+    assert routed3.model == "z-ai/glm-5.1"
+    assert extra3["anti_downgrade_applied"] is True
+    assert extra3["previous_tier"] == "t2"
+
+
+@pytest.mark.asyncio
+async def test_complaint_upgrade_promotes_tier_thinking_and_blocks_compressed_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.9,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx = make_context("不对，重新回答")
+
+    routed = await apply_squilla_router(ctx)
+    extra = routed.metadata["routing_extra"]
+
+    assert routed.metadata["routed_tier"] == "t2"
+    assert routed.model == "z-ai/glm-5.1"
+    assert extra["complaint_detected"] is True
+    assert extra["complaint_upgrade_applied"] is True
+    assert routed.metadata["thinking_mode"] == "T2"
+    assert routed.metadata["thinking_level"] == "medium"
+    assert routed.metadata["prompt_policy"] == "P1"
+    assert "[RESPONSE_POLICY:" not in routed.message
+
+
+@pytest.mark.asyncio
+async def test_router_classifies_raw_semantic_input_but_injects_prompt_into_display_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = fake_strategy(
+        monkeypatch,
+        "t0",
+        0.92,
+        {
+            "route_class": "R0",
+            "thinking_mode": "T0",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx = make_context(
+        "Displayed prompt wrapper",
+        raw_message="Summarize the underlying user input.",
+    )
+
+    routed = await apply_squilla_router(ctx)
+
+    assert strategy.messages == ["Summarize the underlying user input."]
+    assert routed.metadata["routed_tier"] == "t0"
+    assert routed.metadata["prompt_policy"] == "P0"
+    assert routed.message.startswith("Displayed prompt wrapper")
+    assert "Summarize the underlying user input." not in routed.message
+    assert "[RESPONSE_POLICY: Answer directly" in routed.message
+
+
+@pytest.mark.asyncio
+async def test_router_passes_transcript_context_into_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = context_aware_fake_strategy(
+        monkeypatch,
+        "t2",
+        0.88,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    ctx = make_context("Continue from the previous answer.")
+    ctx.metadata.update(
+        {
+            "router_prev_assistant_text": "Previous assistant answer.",
+            "router_prev_assistant_usage": {"output_tokens": 321},
+            "router_history_user_texts": ["First user question.", "Second user question."],
+            "router_flags_text_override": "Continue from the previous answer.",
+            "routing_history": [
+                {
+                    "text": "First user question.",
+                    "route_class": "R1",
+                    "final_route_class": "R1",
+                    "difficulty": 1.0,
+                    "margin": 0.5,
+                }
+            ],
+        }
+    )
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routed_tier"] == "t2"
+    assert strategy.messages == ["Continue from the previous answer."]
+    assert strategy.contexts == [
+        {
+            "routing_history": [
+                {
+                    "text": "First user question.",
+                    "route_class": "R1",
+                    "final_route_class": "R1",
+                    "difficulty": 1.0,
+                    "margin": 0.5,
+                    "_ts": pytest.approx(strategy.contexts[0]["routing_history"][0]["_ts"]),
+                }
+            ],
+            "prev_assistant_text": "Previous assistant answer.",
+            "prev_assistant_usage": {"output_tokens": 321},
+            "history_user_texts": ["First user question.", "Second user question."],
+            "flags_text_override": "Continue from the previous answer.",
+        }
+    ]
+
+
+def test_v4_request_contains_current_history_assistant_and_route_context() -> None:
+    class FakeInferenceRequest:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    strategy = V4Phase3Strategy(require_router_runtime=False)
+    strategy._request_type = FakeInferenceRequest
+
+    request = strategy._build_request(
+        "Current user question.",
+        [
+            {
+                "text": "Previous user question.",
+                "final_route_class": "R2",
+                "difficulty_score": 2.0,
+                "margin": 0.7,
+            }
+        ],
+        prev_assistant_text="Previous assistant answer.",
+        prev_assistant_usage={"output_tokens": 456},
+        history_user_texts=["Earlier user question.", "Previous user question."],
+        flags_text_override="Current user question.",
+    )
+
+    assert request.current_user_text == "Current user question."
+    assert request.history_user_texts == ["Earlier user question.", "Previous user question."]
+    assert request.prev_assistant_text == "Previous assistant answer."
+    assert request.prev_assistant_usage == {"output_tokens": 456}
+    assert request.prev_route_decisions[0].route_class == "R2"
+    assert request.prev_route_decisions[0].difficulty == 2.0
+    assert request.prev_route_decisions[0].margin == 0.7
+    assert request.flags_text_override == "Current user question."
+    assert request.context_metadata["history_user_turn_count"] == 2
+    assert request.context_metadata["has_prev_assistant"] is True
+    assert request.context_metadata["context_tokens_est"] > 0
+
+
+@pytest.mark.asyncio
+async def test_image_input_routes_directly_to_vision_model_without_prompt_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail("image routing should not invoke text strategy"),
+    )
+    ctx = make_context(
+        "What is in this screenshot?",
+        attachments=[{"type": "image", "mime_type": "image/png"}],
+    )
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.model == "moonshotai/kimi-k2.6"
+    assert routed.metadata["routed_tier"] == "image_model"
+    assert routed.metadata["routed_model"] == "moonshotai/kimi-k2.6"
+    assert routed.metadata["routing_applied"] is True
+    assert routed.metadata["routing_confidence"] == 1.0
+    assert routed.metadata["routing_source"] == "image_route"
+    assert routed.metadata["thinking_requested"] is True
+    assert routed.metadata["thinking_level"] == "medium"
+    assert "[RESPONSE_POLICY:" not in routed.message
+
+
+@pytest.mark.asyncio
+async def test_non_image_attachment_does_not_force_vision_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = fake_strategy(
+        monkeypatch,
+        "t1",
+        0.91,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P0",
+        },
+    )
+    ctx = make_context(
+        "Summarize the attached PDF text.",
+        attachments=[{"type": "application/pdf", "mime_type": "application/pdf"}],
+    )
+
+    routed = await apply_squilla_router(ctx)
+
+    assert strategy.calls == 1
+    assert routed.metadata["routing_source"] == "v4_phase3"
+    assert routed.metadata["routed_tier"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_observe_rollout_records_decisions_without_applying_model_or_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.93,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P2",
+            "prompt_hint": "Use extra care.",
+        },
+    )
+    ctx = make_context("Analyze this code path.", rollout_phase="observe")
+    baseline_model = ctx.model
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.model == baseline_model
+    assert routed.metadata["routed_tier"] == "t2"
+    assert routed.metadata["routed_model"] == "z-ai/glm-5.1"
+    assert routed.metadata["routing_applied"] is False
+    assert routed.metadata["thinking_mode"] == "T2"
+    assert routed.metadata["thinking_level"] == "low"
+    assert "[RESPONSE_POLICY:" not in routed.message
+
+
+@pytest.mark.asyncio
+async def test_repeated_message_across_sessions_is_classified_each_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = fake_strategy(
+        monkeypatch,
+        "t1",
+        0.91,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P0",
+        },
+    )
+
+    first = await apply_squilla_router(make_context("Repeat this.", session_key="session-a"))
+    second = await apply_squilla_router(make_context("Repeat this.", session_key="session-b"))
+
+    assert first.metadata["routing_source"] == "v4_phase3"
+    assert second.metadata["routing_source"] == "v4_phase3"
+    assert strategy.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_router_short_chinese_prompt_injects_localized_p0_hint() -> None:
+    require_runtime_router()
+    ctx = make_context("直接总结这句话。")
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routing_source"] == "v4_phase3"
+    assert routed.metadata["routed_tier"] == "t0"
+    assert routed.model == "deepseek/deepseek-v4-flash"
+    assert routed.metadata["thinking_mode"] == "T0"
+    assert routed.metadata.get("thinking_requested") is None
+    assert routed.metadata["prompt_policy"] == "P0"
+    assert "[RESPONSE_POLICY: 直接作答，缩短思考长度，避免无关展开。]" in routed.message
+
+
+@pytest.mark.asyncio
+async def test_runtime_router_complex_request_applies_deep_thinking_without_p2_prompt() -> None:
+    require_runtime_router()
+    ctx = make_context("Plan a risky multi-step database migration with rollback and verification.")
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routing_source"] == "v4_phase3"
+    assert routed.metadata["routed_tier"] == "t3"
+    assert routed.model == "anthropic/claude-opus-4.7"
+    assert routed.metadata["thinking_mode"] == "T3"
+    assert routed.metadata["thinking_requested"] is True
+    assert routed.metadata["thinking_level"] == "high"
+    assert routed.metadata["prompt_policy"] == "P2"
+    assert routed.metadata["routing_extra"]["prompt_hint"] == (
+        "Analyze thoroughly, cover key constraints, avoid omissions."
+    )
+    assert "[RESPONSE_POLICY:" not in routed.message

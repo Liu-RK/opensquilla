@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+import stat
+import sys
+from pathlib import Path
+from zipfile import ZipFile
+
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "build_wheelhouse_zip.py"
+REPO_ROOT = SCRIPT_PATH.parents[1]
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "wheelhouse-release.yml"
+INTERNAL_RELEASE_MARKERS = (
+    "Token-Rhythm",
+    "github.com/Token-Rhythm/opensquilla",
+    ".internal/evidence",
+    "INTERNAL_RELEASE_NOTE.md",
+    "LOCAL_AGENT_NOTES.md",
+)
+
+
+def assert_executable_on_posix(path: Path) -> None:
+    if os.name != "nt":
+        assert path.stat().st_mode & stat.S_IXUSR
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("build_wheelhouse_zip", SCRIPT_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_release_name_records_platform_python_profile() -> None:
+    module = load_script()
+
+    wheelhouse_name = module.release_name(
+        app_version="0.1.0",
+        platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+        profile="recommended",
+        portable=False,
+    )
+    portable_name = module.release_name(
+        app_version="0.1.0",
+        platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+        profile="recommended",
+        portable=True,
+    )
+
+    assert wheelhouse_name == "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse"
+    assert portable_name == "OpenSquilla-0.1.0-macos-arm64-py312-recommended-portable"
+
+
+def test_python_runtime_asset_name_uses_platform_triple() -> None:
+    module = load_script()
+
+    macos = module.python_runtime_asset_name(
+        python_version="3.12.13",
+        runtime_release="20260414",
+        platform_tag="macos-arm64",
+    )
+    windows = module.python_runtime_asset_name(
+        python_version="3.12.13",
+        runtime_release="20260414",
+        platform_tag="windows-x64",
+    )
+
+    assert macos == (
+        "cpython-3.12.13+20260414-aarch64-apple-darwin-install_only_stripped.tar.gz"
+    )
+    assert windows == (
+        "cpython-3.12.13+20260414-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+    )
+
+
+def test_pip_platform_tag_maps_target_platforms() -> None:
+    module = load_script()
+
+    assert module.pip_platform_tag("macos-arm64") == "macosx_12_0_arm64"
+    assert module.pip_platform_tag("macos-x64") == "macosx_10_13_x86_64"
+    assert module.pip_platform_tag("windows-x64") == "win_amd64"
+    assert module.pip_platform_tag("linux-x64") == "manylinux2014_x86_64"
+
+
+def test_cross_platform_wheelhouse_uses_pip_download_target(tmp_path: Path) -> None:
+    module = load_script()
+    module.platform_tag = lambda: "linux-x64"
+    wheel_path = tmp_path / "opensquilla-0.1.0-py3-none-any.whl"
+    package_dir = tmp_path / "packages"
+
+    command = module.build_wheelhouse_command(
+        package_dir,
+        wheel_path,
+        "recommended",
+        target_platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+    )
+
+    assert command[:4] == [sys.executable, "-m", "pip", "download"]
+    assert "--dest" in command
+    assert str(package_dir) in command
+    assert "--find-links" in command
+    assert "--platform" in command
+    assert "macosx_12_0_arm64" in command
+    assert "--only-binary=:all:" in command
+    assert "--abi" in command
+    assert "cp312" in command
+    assert "abi3" in command
+    assert str(wheel_path) + "[recommended]" in command
+
+
+def test_cross_platform_seed_wheel_commands_include_pure_python_sources(tmp_path: Path) -> None:
+    module = load_script()
+    package_dir = tmp_path / "packages"
+
+    commands = module.cross_platform_seed_wheel_commands(package_dir, "recommended")
+
+    assert commands == [
+        [sys.executable, "-m", "pip", "wheel", "--wheel-dir", str(package_dir), "jieba>=0.42"]
+    ]
+    assert module.cross_platform_seed_wheel_commands(package_dir, "core") == []
+
+
+def test_release_wheel_allows_router_provenance_markdown() -> None:
+    module = load_script()
+    provenance = module.ROUTER_PROVENANCE_WHEEL_PATH
+    pptx_reference = "opensquilla/skills/bundled/pptx/references/python_pptx.md"
+    unrelated_skill_reference = (
+        "opensquilla/skills/bundled/example/references/private-notes.md"
+    )
+    unrelated_router_doc = (
+        "opensquilla/contrib/squilla_router/models/v4.2_phase3_inference/README.md"
+    )
+
+    violations = module.forbidden_release_wheel_entries(
+        (
+            provenance,
+            unrelated_router_doc,
+            "opensquilla/skills/bundled/example/SKILL.md",
+            pptx_reference,
+            unrelated_skill_reference,
+        )
+    )
+
+    assert provenance not in violations
+    assert "opensquilla/skills/bundled/example/SKILL.md" not in violations
+    assert pptx_reference not in violations
+    assert unrelated_router_doc in violations
+    assert unrelated_skill_reference in violations
+
+
+def test_required_router_assets_include_provenance_and_manifest() -> None:
+    module = load_script()
+
+    assert "v4.2_phase3_inference/PROVENANCE.md" in module.ROUTER_ASSET_RELS
+    assert "v4.2_phase3_inference/artifact_manifest.json" in module.ROUTER_ASSET_RELS
+
+
+def test_project_release_metadata_avoids_internal_repository_markers() -> None:
+    for rel_path in ("pyproject.toml", "README.release.md", "LICENSE"):
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        for marker in INTERNAL_RELEASE_MARKERS:
+            assert marker not in text
+
+
+def test_public_release_docs_avoid_private_kol_language() -> None:
+    for rel_path in ("README.md",):
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8").lower()
+        assert "kol" not in text
+        assert "private" not in text
+
+
+def test_release_wheel_content_scanner_flags_internal_markers(tmp_path: Path) -> None:
+    module = load_script()
+    wheel_path = tmp_path / "opensquilla-0.1.0-py3-none-any.whl"
+
+    with ZipFile(wheel_path, "w") as archive:
+        archive.writestr("opensquilla/__init__.py", "__version__ = '0.1.0'\n")
+        archive.writestr(
+            "opensquilla-0.1.0.dist-info/METADATA",
+            "Project-URL: Repository, https://github.com/Token-Rhythm/opensquilla\n",
+        )
+
+    assert module.forbidden_release_text_hits(wheel_path) == [
+        "opensquilla-0.1.0.dist-info/METADATA: Token-Rhythm",
+        "opensquilla-0.1.0.dist-info/METADATA: github.com/Token-Rhythm/opensquilla",
+    ]
+
+
+def test_install_scripts_install_from_local_wheelhouse_and_run_onboarding() -> None:
+    module = load_script()
+
+    sh_script = module.render_install_sh(
+        wheel_name="opensquilla-0.1.0-py3-none-any.whl",
+        profile="recommended",
+        python_major=3,
+        python_minor=12,
+    )
+    ps_script = module.render_install_ps1(
+        wheel_name="opensquilla-0.1.0-py3-none-any.whl",
+        profile="recommended",
+        python_major=3,
+        python_minor=12,
+    )
+
+    assert 'PACKAGE_DIR="${SCRIPT_DIR}/packages"' in sh_script
+    assert 'REQUIRED_PYTHON_MINOR=12' in sh_script
+    assert "uv tool install" in sh_script
+    assert '--find-links "${PACKAGE_DIR}"' in sh_script
+    assert '"${PACKAGE_DIR}/opensquilla-0.1.0-py3-none-any.whl[recommended]"' in sh_script
+    assert '"${OPENSQUILLA_BIN}" onboard --if-needed' in sh_script
+    assert "opensquilla gateway run" in sh_script
+
+    assert "$PackageDir = Join-Path $ScriptDir 'packages'" in ps_script
+    assert "$RequiredPythonMinor = 12" in ps_script
+    assert "uv tool install" in ps_script
+    assert "--find-links" in ps_script
+    assert "opensquilla-0.1.0-py3-none-any.whl[recommended]" in ps_script
+    assert "& $OpenSquillaBin onboard --if-needed" in ps_script
+    assert "opensquilla gateway run" in ps_script
+
+
+def test_start_scripts_use_bundled_python_runtime() -> None:
+    module = load_script()
+
+    sh_script = module.render_start_sh()
+    ps_script = module.render_start_ps1()
+
+    assert sh_script.startswith('#!/bin/sh\nif [ -z "${BASH_VERSION:-}" ]; then')
+    assert 'exec /usr/bin/env bash "$0" "$@"' in sh_script
+    assert 'PYTHON_BIN="${SCRIPT_DIR}/runtime/python/bin/python3"' in sh_script
+    assert 'VENV_DIR="${SCRIPT_DIR}/.venv"' in sh_script
+    assert 'if [[ -z "${OPENSQUILLA_GATEWAY_CONFIG_PATH:-}" ]]; then' in sh_script
+    assert (
+        'export OPENSQUILLA_GATEWAY_CONFIG_PATH="${SCRIPT_DIR}/.opensquilla/config.toml"'
+        in sh_script
+    )
+    assert (
+        'if [[ -z "${OPENSQUILLA_LLM_API_KEY:-}" && -n "${OPENROUTER_API_KEY:-}" ]]; then'
+        in sh_script
+    )
+    assert 'export OPENSQUILLA_STATE_DIR="${SCRIPT_DIR}/.opensquilla"' in sh_script
+    assert '"${PYTHON_BIN}" -m venv "${VENV_DIR}"' in sh_script
+    assert '"${VENV_DIR}/bin/python" -m pip install' in sh_script
+    assert '"${OPENSQUILLA_BIN}" onboard --if-needed' in sh_script
+    assert '"${OPENSQUILLA_BIN}" gateway run' in sh_script
+
+    assert "$PythonBin = Join-Path $ScriptDir 'runtime\\python\\python.exe'" in ps_script
+    assert "$VenvDir = Join-Path $VenvRoot $ReleaseId" in ps_script
+    assert "$env:LOCALAPPDATA" in ps_script
+    assert "$env:OPENSQUILLA_GATEWAY_CONFIG_PATH = Join-Path $ConfigDir 'config.toml'" in ps_script
+    assert "$env:OPENSQUILLA_LLM_API_KEY = $env:OPENROUTER_API_KEY" in ps_script
+    assert "$env:OPENSQUILLA_STATE_DIR = Join-Path $ScriptDir '.opensquilla'" in ps_script
+    assert "& $PythonBin -m venv $VenvDir" in ps_script
+    assert "& $VenvPython -m pip install" in ps_script
+    assert "& $OpenSquillaBin onboard --if-needed" in ps_script
+    assert "& $OpenSquillaBin gateway run" in ps_script
+
+
+def test_install_script_reexecs_under_bash_before_pipefail() -> None:
+    module = load_script()
+
+    script = module.render_install_sh(
+        wheel_name="opensquilla-0.1.0-py3-none-any.whl",
+        profile="recommended",
+        python_major=3,
+        python_minor=12,
+    )
+
+    assert script.startswith('#!/bin/sh\nif [ -z "${BASH_VERSION:-}" ]; then')
+    assert 'exec /usr/bin/env bash "$0" "$@"' in script
+    assert script.index('exec /usr/bin/env bash "$0" "$@"') < script.index(
+        "set -euo pipefail"
+    )
+
+
+def test_render_readme_is_platform_specific_for_windows_portable() -> None:
+    module = load_script()
+
+    readme = module.render_readme(
+        app_version="0.1.0",
+        profile="recommended",
+        platform_tag="windows-x64",
+        python_major=3,
+        python_minor=12,
+        portable=True,
+    )
+
+    assert "## Windows PowerShell" in readme
+    assert ".\\start.ps1" in readme
+    assert "## macOS / Linux" not in readme
+    assert "bash start.sh" not in readme
+    assert "Python is bundled in this zip." in readme
+
+
+def test_render_readme_is_platform_specific_for_macos_portable() -> None:
+    module = load_script()
+
+    readme = module.render_readme(
+        app_version="0.1.0",
+        profile="recommended",
+        platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+        portable=True,
+    )
+
+    assert "## macOS / Linux" in readme
+    assert "bash start.sh" in readme
+    assert "## Windows PowerShell" not in readme
+    assert ".\\start.ps1" not in readme
+    assert "Python is bundled in this zip." in readme
+
+
+def test_prepare_release_tree_writes_user_surface_and_manifest(tmp_path: Path) -> None:
+    module = load_script()
+    release_root = tmp_path / "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse"
+    wheel_path = tmp_path / "opensquilla-0.1.0-py3-none-any.whl"
+    wheel_path.write_bytes(b"wheel")
+
+    bundled_wheel = module.prepare_release_tree(
+        release_root,
+        wheel_path,
+        app_version="0.1.0",
+        profile="recommended",
+        platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+        include_router_assets=True,
+        portable=False,
+        runtime_release="",
+        runtime_asset="",
+    )
+
+    assert bundled_wheel == release_root / "packages" / wheel_path.name
+    assert bundled_wheel.read_bytes() == b"wheel"
+    assert (release_root / "README.md").is_file()
+    assert (release_root / "install.sh").is_file()
+    assert (release_root / "install.ps1").is_file()
+    assert (release_root / "LICENSE").is_file()
+    assert (release_root / "THIRD_PARTY_NOTICES.md").is_file()
+    assert not (release_root / "runtime").exists()
+    assert not (release_root / "start.sh").exists()
+    assert not (release_root / "start.ps1").exists()
+    assert (release_root / "manifest.json").is_file()
+    assert_executable_on_posix(release_root / "install.sh")
+    readme = (release_root / "README.md").read_text(encoding="utf-8")
+    manifest = (release_root / "manifest.json").read_text(encoding="utf-8")
+    assert "bash install.sh" in readme
+    assert ".\\install.ps1" not in readme
+    assert "Build target:" in readme
+    assert "Configuration" not in readme
+    assert "Notes" not in readme
+    assert "Git repository" not in readme
+    assert '"platform_tag": "macos-arm64"' in manifest
+    assert '"profile": "recommended"' in manifest
+    assert '"include_router_assets": true' in manifest
+
+
+def test_prepare_portable_release_tree_includes_runtime_and_start_scripts(tmp_path: Path) -> None:
+    module = load_script()
+    release_root = tmp_path / "OpenSquilla-0.1.0-macos-arm64-py312-recommended-portable"
+    wheel_path = tmp_path / "opensquilla-0.1.0-py3-none-any.whl"
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "bin").mkdir(parents=True)
+    (runtime_root / "bin" / "python3").write_text("python", encoding="utf-8")
+    wheel_path.write_bytes(b"wheel")
+
+    module.prepare_release_tree(
+        release_root,
+        wheel_path,
+        app_version="0.1.0",
+        profile="recommended",
+        platform_tag="macos-arm64",
+        python_major=3,
+        python_minor=12,
+        include_router_assets=True,
+        portable=True,
+        runtime_release="20260414",
+        runtime_asset="cpython-3.12.13+20260414-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        runtime_root=runtime_root,
+    )
+
+    assert (release_root / "runtime" / "python" / "bin" / "python3").is_file()
+    assert (release_root / "start.sh").is_file()
+    assert (release_root / "start.ps1").is_file()
+    assert (release_root / "LICENSE").is_file()
+    assert (release_root / "THIRD_PARTY_NOTICES.md").is_file()
+    assert not (release_root / "install.sh").exists()
+    assert not (release_root / "install.ps1").exists()
+    assert_executable_on_posix(release_root / "start.sh")
+    manifest = (release_root / "manifest.json").read_text(encoding="utf-8")
+    assert '"portable": true' in manifest
+    assert '"runtime_release": "20260414"' in manifest
+    assert "install_only_stripped.tar.gz" in manifest
+
+
+def test_create_zip_contains_release_directory_and_preserves_install_mode(tmp_path: Path) -> None:
+    module = load_script()
+    release_root = tmp_path / "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse"
+    packages = release_root / "packages"
+    packages.mkdir(parents=True)
+    (packages / "opensquilla-0.1.0-py3-none-any.whl").write_bytes(b"wheel")
+    install_script = release_root / "install.sh"
+    install_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    install_script.chmod(0o755)
+    (release_root / "install.ps1").write_text("Write-Host ok\n", encoding="utf-8")
+    (release_root / "README.md").write_text("readme\n", encoding="utf-8")
+    (release_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    zip_path = tmp_path / "release.zip"
+
+    module.create_zip(release_root, zip_path)
+
+    with ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+        install_info = archive.getinfo(
+            "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/install.sh"
+        )
+
+    assert names == {
+        "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/README.md",
+        "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/install.ps1",
+        "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/install.sh",
+        "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/manifest.json",
+        "OpenSquilla-0.1.0-macos-arm64-py312-recommended-wheelhouse/packages/opensquilla-0.1.0-py3-none-any.whl",
+    }
+    assert stat.S_IMODE(install_info.external_attr >> 16) & stat.S_IXUSR
+
+
+def test_create_zip_preserves_runtime_executable_mode(tmp_path: Path) -> None:
+    module = load_script()
+    release_root = tmp_path / "OpenSquilla-0.1.0-macos-arm64-py312-recommended-portable"
+    python_bin = release_root / "runtime" / "python" / "bin" / "python3"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.write_bytes(b"python")
+    python_bin.chmod(0o755)
+    (release_root / "start.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (release_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    zip_path = tmp_path / "release.zip"
+
+    module.create_zip(release_root, zip_path)
+
+    with ZipFile(zip_path) as archive:
+        python_info = archive.getinfo(
+            "OpenSquilla-0.1.0-macos-arm64-py312-recommended-portable/"
+            "runtime/python/bin/python3"
+        )
+
+    assert stat.S_IMODE(python_info.external_attr >> 16) & stat.S_IXUSR
+
+
+def test_write_sha256s_records_all_release_zips(tmp_path: Path) -> None:
+    module = load_script()
+    first = tmp_path / "OpenSquilla-0.1.0-linux-x64-py312-recommended-portable.zip"
+    second = tmp_path / "OpenSquilla-0.1.0-linux-x64-py312-recommended-wheelhouse.zip"
+    first.write_bytes(b"portable")
+    second.write_bytes(b"wheelhouse")
+
+    checksum_path = module.write_sha256s((second, first), tmp_path / "SHA256SUMS")
+
+    expected = [
+        f"{module.sha256_digest(first)}  {first.name}",
+        f"{module.sha256_digest(second)}  {second.name}",
+    ]
+    assert checksum_path == tmp_path / "SHA256SUMS"
+    assert checksum_path.read_text(encoding="utf-8").splitlines() == expected
+
+
+def test_release_workflow_builds_portable_and_wheelhouse_together() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "bundle_python_runtime:" not in workflow
+    assert "platform_tag: windows-x64" in workflow
+    assert "platform_tag: macos-arm64" in workflow
+    assert "platform_tag: linux-x64" in workflow
+    assert "for mode in portable wheelhouse" in workflow
+    assert "--bundle-python-runtime" in workflow
+    assert "SHA256SUMS" in workflow
+    assert "manifest.version" in workflow
+    assert "GH_REPO: ${{ github.repository }}" in workflow
+    assert "dist/*.zip dist/*.zip.sha256 dist/SHA256SUMS" in workflow
+
+
+def test_release_workflow_publishes_from_version_tags() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "tags:" in workflow
+    assert '- "v*"' in workflow
+    assert "contents: write" in workflow
+    assert "RELEASE_TAG:" in workflow
+    assert "RELEASE_PROFILE:" in workflow
+    assert "github.ref_name" in workflow
+    assert "github.event.inputs.tag" in workflow
+    assert "github.event_name == 'push' || github.event.inputs.tag != ''" in workflow
+    assert "TAG: ${{ env.RELEASE_TAG }}" in workflow

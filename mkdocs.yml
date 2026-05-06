@@ -1,0 +1,51 @@
+site_name: opensquilla
+site_description: >-
+  Microkernel Python agent runtime with MCP-native tools and multi-channel
+  messaging. Operator docs are on hold during fast iteration; this site
+  carries only ADRs, engineering policy, and reference indexes.
+site_url: https://token-rhythm.github.io/opensquilla/
+repo_url: https://github.com/Token-Rhythm/opensquilla
+repo_name: Token-Rhythm/opensquilla
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# The operator-facing site is on hold during the current iteration cycle.
+# The 2026-04 snapshot under docs/snapshots/2026-04/ is intentionally NOT in
+# the nav and is treated as a frozen design archive — not a maintained
+# manual. Re-promote pages out of the snapshot only after the runtime has
+# stabilized enough to keep them current.
+strict: false
+
+validation:
+  links:
+    not_found: info
+    anchors: info
+
+theme:
+  name: material
+  features:
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+  palette:
+    scheme: default
+
+nav:
+  - Home: index.md
+  - Engineering policy: engineering-policy.md
+  - ADRs: adr/README.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - tables
+
+# Pages outside the nav (including everything under docs/snapshots/) live in
+# docs/ and are NOT promoted to the site nav. They remain referenceable via
+# internal markdown links but are not part of the operator-facing surface.

@@ -1,0 +1,224 @@
+name: Wheelhouse Zip Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Runtime profile to bundle
+        required: true
+        default: recommended
+        type: choice
+        options:
+          - recommended
+          - core
+      tag:
+        description: Optional existing tag to upload artifacts to
+        required: false
+        default: ""
+      python_runtime_release:
+        description: python-build-standalone release tag
+        required: true
+        default: "20260414"
+      python_runtime_version:
+        description: Full CPython runtime version from python-build-standalone
+        required: true
+        default: "3.12.13"
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_PROFILE: ${{ github.event.inputs.profile || 'recommended' }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
+  PYTHON_RUNTIME_RELEASE: ${{ github.event.inputs.python_runtime_release || '20260414' }}
+  PYTHON_RUNTIME_VERSION: ${{ github.event.inputs.python_runtime_version || '3.12.13' }}
+
+jobs:
+  build-wheelhouse:
+    name: Build ${{ matrix.platform_tag }} release zips
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_tag: windows-x64
+          - os: macos-latest
+            platform_tag: macos-arm64
+          - os: ubuntu-latest
+            platform_tag: linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          ref: ${{ env.RELEASE_TAG != '' && env.RELEASE_TAG || github.ref }}
+
+      - name: Hydrate router assets
+        shell: bash
+        run: git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Check tag version
+        if: ${{ github.event_name == 'push' || github.event.inputs.tag != '' }}
+        shell: bash
+        run: |
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(pyproject["project"]["version"])
+          PY
+          )"
+          tag="${RELEASE_TAG}"
+          tag_version="${tag#v}"
+          if [[ "${tag_version}" != "${version}" ]]; then
+            echo "Tag ${tag} does not match project version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Test release builder
+        run: uv run --extra dev pytest tests/test_scripts/test_build_wheelhouse_zip.py
+
+      - name: Build portable and wheelhouse zips
+        shell: bash
+        run: |
+          rm -rf dist build/wheelhouse-zip
+          for mode in portable wheelhouse; do
+            args=(
+              --profile "${RELEASE_PROFILE}"
+              --platform-tag "${{ matrix.platform_tag }}"
+              --python-runtime-release "${PYTHON_RUNTIME_RELEASE}"
+              --python-runtime-version "${PYTHON_RUNTIME_VERSION}"
+            )
+            if [[ "${mode}" == "portable" ]]; then
+              args+=(--bundle-python-runtime)
+            fi
+            python scripts/build_wheelhouse_zip.py "${args[@]}"
+          done
+
+      - name: Smoke release artifacts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import tomllib
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          zips = sorted(Path("dist").glob("*.zip"))
+          assert len(zips) == 2, f"expected portable and wheelhouse zips, got {len(zips)}"
+          checksum_lines = []
+
+          for zip_path in zips:
+              digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+              checksum_lines.append(f"{digest}  {zip_path.name}")
+              per_zip = Path(str(zip_path) + ".sha256")
+              assert per_zip.is_file(), f"missing checksum for {zip_path.name}"
+              assert per_zip.read_text(encoding="utf-8").strip() == checksum_lines[-1]
+
+              with ZipFile(zip_path) as archive:
+                  names = set(archive.namelist())
+                  root = zip_path.stem + "/"
+                  manifest = json.loads(archive.read(root + "manifest.json"))
+                  assert manifest["version"] == version, "manifest.version must match project version"
+                  assert manifest["platform_tag"] == "${{ matrix.platform_tag }}"
+                  assert root + "LICENSE" in names
+                  assert root + "THIRD_PARTY_NOTICES.md" in names
+                  assert root + "README.md" in names
+                  assert root + "packages/" + manifest["wheel_name"] in names
+
+                  if manifest["portable"]:
+                      assert root + "start.sh" in names
+                      assert root + "start.ps1" in names
+                      assert root + "install.sh" not in names
+                      assert root + "install.ps1" not in names
+                      assert any(name.startswith(root + "runtime/python/") for name in names)
+                  else:
+                      assert root + "install.sh" in names
+                      assert root + "install.ps1" in names
+                      assert root + "start.sh" not in names
+                      assert root + "start.ps1" not in names
+                      assert not any(name.startswith(root + "runtime/") for name in names)
+
+          sha256s = Path("dist/SHA256SUMS")
+          assert sha256s.is_file(), "missing aggregate SHA256SUMS"
+          assert sha256s.read_text(encoding="utf-8").splitlines() == checksum_lines
+          PY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensquilla-zips-${{ matrix.platform_tag }}-${{ env.RELEASE_PROFILE }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+
+  publish-release:
+    name: Aggregate release zips
+    needs: build-wheelhouse
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: opensquilla-zips-*-${{ env.RELEASE_PROFILE }}
+          path: dist
+          merge-multiple: true
+
+      - name: Build aggregate SHA256SUMS
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          zips = sorted(Path("dist").glob("*.zip"))
+          assert zips, "no release zips were downloaded"
+          lines = []
+          for zip_path in zips:
+              digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+              expected = f"{digest}  {zip_path.name}"
+              per_zip = Path(str(zip_path) + ".sha256")
+              assert per_zip.is_file(), f"missing checksum for {zip_path.name}"
+              assert per_zip.read_text(encoding="utf-8").strip() == expected
+              lines.append(expected)
+          Path("dist/SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload aggregate workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensquilla-release-zips-${{ env.RELEASE_PROFILE }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/SHA256SUMS
+
+      - name: Upload to GitHub Release
+        if: ${{ github.event_name == 'push' || github.event.inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ env.RELEASE_TAG }}
+        shell: bash
+        run: |
+          gh release view "${TAG}" >/dev/null 2>&1 || \
+            gh release create "${TAG}" --draft --verify-tag --title "${TAG}"
+          gh release upload "${TAG}" dist/*.zip dist/*.zip.sha256 dist/SHA256SUMS --clobber

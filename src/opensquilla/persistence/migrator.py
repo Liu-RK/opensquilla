@@ -1,0 +1,61 @@
+"""Schema migrator — thin wrapper over yoyo-migrations.
+
+See ADR.md line 48 for the alembic rejection rationale and
+`docs/architecture/schema-migration.md` for the per-version up/down policy
+and boot-time run order.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+from yoyo import get_backend, read_migrations
+
+log = logging.getLogger(__name__)
+
+
+def _to_yoyo_url(db_url: str) -> str:
+    """Normalise a local SQLite path or URL into a yoyo-compatible URL.
+
+    Accepts: ``path/to.db``, ``:memory:``, or a pre-formed ``sqlite:///…`` URL.
+    Returns a URL yoyo ``get_backend`` understands.
+    """
+    if "://" in db_url:
+        return db_url
+    if db_url == ":memory:":
+        return "sqlite:///:memory:"
+    # bare filesystem path — normalise to absolute so yoyo opens the same db
+    # regardless of the worker cwd.
+    return "sqlite:///" + os.path.abspath(db_url)
+
+
+def apply_pending(db_url: str, migrations_dir: Path) -> list[str]:
+    """Apply every migration in *migrations_dir* not yet recorded in *db_url*.
+
+    Returns the ordered list of migration ids that were applied in this call.
+    If no migrations are pending, returns ``[]``. Callers running at boot
+    should log the return value for audit.
+    """
+    path = Path(migrations_dir)
+    if not path.is_dir():
+        log.warning("migrator.missing_dir", extra={"migrations_dir": str(path)})
+        return []
+
+    backend = get_backend(_to_yoyo_url(db_url))
+    try:
+        migrations = read_migrations(str(path))
+        pending = backend.to_apply(migrations)
+        ids = [m.id for m in pending]
+        if not ids:
+            return []
+
+        with backend.lock():
+            backend.apply_migrations(pending)
+        log.info("migrator.applied", extra={"count": len(ids), "ids": ids})
+        return ids
+    finally:
+        close = getattr(backend, "close", None)
+        if close is not None:
+            close()

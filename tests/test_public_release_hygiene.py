@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import re
+import subprocess
+import tomllib
+from pathlib import Path
+
+# Real secret-shape detectors. Each pattern matches a shipped vendor key
+# format so an accidentally-committed credential is caught at CI time
+# before the public tree is published.
+SECRET_PATTERNS = {
+    "openrouter": re.compile(r"sk-or-v1-[A-Za-z0-9_-]{32,}"),
+    "brave": re.compile(r"\bBSA[A-Za-z0-9_-]{20,}\b"),
+    "github_pat": re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b"),
+    "private_key": re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----"),
+}
+
+# Generic developer-machine path detectors. Matches any Windows
+# ``C:\Users\<name>`` and any ``D:\<top-level>`` path so a hard-coded
+# local checkout location cannot survive into the public tree, without
+# embedding any specific contributor's username.
+LOCAL_PATH_PATTERNS = {
+    "windows_user_path": re.compile(r"C:\\Users\\[A-Za-z0-9_.-]+"),
+    "windows_drive_d_repo": re.compile(r"\bD:\\[A-Za-z0-9_.-]+\\"),
+    "posix_user_home_path": re.compile(r"/Users/[A-Za-z0-9_.-]{2,}/"),
+}
+
+# Generic placeholder names that the wheelhouse build script's release
+# denylist must reference. These names are intentionally generic so the
+# public denylist reads as a forward-looking forbidden-content policy
+# rather than a confession of historical artifact names.
+PUBLIC_RELEASE_MARKER_NAMES = (
+    "INTERNAL_RELEASE_NOTE.md",
+    ".internal/evidence",
+    "LOCAL_AGENT_NOTES.md",
+)
+
+
+def _tracked_text_files() -> list[Path]:
+    raw = subprocess.check_output(["git", "ls-files"], text=True)
+    paths: list[Path] = []
+    for rel in raw.splitlines():
+        path = Path(rel)
+        if path.suffix.lower() in {
+            ".bin", ".onnx", ".pkl", ".joblib", ".woff2",
+            ".png", ".jpg", ".jpeg", ".gif", ".ico",
+        }:
+            continue
+        paths.append(path)
+    return paths
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def test_tracked_public_files_do_not_contain_real_secret_shapes_or_local_paths() -> None:
+    violations: list[str] = []
+    self_path = Path(__file__).relative_to(Path.cwd()).as_posix()
+    for path in _tracked_text_files():
+        # Skip this file so the regexes themselves do not trigger the test.
+        if path.as_posix() == self_path:
+            continue
+        text = _read_text(path)
+        for name, pattern in SECRET_PATTERNS.items():
+            if pattern.search(text):
+                violations.append(f"{path}: {name}")
+        for name, pattern in LOCAL_PATH_PATTERNS.items():
+            if pattern.search(text):
+                violations.append(f"{path}: {name}")
+
+    assert violations == []
+
+
+def test_release_text_marker_policy_uses_public_internal_fixture_names() -> None:
+    script = Path("scripts/build_wheelhouse_zip.py").read_text(encoding="utf-8")
+
+    for marker in PUBLIC_RELEASE_MARKER_NAMES:
+        assert marker in script
+
+
+def test_private_test_suites_are_not_tracked_in_public_repository() -> None:
+    tracked = {path.as_posix() for path in _tracked_text_files()}
+
+    assert not any(path.startswith("tests/_private/") for path in tracked)
+    assert not any(path.startswith(".omx/private-golden/") for path in tracked)
+
+
+def test_gitignore_keeps_private_live_artifacts_out_of_public_tree() -> None:
+    ignore_text = Path(".gitignore").read_text(encoding="utf-8")
+
+    assert "/tests/_private/" in ignore_text
+    assert "tests/functional/reports/" in ignore_text
+    assert ".omx/" in ignore_text
+
+
+def test_pytest_default_collection_excludes_private_agent_artifacts() -> None:
+    config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    pytest_options = config["tool"]["pytest"]["ini_options"]
+    excluded = set(pytest_options.get("norecursedirs", []))
+
+    assert {"tests/_private", ".omx", ".codex", ".claude"} <= excluded
+
+
+def test_public_testing_guidance_documents_the_private_boundary() -> None:
+    required_docs = [
+        Path("CONTRIBUTING.md"),
+        Path("docs/testing.md"),
+        Path(".github/pull_request_template.md"),
+    ]
+
+    for path in required_docs:
+        assert path.is_file(), f"missing testing guidance: {path}"
+
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in required_docs)
+    required_phrases = [
+        "offline",
+        "credential-free",
+        "tests/_private/",
+        "must not be committed",
+        "Live Release E2E",
+    ]
+
+    for phrase in required_phrases:
+        assert phrase in combined
+
+
+def test_public_docs_do_not_use_key_shaped_placeholders() -> None:
+    violations: list[str] = []
+    placeholder_pattern = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
+    for path in [Path("README.md"), Path("CONTRIBUTING.md"), Path("docs/testing.md")]:
+        text = _read_text(path)
+        if placeholder_pattern.search(text):
+            violations.append(path.as_posix())
+
+    assert violations == []
+
+
+def test_tracked_sources_do_not_keep_agent_revision_markers() -> None:
+    forbidden_markers = ("codex-revised", "claude-revised")
+    violations: list[str] = []
+    self_path = Path(__file__).relative_to(Path.cwd()).as_posix()
+    for path in _tracked_text_files():
+        if path.as_posix() == self_path:
+            continue
+        text = _read_text(path).lower()
+        for marker in forbidden_markers:
+            if marker in text:
+                violations.append(f"{path}: {marker}")
+
+    assert violations == []
+
+
+def test_gitignore_does_not_hide_tracked_release_files() -> None:
+    raw = subprocess.check_output(
+        ["git", "ls-files", "-c", "-i", "--exclude-standard"],
+        text=True,
+    )
+    ignored_tracked = [line for line in raw.splitlines() if line.strip()]
+
+    assert ignored_tracked == []

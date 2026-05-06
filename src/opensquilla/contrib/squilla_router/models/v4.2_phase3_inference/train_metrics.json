@@ -1,0 +1,32 @@
+{
+  "main_head": {
+    "test_accuracy": 0.9068122724908997
+  },
+  "aux_head": {
+    "test_accuracy": 0.9719188767550702
+  },
+  "split_sizes": {
+    "train": 76073,
+    "val": 9502,
+    "test": 9615
+  },
+  "bge": {
+    "model_name": "BAAI/bge-small-zh-v1.5",
+    "backend": "onnx"
+  },
+  "class_weights": {
+    "main": {
+      "0": 0.7,
+      "1": 1.0,
+      "2": 1.8,
+      "3": 2.2
+    },
+    "aux": {
+      "0": 1.0,
+      "1": 0.6,
+      "2": 1.5,
+      "3": 1.2
+    }
+  },
+  "seed": 42
+}

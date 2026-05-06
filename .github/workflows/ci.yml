@@ -1,0 +1,80 @@
+name: CI
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, test, and build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.12']
+
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      PYTHONPATH: ${{ github.workspace }}
+      OPENSQUILLA_STATE_DIR: ${{ runner.temp }}/opensquilla-state
+      OPENSQUILLA_LOG_DIR: ${{ runner.temp }}/opensquilla-logs
+      OPENSQUILLA_TURN_CALL_LOG: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        shell: bash
+        run: uv sync --extra dev --extra recommended --frozen
+
+      - name: Lint
+        shell: bash
+        run: uv run ruff check src tests
+
+      - name: Test
+        shell: bash
+        run: uv run pytest tests -q
+
+      - name: Verify metric counter names unchanged
+        shell: bash
+        run: |
+          set -e
+          for name in opensquilla_queue_depth in_flight_turns_total turn_cancellations_total queue_full_errors_total; do
+            count=$(grep -c "$name" src/opensquilla/gateway/task_runtime.py || echo 0)
+            if [ "$count" -lt 1 ]; then
+              echo "ERROR: metric name '$name' missing from task_runtime.py"
+              exit 1
+            fi
+          done
+
+      - name: tracemalloc leak smoke test
+        shell: bash
+        run: |
+          uv run python -m pytest tests/test_gateway/test_task_runtime_terminal_cleanup.py::test_no_leak_under_load -v
+
+      - name: Build wheel
+        shell: bash
+        run: uv build --wheel

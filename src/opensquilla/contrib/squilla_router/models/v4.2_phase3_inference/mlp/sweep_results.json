@@ -1,0 +1,479 @@
+{
+  "lightgbm_only_l2": {
+    "n": 640,
+    "accuracy": 0.4140625,
+    "under_routing_rate": 0.3171875,
+    "over_routing_rate": 0.26875
+  },
+  "best_run_uncalibrated": {
+    "config": {
+      "hidden": 384,
+      "dropout": 0.4,
+      "weight_decay": 0.01,
+      "lr": 0.001,
+      "label_smoothing": 0.1
+    },
+    "best_val_acc": 0.7759218215942383,
+    "best_epoch": 30,
+    "mlp_only_l2": {
+      "n": 640,
+      "accuracy": 0.4734375,
+      "under_routing_rate": 0.2859375,
+      "over_routing_rate": 0.240625
+    },
+    "best_global_alpha": {
+      "alpha": 0.30000000000000004,
+      "n": 640,
+      "accuracy": 0.509375,
+      "under_routing_rate": 0.2859375,
+      "over_routing_rate": 0.2046875
+    },
+    "delta_pp_vs_lgbm": 9.531250000000002
+  },
+  "calibration_T": 0.8092449307441711,
+  "global_alpha_calibrated": {
+    "alpha": 0.35000000000000003,
+    "n": 640,
+    "accuracy": 0.509375,
+    "under_routing_rate": 0.2875,
+    "over_routing_rate": 0.203125
+  },
+  "per_class_alpha": {
+    "alphas": [
+      0.5,
+      0.05,
+      0.5,
+      0.8500000000000001
+    ],
+    "n": 640,
+    "accuracy": 0.51875,
+    "under_routing_rate": 0.2828125,
+    "over_routing_rate": 0.1984375,
+    "history": [
+      {
+        "alphas": [
+          0.5,
+          0.5,
+          0.5,
+          0.5
+        ],
+        "acc": 0.4859375
+      },
+      {
+        "alphas": [
+          0.0,
+          0.5,
+          0.5,
+          0.5
+        ],
+        "acc": 0.5
+      },
+      {
+        "alphas": [
+          0.0,
+          0.05,
+          0.5,
+          0.5
+        ],
+        "acc": 0.509375
+      },
+      {
+        "alphas": [
+          0.0,
+          0.05,
+          0.5,
+          0.5
+        ],
+        "acc": 0.509375
+      },
+      {
+        "alphas": [
+          0.0,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.5140625
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      },
+      {
+        "alphas": [
+          0.5,
+          0.05,
+          0.5,
+          0.8500000000000001
+        ],
+        "acc": 0.51875
+      }
+    ]
+  },
+  "all_runs": [
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.2,
+        "weight_decay": 0.003,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7772875428199768,
+      "best_epoch": 25,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4734375,
+        "under_routing_rate": 0.290625,
+        "over_routing_rate": 0.2359375
+      },
+      "best_global_alpha": {
+        "alpha": 0.15000000000000002,
+        "n": 640,
+        "accuracy": 0.49375,
+        "under_routing_rate": 0.29375,
+        "over_routing_rate": 0.2125
+      },
+      "delta_pp_vs_lgbm": 7.968750000000002
+    },
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.2,
+        "weight_decay": 0.005,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7814896702766418,
+      "best_epoch": 25,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4421875,
+        "under_routing_rate": 0.284375,
+        "over_routing_rate": 0.2734375
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.478125,
+        "under_routing_rate": 0.2875,
+        "over_routing_rate": 0.234375
+      },
+      "delta_pp_vs_lgbm": 6.406250000000002
+    },
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.2,
+        "weight_decay": 0.01,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7777077555656433,
+      "best_epoch": 30,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4265625,
+        "under_routing_rate": 0.2859375,
+        "over_routing_rate": 0.2875
+      },
+      "best_global_alpha": {
+        "alpha": 0.5,
+        "n": 640,
+        "accuracy": 0.465625,
+        "under_routing_rate": 0.3015625,
+        "over_routing_rate": 0.2328125
+      },
+      "delta_pp_vs_lgbm": 5.156250000000001
+    },
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.4,
+        "weight_decay": 0.003,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7543859481811523,
+      "best_epoch": 16,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4515625,
+        "under_routing_rate": 0.275,
+        "over_routing_rate": 0.2734375
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.4828125,
+        "under_routing_rate": 0.2890625,
+        "over_routing_rate": 0.228125
+      },
+      "delta_pp_vs_lgbm": 6.874999999999998
+    },
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.4,
+        "weight_decay": 0.005,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7863221168518066,
+      "best_epoch": 47,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4609375,
+        "under_routing_rate": 0.3046875,
+        "over_routing_rate": 0.234375
+      },
+      "best_global_alpha": {
+        "alpha": 0.4,
+        "n": 640,
+        "accuracy": 0.478125,
+        "under_routing_rate": 0.309375,
+        "over_routing_rate": 0.2125
+      },
+      "delta_pp_vs_lgbm": 6.406250000000002
+    },
+    {
+      "config": {
+        "hidden": 256,
+        "dropout": 0.4,
+        "weight_decay": 0.01,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7517596483230591,
+      "best_epoch": 16,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4484375,
+        "under_routing_rate": 0.25625,
+        "over_routing_rate": 0.2953125
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.478125,
+        "under_routing_rate": 0.271875,
+        "over_routing_rate": 0.25
+      },
+      "delta_pp_vs_lgbm": 6.406250000000002
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.2,
+        "weight_decay": 0.003,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7791785001754761,
+      "best_epoch": 21,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4546875,
+        "under_routing_rate": 0.290625,
+        "over_routing_rate": 0.2546875
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.4890625,
+        "under_routing_rate": 0.2734375,
+        "over_routing_rate": 0.2375
+      },
+      "delta_pp_vs_lgbm": 7.500000000000001
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.2,
+        "weight_decay": 0.005,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7797037363052368,
+      "best_epoch": 21,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4453125,
+        "under_routing_rate": 0.3109375,
+        "over_routing_rate": 0.24375
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.465625,
+        "under_routing_rate": 0.3015625,
+        "over_routing_rate": 0.2328125
+      },
+      "delta_pp_vs_lgbm": 5.156250000000001
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.2,
+        "weight_decay": 0.01,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7827503085136414,
+      "best_epoch": 21,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4265625,
+        "under_routing_rate": 0.2921875,
+        "over_routing_rate": 0.28125
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.4640625,
+        "under_routing_rate": 0.284375,
+        "over_routing_rate": 0.2515625
+      },
+      "delta_pp_vs_lgbm": 4.999999999999999
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.4,
+        "weight_decay": 0.003,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7714045643806458,
+      "best_epoch": 23,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.46875,
+        "under_routing_rate": 0.3296875,
+        "over_routing_rate": 0.2015625
+      },
+      "best_global_alpha": {
+        "alpha": 0.35000000000000003,
+        "n": 640,
+        "accuracy": 0.4796875,
+        "under_routing_rate": 0.33125,
+        "over_routing_rate": 0.1890625
+      },
+      "delta_pp_vs_lgbm": 6.562499999999999
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.4,
+        "weight_decay": 0.005,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7921000123023987,
+      "best_epoch": 48,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.459375,
+        "under_routing_rate": 0.284375,
+        "over_routing_rate": 0.25625
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.4734375,
+        "under_routing_rate": 0.2953125,
+        "over_routing_rate": 0.23125
+      },
+      "delta_pp_vs_lgbm": 5.937500000000001
+    },
+    {
+      "config": {
+        "hidden": 384,
+        "dropout": 0.4,
+        "weight_decay": 0.01,
+        "lr": 0.001,
+        "label_smoothing": 0.1
+      },
+      "best_val_acc": 0.7759218215942383,
+      "best_epoch": 30,
+      "mlp_only_l2": {
+        "n": 640,
+        "accuracy": 0.4734375,
+        "under_routing_rate": 0.2859375,
+        "over_routing_rate": 0.240625
+      },
+      "best_global_alpha": {
+        "alpha": 0.30000000000000004,
+        "n": 640,
+        "accuracy": 0.509375,
+        "under_routing_rate": 0.2859375,
+        "over_routing_rate": 0.2046875
+      },
+      "delta_pp_vs_lgbm": 9.531250000000002
+    }
+  ],
+  "data_sizes": {
+    "n_train_samples": 95190,
+    "n_l2_samples": 640,
+    "n_features": 1536
+  }
+}

@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from opensquilla.engine.cache_break_monitor import CacheBreakMonitor
+from opensquilla.provider import ChatConfig, Message, ToolDefinition, ToolInputSchema
+
+
+def _tool(name: str) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description=f"{name} tool",
+        input_schema=ToolInputSchema(properties={}),
+    )
+
+
+def test_cache_break_monitor_initializes_then_detects_attributed_drop() -> None:
+    monitor = CacheBreakMonitor(min_drop_tokens=10, min_drop_ratio=0.05)
+    first = monitor.record_prompt_state(
+        messages=[
+            Message(role="user", content="old question"),
+            Message(role="assistant", content="old answer"),
+            Message(role="user", content="current question"),
+        ],
+        tools=[_tool("search")],
+        config=ChatConfig(
+            system="stable system",
+            cache_breakpoints=[{"text": "stable system", "cache": "true"}],
+            cache_mode="auto",
+        ),
+        model="anthropic/claude-sonnet-4-6",
+    )
+
+    initial = monitor.check_response_for_cache_break("agent:main:s1", first, 5000)
+
+    assert initial.break_detected is False
+    assert initial.reason == "baseline_initialized"
+
+    second = monitor.record_prompt_state(
+        messages=[
+            Message(role="user", content="different old question"),
+            Message(role="assistant", content="old answer"),
+            Message(role="user", content="current question"),
+        ],
+        tools=[_tool("search")],
+        config=ChatConfig(
+            system="stable system",
+            cache_breakpoints=[{"text": "stable system", "cache": "true"}],
+            cache_mode="auto",
+        ),
+        model="anthropic/claude-sonnet-4-6",
+    )
+
+    report = monitor.check_response_for_cache_break("agent:main:s1", second, 100)
+
+    assert report.break_detected is True
+    assert report.reason == "cache_read_drop"
+    assert report.changed_fields == ("messages_prefix_hash",)
+    assert report.previous_cache_read_tokens == 5000
+    assert report.current_cache_read_tokens == 100
+    log_payload = report.to_log_dict()
+    assert "forensics" in log_payload
+    assert log_payload["forensics"]["previous"]["messages_prefix_item_hashes"]
+    assert log_payload["forensics"]["current"]["cache_control_field_hashes"]
+
+
+def test_cache_break_monitor_resets_baseline_after_compaction() -> None:
+    monitor = CacheBreakMonitor(min_drop_tokens=10, min_drop_ratio=0.05)
+    before = monitor.record_prompt_state(
+        messages=[Message(role="user", content="old"), Message(role="user", content="now")],
+        tools=None,
+        config=ChatConfig(system="stable system"),
+        model="model-a",
+    )
+    monitor.check_response_for_cache_break("agent:main:s1", before, 5000)
+    monitor.notify_compaction("agent:main:s1")
+
+    after = monitor.record_prompt_state(
+        messages=[
+            Message(role="assistant", content="kept"),
+            Message(role="user", content="now"),
+        ],
+        tools=None,
+        config=ChatConfig(system="stable system"),
+        model="model-a",
+    )
+
+    report = monitor.check_response_for_cache_break("agent:main:s1", after, 0)
+
+    assert report.break_detected is False
+    assert report.reason == "baseline_reset_after_compaction"
+    assert report.baseline_reset is True

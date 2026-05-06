@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from opensquilla.engine import Agent, AgentConfig
+from opensquilla.memory.flush import resolve_flush_plan
+from opensquilla.memory.protocols import MemoryToolHandler
+from opensquilla.provider import Message
+from opensquilla.tool_boundary import ToolCall, ToolResult
+
+
+def test_memory_tool_handler_protocol_uses_tool_boundary_types() -> None:
+    async def handler(call: ToolCall) -> ToolResult:
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="ok",
+        )
+
+    typed_handler: MemoryToolHandler = handler
+
+    assert typed_handler is handler
+
+
+def test_resolve_flush_plan_rotates_oversized_daily_archive(tmp_path) -> None:
+    first = resolve_flush_plan(workspace_dir=tmp_path, archive_max_bytes=5)
+    first_path = tmp_path / first.relative_path
+    first_path.parent.mkdir(parents=True)
+    first_path.write_text("123456", encoding="utf-8")
+
+    second = resolve_flush_plan(workspace_dir=tmp_path, archive_max_bytes=5)
+    assert second.relative_path.endswith("-part001.md")
+    second_path = tmp_path / second.relative_path
+    second_path.write_text("123456", encoding="utf-8")
+
+    third = resolve_flush_plan(workspace_dir=tmp_path, archive_max_bytes=5)
+    assert third.relative_path.endswith("-part002.md")
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_flush_timeout_enters_backoff_without_retrigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import opensquilla.engine.agent as agent_module
+
+    async def fake_compact_context(_request):
+        return SimpleNamespace(
+            removed_count=0,
+            summary="",
+            kept_entries=[{"role": "user", "content": "hello"}],
+        )
+
+    monkeypatch.setattr(agent_module, "compact_context", fake_compact_context)
+
+    agent = Agent(
+        provider=None,  # type: ignore[arg-type]
+        config=AgentConfig(
+            context_window_tokens=100,
+            context_overflow_threshold=0.5,
+            flush_timeout_seconds=0.01,
+            flush_backoff_initial_seconds=10.0,
+            flush_backoff_max_seconds=20.0,
+        ),
+    )
+    calls = 0
+
+    async def slow_flush(_plan, _messages):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(agent, "_run_flush", slow_flush)
+    messages = [Message(role="user", content="hello")]
+
+    try:
+        await agent._check_context_overflow(messages, 60)
+        first_backoff_until = agent._flush_backoff_until
+        await agent._check_context_overflow(messages, 60)
+    finally:
+        task = agent._active_flush_task
+        if task is not None and not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert calls == 1
+    assert first_backoff_until > time.monotonic()
+    assert agent._flush_backoff_seconds == 10.0

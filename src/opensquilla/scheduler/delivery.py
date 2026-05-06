@@ -1,0 +1,302 @@
+"""Cron job result delivery — Channel + WS + session forward in parallel."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+import structlog
+
+from opensquilla.scheduler.types import CronJob, DeliveryConfig, DeliveryMode, SessionTarget
+from opensquilla.session.keys import parse_agent_id
+
+log = structlog.get_logger(__name__)
+
+
+@dataclass
+class DeliveryReport:
+    """Result of the delivery pipeline."""
+
+    channel_status: str = "skipped"  # "delivered" | "delivery_failed" | "skipped"
+    ws_status: str = "skipped"  # "delivered" | "no_subscribers" | "skipped"
+    session_status: str = "skipped"  # "delivered" | "forward_failed" | "skipped"
+
+
+class DeliveryChain:
+    """Three-stage parallel delivery: Channel + WS + session forward.
+
+    DB persistence is NOT part of this chain — the scheduler's existing
+    timer.py -> save_execution() pipeline owns execution records.
+    """
+
+    def __init__(
+        self,
+        channel_manager_ref: Callable[[], Any] | None = None,
+        ws_emitter: Callable[[str, str, dict], Awaitable[int]] | None = None,
+        session_forwarder: Callable[..., Awaitable[None]] | None = None,
+    ) -> None:
+        self._channel_manager_ref = channel_manager_ref
+        self._ws_emitter = ws_emitter
+        self._session_forwarder = session_forwarder
+
+    async def deliver(
+        self,
+        job: CronJob,
+        result_text: str,
+        success: bool,
+        summary: str | None,
+        session_key: str,
+        route_envelope: Any | None = None,
+    ) -> DeliveryReport:
+        envelope = route_envelope or build_reply_rendezvous_envelope(job, session_key)
+        ch_coro = self._deliver_channel(job, result_text, envelope)
+        ws_coro = self._notify_ws(
+            job,
+            success=success,
+            summary=summary,
+            session_key=session_key,
+        )
+        fwd_coro = self._forward_to_session(job, result_text, session_key)
+        ch_result, ws_result, fwd_result = await asyncio.gather(
+            ch_coro,
+            ws_coro,
+            fwd_coro,
+            return_exceptions=True,
+        )
+
+        report = DeliveryReport()
+        report.channel_status = ch_result if isinstance(ch_result, str) else "delivery_failed"
+        report.ws_status = ws_result if isinstance(ws_result, str) else "skipped"
+        report.session_status = fwd_result if isinstance(fwd_result, str) else "forward_failed"
+        return report
+
+    async def notify_start(self, job: CronJob, task: str) -> None:
+        """Emit cron.run.start event (pre-execution, best-effort)."""
+        if not self._ws_emitter:
+            return
+        topic = job.delivery.ws_topic or f"cron:{job.id}"
+        try:
+            await self._ws_emitter(
+                topic,
+                "cron.run.start",
+                {"jobId": job.id, "jobName": job.name, "task": task[:200]},
+            )
+        except Exception:
+            pass
+
+    async def _deliver_channel(self, job: CronJob, text: str, route_envelope: Any) -> str:
+        target = route_envelope.reply_target
+        if job.delivery.mode == DeliveryMode.NONE and not (
+            target is not None and target.kind == "channel"
+        ):
+            return "skipped"
+        if not self._channel_manager_ref:
+            return "skipped"
+        cm = self._channel_manager_ref()
+        if cm is None:
+            return "skipped"
+        channel_name = (
+            target.channel_name
+            if target is not None and target.kind == "channel" and target.channel_name
+            else job.delivery.channel_name
+        )
+        channel_id = (
+            target.to
+            if target is not None and target.kind == "channel" and target.to is not None
+            else job.delivery.channel_id
+        )
+        thread_id = (
+            target.thread_id
+            if target is not None and target.kind == "channel"
+            else job.delivery.thread_id
+        )
+        adapter = cm.get(channel_name)
+        if adapter is None:
+            log.warning(
+                "delivery.adapter_not_found",
+                job_id=job.id,
+                channel=channel_name,
+            )
+            return "delivery_failed"
+        try:
+            from opensquilla.channels.types import OutgoingMessage
+
+            if channel_name == "slack":
+                if thread_id:
+                    msg = OutgoingMessage(
+                        content=text,
+                        reply_to=thread_id,
+                        metadata={"channel": channel_id},
+                    )
+                else:
+                    msg = OutgoingMessage(
+                        content=text,
+                        reply_to="cron",
+                        metadata={
+                            "channel": channel_id,
+                            "thread_ts": None,
+                        },
+                    )
+            else:
+                msg = OutgoingMessage(
+                    content=text,
+                    reply_to=channel_id or None,
+                )
+            await asyncio.wait_for(adapter.send(msg), timeout=30.0)
+            log.info("delivery.channel_sent", job_id=job.id, channel=channel_name)
+            return "delivered"
+        except Exception:
+            log.warning("delivery.channel_failed", job_id=job.id, exc_info=True)
+            return "delivery_failed"
+
+    async def _notify_ws(
+        self,
+        job: CronJob,
+        success: bool,
+        summary: str | None,
+        session_key: str,
+    ) -> str:
+        if not self._ws_emitter:
+            return "skipped"
+        topic = job.delivery.ws_topic or f"cron:{job.id}"
+        payload = {
+            "jobId": job.id,
+            "jobName": job.name,
+            "success": success,
+            "summary": summary,
+            "sessionKey": session_key,
+            "finishedAt": datetime.now(UTC).isoformat(),
+        }
+        try:
+            n = await self._ws_emitter(topic, "cron.run.finished", payload)
+            return "delivered" if n > 0 else "no_subscribers"
+        except Exception:
+            log.warning("delivery.ws_failed", job_id=job.id, exc_info=True)
+            return "skipped"
+
+    async def _forward_to_session(
+        self,
+        job: CronJob,
+        text: str,
+        session_key: str,
+    ) -> str:
+        target = (
+            job.session_target
+            if isinstance(job.session_target, SessionTarget)
+            else SessionTarget(job.session_target)
+        )
+        if not self._session_forwarder:
+            return "skipped"
+        if job.delivery.mode != DeliveryMode.NONE:
+            return "skipped"
+        if target == SessionTarget.MAIN:
+            return "skipped"
+        if not job.origin_session_key:
+            return "skipped"
+        if job.origin_session_key == session_key:
+            return "skipped"
+        if not text or not text.strip():
+            return "skipped"
+        try:
+            await self._session_forwarder(
+                origin_session_key=job.origin_session_key,
+                text=text,
+                provenance={
+                    "kind": "cron",
+                    "source_session_key": session_key,
+                    "source_tool": f"cron:{job.id}",
+                },
+            )
+            return "delivered"
+        except Exception:
+            log.warning(
+                "delivery.session_forward_failed",
+                job_id=job.id,
+                origin_session_key=job.origin_session_key,
+                exc_info=True,
+            )
+            return "forward_failed"
+
+
+def build_reply_rendezvous_envelope(job: CronJob, session_key: str) -> Any:
+    from opensquilla.scheduler.routing import build_cron_route_envelope
+
+    snapshot = getattr(job.delivery, "originating_reply_target", None)
+    if snapshot is not None:
+        delivery = DeliveryConfig(
+            mode=DeliveryMode.CHANNEL,
+            channel_name=snapshot.channel_name,
+            channel_id=snapshot.to,
+            account_id=snapshot.account_id,
+            thread_id=snapshot.thread_id,
+            ws_topic=job.delivery.ws_topic,
+        )
+        log.info("cron.reply_rendezvous", job_id=job.id, source="originating")
+        return build_cron_route_envelope(job, session_key=session_key, delivery=delivery)
+
+    log.info("cron.reply_rendezvous", job_id=job.id, source="last_channel_fallback")
+    return build_cron_route_envelope(job, session_key=session_key)
+
+
+async def infer_delivery(
+    session_storage: Any,
+    session_key: str,
+    user_overrides: dict | None,
+) -> DeliveryConfig:
+    """Infer delivery config from context. Read-only — no session side effects.
+
+    Priority: user override > session last_channel > NONE.
+    Uses session_storage.get_session() (read-only SELECT), NOT session_manager.resume().
+    """
+
+    # Priority 1: User explicit override -> mode=CHANNEL
+    if user_overrides and user_overrides.get("channel_name"):
+        return DeliveryConfig(
+            mode=DeliveryMode.CHANNEL,
+            channel_name=user_overrides["channel_name"],
+            channel_id=user_overrides.get("channel_id", ""),
+            account_id=user_overrides.get("account_id", ""),
+            thread_id=user_overrides.get("thread_id", ""),
+        )
+
+    # Priority 2: Infer from session routing fields -> mode=ORIGIN
+    try:
+        node = await session_storage.get_session(session_key)
+        if node and node.last_channel:
+            return DeliveryConfig(
+                mode=DeliveryMode.ORIGIN,
+                channel_name=node.last_channel,
+                channel_id=node.last_to or "",
+                account_id=node.last_account_id or "",
+                thread_id=node.last_thread_id or "",
+            )
+    except Exception:
+        pass  # session lookup failure -> fall through to NONE
+
+    # Priority 2b: Main-session heartbeat fallback -> most recently updated
+    # same-agent session that still carries an outbound routing target.
+    if session_key.endswith(":main") and hasattr(session_storage, "list_sessions"):
+        try:
+            agent_id = parse_agent_id(session_key)
+            sessions = await session_storage.list_sessions(agent_id=agent_id, limit=50, offset=0)
+            for candidate in sessions:
+                if (
+                    getattr(candidate, "last_channel", None)
+                    and getattr(candidate, "last_to", None)
+                    and getattr(candidate, "session_key", None) != session_key
+                ):
+                    return DeliveryConfig(
+                        mode=DeliveryMode.ORIGIN,
+                        channel_name=candidate.last_channel,
+                        channel_id=candidate.last_to or "",
+                        account_id=getattr(candidate, "last_account_id", "") or "",
+                        thread_id=getattr(candidate, "last_thread_id", "") or "",
+                    )
+        except Exception:
+            pass
+
+    # Priority 3: No channel context
+    return DeliveryConfig(mode=DeliveryMode.NONE)

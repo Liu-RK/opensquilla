@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import tomllib
+from types import SimpleNamespace
+
+from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+from opensquilla.gateway.rpc_config import _handle_config_patch, _sync_provider_selector
+
+
+class _CapturingSelector:
+    def __init__(self) -> None:
+        self.synced = None
+
+    def sync_primary(self, cfg) -> None:
+        self.synced = cfg
+
+
+def test_boot_resolves_direct_provider_env_key_and_base_url(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setenv("VOLCENGINE_API_KEY", "volc-key")
+    monkeypatch.setenv("VOLCENGINE_BASE_URL", "https://ark.example/api/v3")
+
+    cfg = GatewayConfig(llm={"provider": "volcengine", "api_key": "", "base_url": ""})
+
+    runtime = resolve_llm_runtime_config(cfg)
+
+    assert runtime.api_key == "volc-key"
+    assert runtime.base_url == "https://ark.example/api/v3"
+    assert runtime.api_key_from_env is True
+    assert runtime.base_url_from_env is True
+    assert cfg.llm.api_key == "volc-key"
+    assert cfg.llm.base_url == "https://ark.example/api/v3"
+
+
+def test_boot_keeps_openrouter_env_precedence_for_openrouter(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.example/api/v1")
+    monkeypatch.setenv("VOLCENGINE_API_KEY", "volc-key")
+    cfg = GatewayConfig(
+        llm={
+            "provider": "openrouter",
+            "api_key": "config-key",
+            "base_url": "https://config.example/api/v1",
+        }
+    )
+
+    runtime = resolve_llm_runtime_config(cfg)
+
+    assert runtime.api_key == "or-key"
+    assert runtime.base_url == "https://openrouter.example/api/v1"
+
+
+def test_runtime_config_sync_resolves_selected_provider_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example")
+    cfg = GatewayConfig(llm={"provider": "deepseek", "api_key": "", "base_url": ""})
+    selector = _CapturingSelector()
+    ctx = type("Ctx", (), {"provider_selector": selector})()
+
+    _sync_provider_selector(ctx, cfg)
+
+    assert selector.synced.provider == "deepseek"
+    assert selector.synced.api_key == "deepseek-key"
+    assert selector.synced.base_url == "https://deepseek.example"
+
+
+async def test_config_patch_runtime_env_key_is_not_persisted(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example")
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "config.toml"),
+        llm={"provider": "openai", "api_key": "", "base_url": ""},
+    )
+    selector = _CapturingSelector()
+    ctx = SimpleNamespace(config=cfg, provider_selector=selector)
+
+    await _handle_config_patch({"patch": {"llm": {"provider": "deepseek"}}}, ctx)
+
+    assert ctx.config.llm.api_key == "deepseek-key"
+    assert selector.synced.api_key == "deepseek-key"
+    assert "api_key" not in ctx.config.to_toml_dict()["llm"]
+    persisted = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert "api_key" not in persisted["llm"]

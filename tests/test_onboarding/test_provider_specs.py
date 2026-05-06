@@ -1,0 +1,137 @@
+"""Tests for provider catalog (Phase 1)."""
+
+from __future__ import annotations
+
+import pytest
+
+from opensquilla.provider.registry import get_provider_spec
+
+
+def test_provider_spec_requires_api_key_for_openrouter():
+    spec = get_provider_spec("openrouter")
+    assert spec.requires_api_key() is True
+
+
+def test_provider_spec_does_not_require_api_key_for_ollama():
+    spec = get_provider_spec("ollama")
+    assert spec.requires_api_key() is False
+
+
+def test_provider_spec_does_not_require_api_key_for_lm_studio():
+    spec = get_provider_spec("lm_studio")
+    assert spec.requires_api_key() is False
+
+
+def test_provider_spec_does_not_require_api_key_for_ovms():
+    spec = get_provider_spec("ovms")
+    assert spec.requires_api_key() is False
+
+
+def test_provider_spec_requires_base_url_for_azure():
+    spec = get_provider_spec("azure")
+    assert spec.requires_base_url() is True
+
+
+def test_provider_spec_requires_api_key_for_azure():
+    # Azure OpenAI requires a deployment-level API key at runtime.
+    spec = get_provider_spec("azure")
+    assert spec.requires_api_key() is True
+
+
+def test_provider_spec_requires_base_url_for_vllm():
+    spec = get_provider_spec("vllm")
+    assert spec.requires_base_url() is True
+
+
+def test_provider_spec_does_not_require_base_url_for_openrouter():
+    spec = get_provider_spec("openrouter")
+    assert spec.requires_base_url() is False
+
+
+# --------------- ProviderSetupSpec catalog ---------------
+
+from opensquilla.onboarding.provider_specs import (  # noqa: E402
+    ProviderSetupSpec,
+    get_provider_setup_spec,
+    list_provider_setup_specs,
+    provider_catalog_payload,
+)
+
+EXPECTED_SUPPORTED = {
+    "openrouter", "openai", "azure", "anthropic", "ollama", "deepseek",
+    "gemini", "dashscope", "bailian_coding", "moonshot", "minimax",
+    "minimax_openai", "minimax_cn", "minimax_global", "mistral", "groq",
+    "zhipu", "qianfan", "siliconflow", "aihubmix", "volcengine",
+    "byteplus", "vllm", "lm_studio", "ovms",
+}
+EXPECTED_UNSUPPORTED = {
+    "volcengine_coding_plan", "byteplus_coding_plan",
+    "openai_codex", "github_copilot",
+}
+
+
+def test_catalog_includes_all_supported_providers():
+    ids = {s.provider_id for s in list_provider_setup_specs() if s.runtime_supported}
+    assert ids == EXPECTED_SUPPORTED
+
+
+def test_catalog_includes_unsupported_providers_disabled():
+    specs = {s.provider_id: s for s in list_provider_setup_specs()}
+    for pid in EXPECTED_UNSUPPORTED:
+        assert pid in specs
+        assert specs[pid].runtime_supported is False
+
+
+def test_catalog_is_sorted_alphabetically():
+    ids = [s.provider_id for s in list_provider_setup_specs()]
+    assert ids == sorted(ids)
+
+
+@pytest.mark.parametrize("provider_id", sorted(EXPECTED_SUPPORTED))
+def test_supported_providers_have_label_and_backend(provider_id: str):
+    spec = get_provider_setup_spec(provider_id)
+    assert isinstance(spec, ProviderSetupSpec)
+    assert spec.backend
+    assert spec.provider_kind
+
+
+def test_openrouter_has_correct_default_base_url():
+    spec = get_provider_setup_spec("openrouter")
+    assert spec.default_base_url == "https://openrouter.ai/api/v1"
+
+
+def test_ollama_does_not_require_api_key_in_setup_spec():
+    spec = get_provider_setup_spec("ollama")
+    assert spec.requires_api_key is False
+    api_field = next(f for f in spec.fields if f.name == "api_key")
+    assert api_field.required is False
+
+
+def test_azure_requires_base_url_in_setup_spec():
+    spec = get_provider_setup_spec("azure")
+    assert spec.requires_base_url is True
+    base_field = next(f for f in spec.fields if f.name == "base_url")
+    assert base_field.required is True
+
+
+def test_vllm_requires_base_url_in_setup_spec():
+    spec = get_provider_setup_spec("vllm")
+    assert spec.requires_base_url is True
+
+
+def test_unknown_provider_raises():
+    with pytest.raises(KeyError):
+        get_provider_setup_spec("does-not-exist")
+
+
+def test_payload_has_redaction_safe_shape():
+    payload = provider_catalog_payload()
+    assert isinstance(payload, list)
+    assert payload
+    sample = payload[0]
+    assert "providerId" in sample
+    assert "fields" in sample
+    for f in sample["fields"]:
+        assert "default" in f
+        if f.get("secret"):
+            assert f.get("default") in (None, "", False)

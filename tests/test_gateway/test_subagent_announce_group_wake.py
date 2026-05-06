@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from opensquilla.gateway.subagent_announce import (
+    _build_terminal_group_payloads,
+    _format_parent_wake_message,
+    _tracker,
+    announce_subagent_completion,
+    close_subagent_spawn_group,
+    set_background_completion_manager,
+)
+from opensquilla.gateway.task_runtime import SubagentCompletionEvent
+from opensquilla.session.models import AgentTaskStatus, SessionStatus
+
+PARENT = "agent:main:webchat:parent"
+PARENT_TASK = "task-parent"
+
+
+class _SessionRow:
+    def __init__(
+        self,
+        session_key: str,
+        *,
+        status: str,
+        agent_id: str = "worker",
+    ) -> None:
+        self.session_key = session_key
+        self.spawned_by = PARENT
+        self.parent_session_key = PARENT
+        self.agent_id = agent_id
+        self.status = status
+        self.origin = {"kind": "subagent", "parent_task_id": PARENT_TASK}
+
+
+class _Storage:
+    def __init__(self, tasks_by_session: dict[str, list[SimpleNamespace]]) -> None:
+        self.tasks_by_session = tasks_by_session
+        self.batch_calls: list[tuple[str, ...]] = []
+
+    async def list_agent_tasks_for_sessions(
+        self,
+        session_keys: list[str],
+        limit_per_session: int = 100,
+    ) -> dict[str, list[SimpleNamespace]]:
+        self.batch_calls.append(tuple(session_keys))
+        return {
+            key: list(self.tasks_by_session.get(key, []))[:limit_per_session]
+            for key in session_keys
+        }
+
+
+class _SessionManager:
+    def __init__(
+        self,
+        rows: list[_SessionRow],
+        *,
+        tasks_by_session: dict[str, list[SimpleNamespace]],
+        transcripts: dict[str, str],
+    ) -> None:
+        self.rows = rows
+        self._storage = _Storage(tasks_by_session)
+        self.transcripts = transcripts
+        self.messages: list[tuple[str, str, str, dict | None]] = []
+        self.finished: list[tuple[str, str]] = []
+
+    async def list_sessions(
+        self,
+        agent_id=None,
+        status=None,
+        limit=100,
+        offset=0,
+        spawned_by=None,
+    ):
+        rows = self.rows
+        if spawned_by is not None:
+            rows = [row for row in rows if row.spawned_by == spawned_by]
+        return rows[offset : offset + limit]
+
+    async def read_transcript(self, session_key: str, limit: int = 50):
+        text = self.transcripts.get(session_key, "")
+        return [SimpleNamespace(role="assistant", content=text)] if text else []
+
+    async def append_message(
+        self,
+        key: str,
+        *,
+        role: str,
+        content: str,
+        provenance: dict | None = None,
+    ) -> None:
+        self.messages.append((key, role, content, provenance))
+
+    async def get_session(self, key: str):
+        return SimpleNamespace(session_key=key, last_channel=None, last_to=None)
+
+    async def finish(self, session_key: str, *, status: SessionStatus) -> None:
+        self.finished.append((session_key, str(status)))
+        for row in self.rows:
+            if row.session_key == session_key:
+                row.status = str(status)
+
+
+class _TaskRuntime:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, dict | None]] = []
+
+    async def send(self, session_key: str, message: str, provenance: dict | None = None):
+        self.sent.append((session_key, message, provenance))
+        return SimpleNamespace(task_id=f"wake-{len(self.sent)}")
+
+
+class _BackgroundCompletion:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.waiting: list[dict] = []
+        self.wakes: list[dict] = []
+
+    async def emit_waiting(self, **kwargs) -> None:
+        self.calls.append("waiting")
+        self.waiting.append(kwargs)
+
+    async def send_parent_wake(self, **kwargs) -> None:
+        self.calls.append("wake")
+        self.wakes.append(kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tracker():
+    _tracker.evict(PARENT)
+    set_background_completion_manager(None)
+    yield
+    _tracker.evict(PARENT)
+    set_background_completion_manager(None)
+
+
+@pytest.mark.asyncio
+async def test_group_payloads_enrich_non_current_children_from_task_ledger() -> None:
+    child_done = "agent:worker:subagent:done"
+    child_failed = "agent:worker:subagent:failed"
+    manager = _SessionManager(
+        [
+            _SessionRow(child_done, status="done", agent_id="worker-a"),
+            _SessionRow(child_failed, status="failed", agent_id="worker-b"),
+        ],
+        tasks_by_session={
+            child_done: [
+                SimpleNamespace(
+                    task_id="task-default-newer",
+                    agent_id="worker-a",
+                    status=AgentTaskStatus.FAILED,
+                    run_kind="default",
+                    terminal_reason="followup_error",
+                    created_at=100,
+                    updated_at=200,
+                    finished_at=300,
+                ),
+                SimpleNamespace(
+                    task_id="task-done",
+                    agent_id="worker-a",
+                    status=AgentTaskStatus.SUCCEEDED,
+                    run_kind="subagent",
+                    terminal_reason="done",
+                    created_at=10,
+                    updated_at=20,
+                    finished_at=30,
+                )
+            ],
+            child_failed: [
+                SimpleNamespace(
+                    task_id="task-failed",
+                    agent_id="worker-b",
+                    status=AgentTaskStatus.FAILED,
+                    run_kind="subagent",
+                    terminal_reason="tool_error",
+                    error_class="RuntimeError",
+                    error_message="boom",
+                    created_at=11,
+                    updated_at=21,
+                    finished_at=31,
+                )
+            ],
+        },
+        transcripts={child_done: "done result", child_failed: "partial failure details"},
+    )
+
+    payloads = await _build_terminal_group_payloads(
+        parent_session_key=PARENT,
+        parent_task_id=PARENT_TASK,
+        session_manager=manager,
+    )
+
+    assert manager._storage.batch_calls == [(child_done, child_failed)]
+    assert payloads is not None
+    by_child = {payload["child_session_key"]: payload for payload in payloads}
+    assert by_child[child_done]["task_id"] == "task-done"
+    assert by_child[child_done]["agent_id"] == "worker-a"
+    assert by_child[child_done]["status"] == "succeeded"
+    assert by_child[child_failed]["task_id"] == "task-failed"
+    assert by_child[child_failed]["agent_id"] == "worker-b"
+    assert by_child[child_failed]["status"] == "failed"
+    assert by_child[child_failed]["terminal_reason"] == "tool_error"
+    assert by_child[child_failed]["error_class"] == "RuntimeError"
+    assert by_child[child_failed]["error_message"] == "boom"
+
+    wake_message = _format_parent_wake_message(PARENT_TASK, payloads)
+    assert "task_id=task-failed" in wake_message
+    assert "agent_id=worker-b" in wake_message
+    assert "error_class=RuntimeError" in wake_message
+    assert "error_message=boom" in wake_message
+
+
+@pytest.mark.asyncio
+async def test_group_payloads_fall_back_when_task_ledger_is_unavailable() -> None:
+    child = "agent:worker:subagent:fallback"
+    manager = _SessionManager(
+        [_SessionRow(child, status="timeout", agent_id="worker")],
+        tasks_by_session={},
+        transcripts={child: "late output"},
+    )
+    manager._storage = SimpleNamespace()
+
+    payloads = await _build_terminal_group_payloads(
+        parent_session_key=PARENT,
+        parent_task_id=PARENT_TASK,
+        session_manager=manager,
+    )
+
+    assert payloads == [
+        {
+            "type": "subagent_completion",
+            "parent_session_key": PARENT,
+            "child_session_key": child,
+            "status": "timeout",
+            "terminal_reason": "timeout",
+            "parent_task_id": PARENT_TASK,
+            "result": {"text": "late output", "truncated": False, "source_role": "assistant"},
+            "agent_id": "worker",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parent_wake_is_deferred_until_yield_and_sent_once() -> None:
+    child = "agent:worker:subagent:solo"
+    manager = _SessionManager(
+        [_SessionRow(child, status="done")],
+        tasks_by_session={
+            child: [
+                SimpleNamespace(
+                    task_id="task-child",
+                    agent_id="worker",
+                    status=AgentTaskStatus.SUCCEEDED,
+                    run_kind="subagent",
+                    terminal_reason="done",
+                    created_at=1,
+                    updated_at=2,
+                    finished_at=3,
+                )
+            ]
+        },
+        transcripts={child: "child output"},
+    )
+    runtime = _TaskRuntime()
+    event = SubagentCompletionEvent(
+        parent_session_key=PARENT,
+        child_session_key=child,
+        task_id="task-child",
+        status=AgentTaskStatus.SUCCEEDED,
+        terminal_reason="done",
+        agent_id="worker",
+        parent_task_id=PARENT_TASK,
+    )
+
+    await announce_subagent_completion(
+        event,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+    assert runtime.sent == []
+    assert manager.messages
+
+    assert await close_subagent_spawn_group(
+        PARENT,
+        PARENT_TASK,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+    assert len(runtime.sent) == 1
+    assert "[SUBAGENT_COMPLETION_GROUP]" in runtime.sent[0][1]
+    assert "task_id=task-child" in runtime.sent[0][1]
+
+    await announce_subagent_completion(
+        event,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+    assert len(runtime.sent) == 1
+
+    assert await close_subagent_spawn_group(
+        PARENT,
+        PARENT_TASK,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+    assert len(runtime.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_close_emits_waiting_when_spawn_group_is_not_terminal() -> None:
+    child = "agent:worker:subagent:running"
+    manager = _SessionManager(
+        [_SessionRow(child, status="running")],
+        tasks_by_session={},
+        transcripts={},
+    )
+    runtime = _TaskRuntime()
+    background = _BackgroundCompletion()
+    set_background_completion_manager(background)
+
+    closed = await close_subagent_spawn_group(
+        PARENT,
+        PARENT_TASK,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+
+    assert closed is False
+    assert runtime.sent == []
+    assert background.waiting == [
+        {
+            "parent_session_key": PARENT,
+            "parent_task_id": PARENT_TASK,
+            "pending_count": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_close_uses_background_completion_manager_for_parent_wake() -> None:
+    child = "agent:worker:subagent:solo"
+    manager = _SessionManager(
+        [_SessionRow(child, status="done")],
+        tasks_by_session={},
+        transcripts={child: "child output"},
+    )
+    runtime = _TaskRuntime()
+    background = _BackgroundCompletion()
+    set_background_completion_manager(background)
+
+    assert await close_subagent_spawn_group(
+        PARENT,
+        PARENT_TASK,
+        session_manager=manager,
+        task_runtime=runtime,
+    )
+
+    assert runtime.sent == []
+    assert background.calls == ["waiting", "wake"]
+    assert len(background.wakes) == 1
+    assert background.waiting == [
+        {
+            "parent_session_key": PARENT,
+            "parent_task_id": PARENT_TASK,
+            "pending_count": 0,
+        }
+    ]
+    wake = background.wakes[0]
+    assert wake["parent_session_key"] == PARENT
+    assert wake["parent_task_id"] == PARENT_TASK
+    assert wake["task_runtime"] is runtime
+    assert "[SUBAGENT_COMPLETION_GROUP]" in wake["message"]

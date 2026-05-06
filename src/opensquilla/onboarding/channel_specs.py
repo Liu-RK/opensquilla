@@ -1,0 +1,345 @@
+"""Onboarding-friendly channel catalog aligned with gateway config models."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal
+
+FieldType = Literal["text", "password", "select", "bool", "int", "float"]
+Transport = Literal["polling", "webhook", "websocket", "mixed", "unknown"]
+
+
+@dataclass(frozen=True)
+class ChannelSetupField:
+    name: str
+    label: str
+    field_type: FieldType
+    required: bool
+    default: str | int | float | bool | None = None
+    choices: tuple[str, ...] = ()
+    description: str = ""
+    secret: bool = False
+
+
+@dataclass(frozen=True)
+class ChannelSetupSpec:
+    type: str
+    label: str
+    description: str
+    transport: Transport
+    requires_public_url: bool
+    dependency_extra: str | None
+    restart_required: bool
+    docs_hint: str
+    fields: tuple[ChannelSetupField, ...]
+
+
+def _common_fields() -> tuple[ChannelSetupField, ...]:
+    return (
+        ChannelSetupField(
+            "name", "Channel name", "text", required=True,
+            description="Unique identifier for this channel entry.",
+        ),
+        ChannelSetupField(
+            "agent_id", "Agent id", "text", required=False, default="main",
+        ),
+        ChannelSetupField(
+            "enabled", "Enabled", "bool", required=False, default=True,
+        ),
+    )
+
+
+def _slack_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="slack",
+        label="Slack",
+        description="Slack workspace bot using bot token + signing secret.",
+        transport="webhook",
+        requires_public_url=True,
+        dependency_extra=None,
+        restart_required=True,
+        docs_hint="https://api.slack.com/apps",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("token", "Bot token (xoxb-...)", "password",
+                              required=True, secret=True),
+            ChannelSetupField("slack_channel_id", "Default channel id", "text",
+                              required=False, default=""),
+            ChannelSetupField("signing_secret", "Signing secret", "password",
+                              required=False, secret=True),
+            ChannelSetupField("reply_in_thread", "Reply in thread", "bool",
+                              required=False, default=False),
+        ),
+    )
+
+
+def _feishu_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="feishu",
+        label="Feishu / Lark",
+        description="Feishu (or Lark) bot — webhook or websocket connection.",
+        transport="mixed",
+        requires_public_url=False,
+        dependency_extra="feishu",
+        restart_required=True,
+        docs_hint="https://open.feishu.cn/document/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("app_id", "App id", "text", required=True),
+            ChannelSetupField("app_secret", "App secret", "password",
+                              required=True, secret=True),
+            ChannelSetupField("encrypt_key", "Encrypt key", "password",
+                              required=False, secret=True, default=""),
+            ChannelSetupField("verification_token", "Verification token", "password",
+                              required=False, secret=True, default=""),
+            ChannelSetupField("default_chat_id", "Default chat id", "text",
+                              required=False, default=""),
+            ChannelSetupField("webhook_path", "Webhook path", "text",
+                              required=False, default="/feishu/events"),
+            ChannelSetupField("api_base", "API base", "text",
+                              required=False,
+                              default="https://open.feishu.cn/open-apis"),
+            ChannelSetupField("connection_mode", "Connection mode", "select",
+                              required=False, default="webhook",
+                              choices=("webhook", "websocket")),
+            ChannelSetupField("domain", "Domain", "select",
+                              required=False, default="feishu",
+                              choices=("feishu", "lark")),
+        ),
+    )
+
+
+def _discord_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="discord",
+        label="Discord",
+        description="Discord bot using gateway websocket.",
+        transport="websocket",
+        requires_public_url=False,
+        dependency_extra=None,
+        restart_required=True,
+        docs_hint="https://discord.com/developers/applications",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("token", "Bot token", "password",
+                              required=True, secret=True),
+            ChannelSetupField("application_id", "Application id", "text",
+                              required=False, default=""),
+            ChannelSetupField("default_channel_id", "Default channel id", "text",
+                              required=False, default=""),
+            ChannelSetupField("gateway_url", "Gateway URL", "text",
+                              required=False,
+                              default="wss://gateway.discord.gg/?v=10&encoding=json"),
+            ChannelSetupField("intents", "Intents bitmask", "int",
+                              required=False, default=33281),
+        ),
+    )
+
+
+def _dingtalk_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="dingtalk",
+        label="DingTalk",
+        description="DingTalk corp robot via stream connection.",
+        transport="websocket",
+        requires_public_url=False,
+        dependency_extra="dingtalk",
+        restart_required=True,
+        docs_hint="https://open.dingtalk.com/document/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("client_id", "Client id", "text", required=True),
+            ChannelSetupField("client_secret", "Client secret", "password",
+                              required=True, secret=True),
+        ),
+    )
+
+
+def _wecom_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="wecom",
+        label="WeCom",
+        description="Enterprise WeChat (WeCom) corp app via webhook.",
+        transport="webhook",
+        requires_public_url=True,
+        dependency_extra="wecom",
+        restart_required=True,
+        docs_hint="https://developer.work.weixin.qq.com/document/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("corp_id", "Corp id", "text", required=True),
+            ChannelSetupField("corp_secret", "Corp secret", "password",
+                              required=True, secret=True),
+            ChannelSetupField("agent_id_int", "Agent id (int)", "int",
+                              required=True),
+            ChannelSetupField("token", "Token", "password",
+                              required=True, secret=True),
+            ChannelSetupField("encoding_aes_key", "Encoding AES key", "password",
+                              required=True, secret=True),
+            ChannelSetupField("webhook_path", "Webhook path", "text",
+                              required=False, default="/wecom/events"),
+            ChannelSetupField("api_base", "API base", "text",
+                              required=False,
+                              default="https://qyapi.weixin.qq.com"),
+        ),
+    )
+
+
+def _qq_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="qq",
+        label="QQ Bot",
+        description="Tencent QQ Bot via websocket.",
+        transport="websocket",
+        requires_public_url=False,
+        dependency_extra="qq",
+        restart_required=True,
+        docs_hint="https://bot.q.qq.com/wiki/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("app_id", "App id", "text", required=True),
+            ChannelSetupField("app_secret", "App secret", "password",
+                              required=True, secret=True),
+        ),
+    )
+
+
+def _msteams_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="msteams",
+        label="Microsoft Teams",
+        description="Microsoft Teams via Bot Framework webhook.",
+        transport="webhook",
+        requires_public_url=True,
+        dependency_extra="msteams",
+        restart_required=True,
+        docs_hint="https://learn.microsoft.com/microsoftteams/platform/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("app_id", "App id", "text", required=True),
+            ChannelSetupField("app_password", "App password", "password",
+                              required=True, secret=True),
+            ChannelSetupField("webhook_path", "Webhook path", "text",
+                              required=False, default="/msteams/messages"),
+        ),
+    )
+
+
+def _matrix_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="matrix",
+        label="Matrix",
+        description="Matrix homeserver client (sync long-poll).",
+        transport="websocket",
+        requires_public_url=False,
+        dependency_extra="matrix",
+        restart_required=True,
+        docs_hint="https://matrix.org/docs/",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("homeserver_url", "Homeserver URL", "text",
+                              required=True),
+            ChannelSetupField("user_id", "User id (@user:server)", "text",
+                              required=True),
+            ChannelSetupField("password", "Password", "password",
+                              required=False, secret=True, default=""),
+            ChannelSetupField("access_token", "Access token", "password",
+                              required=False, secret=True, default=""),
+            ChannelSetupField("device_id", "Device id", "text",
+                              required=False, default=""),
+            ChannelSetupField("encryption", "Encryption", "select",
+                              required=False, default="off",
+                              choices=("off", "required", "best_effort")),
+        ),
+    )
+
+
+def _telegram_spec() -> ChannelSetupSpec:
+    return ChannelSetupSpec(
+        type="telegram",
+        label="Telegram",
+        description="Telegram Bot API — polling or webhook transport.",
+        transport="mixed",
+        requires_public_url=False,
+        dependency_extra="telegram",
+        restart_required=True,
+        docs_hint="https://core.telegram.org/bots/api",
+        fields=(
+            *_common_fields(),
+            ChannelSetupField("token", "Bot token", "password",
+                              required=True, secret=True),
+            ChannelSetupField("default_chat_id", "Default chat id", "text",
+                              required=False, default=""),
+            ChannelSetupField("api_base", "API base", "text",
+                              required=False, default="https://api.telegram.org"),
+            ChannelSetupField("transport_name", "Transport", "select",
+                              required=False, default="polling",
+                              choices=("polling", "webhook")),
+            ChannelSetupField("webhook_path", "Webhook path", "text",
+                              required=False, default="/telegram/events"),
+            ChannelSetupField("webhook_url", "Webhook URL (webhook only)", "text",
+                              required=False, default=""),
+            ChannelSetupField("webhook_secret_token", "Webhook secret token",
+                              "password", required=False, secret=True, default=""),
+            ChannelSetupField("drop_pending_updates", "Drop pending updates",
+                              "bool", required=False, default=False),
+            ChannelSetupField("poll_timeout_s", "Polling timeout (s)", "int",
+                              required=False, default=30),
+            ChannelSetupField("poll_limit", "Poll limit", "int",
+                              required=False, default=100),
+            ChannelSetupField("poll_idle_sleep_s", "Poll idle sleep (s)", "float",
+                              required=False, default=0.1),
+        ),
+    )
+
+
+_BUILDERS = {
+    "dingtalk": _dingtalk_spec,
+    "discord": _discord_spec,
+    "feishu": _feishu_spec,
+    "matrix": _matrix_spec,
+    "msteams": _msteams_spec,
+    "qq": _qq_spec,
+    "slack": _slack_spec,
+    "telegram": _telegram_spec,
+    "wecom": _wecom_spec,
+}
+
+
+def list_channel_setup_specs() -> list[ChannelSetupSpec]:
+    return [_BUILDERS[t]() for t in sorted(_BUILDERS)]
+
+
+def get_channel_setup_spec(type_name: str) -> ChannelSetupSpec:
+    if type_name not in _BUILDERS:
+        raise KeyError(f"unknown channel type: {type_name!r}")
+    return _BUILDERS[type_name]()
+
+
+def channel_catalog_payload() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": s.type,
+            "label": s.label,
+            "description": s.description,
+            "transport": s.transport,
+            "requiresPublicUrl": s.requires_public_url,
+            "dependencyExtra": s.dependency_extra,
+            "restartRequired": s.restart_required,
+            "docsHint": s.docs_hint,
+            "fields": [
+                {
+                    "name": f.name,
+                    "label": f.label,
+                    "type": f.field_type,
+                    "required": f.required,
+                    "default": f.default,
+                    "choices": list(f.choices),
+                    "description": f.description,
+                    "secret": f.secret,
+                }
+                for f in s.fields
+            ],
+        }
+        for s in list_channel_setup_specs()
+    ]

@@ -1,0 +1,182 @@
+[project]
+name = "opensquilla"
+version = "0.1.0"
+description = "OpenSquilla — microkernel Python agent runtime with MCP-native tools and multi-channel messaging"
+license = "MIT"
+readme = "README.release.md"
+authors = [
+    { name = "OpenSquilla contributors" },
+]
+requires-python = ">=3.12"
+dependencies = [
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "sqlmodel>=0.0.20",
+    "anyio>=4.0",
+    "httpx>=0.27",
+    "brotli>=1.1",
+    "jinja2>=3.1",
+    "structlog>=24.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "websockets>=13.0",
+    "aiosqlite>=0.20",
+    "apscheduler>=3.10",
+    "pyyaml>=6.0",
+    "sqlite-vec>=0.1",
+    "html2text>=2024.2",
+    "readability-lxml>=0.8",
+    "beautifulsoup4>=4.12",
+    "cachetools>=5.3",
+    "pdfplumber>=0.11",
+    "pillow>=10.0",
+    "croniter>=2.0",
+    "tomli-w>=1.0",
+    "yoyo-migrations>=8.2",
+    "prompt-toolkit>=3.0",
+    "questionary>=2.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "pypdf>=4.0.0",
+    "reportlab>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.10",
+    "ruff>=0.5",
+]
+mcp = ["mcp>=1.0"]
+memory = [
+    "tiktoken>=0.5",
+    "jieba>=0.42",
+]
+recommended = [
+    "tiktoken>=0.5",
+    "jieba>=0.42",
+    "numpy>=1.26",
+    "lightgbm>=4.0",
+    "joblib>=1.3",
+    "scikit-learn>=1.3",
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "transformers>=4.40",
+]
+model-router = [
+    "numpy>=1.26",
+    "lightgbm>=4.0",
+    "joblib>=1.3",
+    "scikit-learn>=1.3",
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "PyYAML>=6.0",
+]
+feishu = ["lark-oapi>=1.5.3,<2"]
+telegram = ["python-telegram-bot>=20.0"]
+dingtalk = ["dingtalk-stream>=0.24.3,<0.25"]
+wecom = ["cryptography>=42"]
+qq = ["qq-botpy>=1.2.1,<1.3"]
+msteams = ["botbuilder-core>=4.17,<5.0", "botbuilder-schema>=4.17,<5.0"]
+matrix = ["matrix-nio>=0.25,<0.26", "markdown>=3.0"]
+matrix-e2e = ["matrix-nio[e2e]>=0.25,<0.26", "markdown>=3.0"]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.4",
+]
+document-extras = [
+    "weasyprint>=60.0",
+]
+
+[project.scripts]
+opensquilla = "opensquilla.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opensquilla"]
+exclude = [
+    "src/opensquilla/scheduler/templates/*.md",
+    "src/opensquilla/skills/bundled/**/references/*.md",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/opensquilla/dist" = "opensquilla/dist"
+"src/opensquilla/skills/bundled/pptx/references/pptxgenjs.md" = "opensquilla/skills/bundled/pptx/references/pptxgenjs.md"
+"src/opensquilla/skills/bundled/pptx/references/python_pptx.md" = "opensquilla/skills/bundled/pptx/references/python_pptx.md"
+"src/opensquilla/skills/bundled/docx/references/python_docx.md" = "opensquilla/skills/bundled/docx/references/python_docx.md"
+"src/opensquilla/skills/bundled/xlsx/references/openpyxl.md" = "opensquilla/skills/bundled/xlsx/references/openpyxl.md"
+"src/opensquilla/skills/bundled/pdf-toolkit/references/pypdf.md" = "opensquilla/skills/bundled/pdf-toolkit/references/pypdf.md"
+"src/opensquilla/skills/bundled/pdf-toolkit/references/reportlab.md" = "opensquilla/skills/bundled/pdf-toolkit/references/reportlab.md"
+"src/opensquilla/skills/bundled/deep-research/references/methodology.md" = "opensquilla/skills/bundled/deep-research/references/methodology.md"
+"src/opensquilla/skills/bundled/deep-research/references/sources.md" = "opensquilla/skills/bundled/deep-research/references/sources.md"
+"src/opensquilla/skills/bundled/self-improving-agent/references/categories.md" = "opensquilla/skills/bundled/self-improving-agent/references/categories.md"
+"src/opensquilla/skills/bundled/humanizer/references/ai_patterns.md" = "opensquilla/skills/bundled/humanizer/references/ai_patterns.md"
+"src/opensquilla/skills/bundled/html-to-pdf/references/weasyprint.md" = "opensquilla/skills/bundled/html-to-pdf/references/weasyprint.md"
+"src/opensquilla/skills/bundled/multi-search-engine/references/engines.md" = "opensquilla/skills/bundled/multi-search-engine/references/engines.md"
+"src/opensquilla/skills/bundled/automation-workflows/references/zapier.md" = "opensquilla/skills/bundled/automation-workflows/references/zapier.md"
+"src/opensquilla/skills/bundled/automation-workflows/references/make.md" = "opensquilla/skills/bundled/automation-workflows/references/make.md"
+"src/opensquilla/skills/bundled/automation-workflows/references/n8n.md" = "opensquilla/skills/bundled/automation-workflows/references/n8n.md"
+"src/opensquilla/skills/bundled/website-builder/references/seo_checklist.md" = "opensquilla/skills/bundled/website-builder/references/seo_checklist.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+norecursedirs = ["tests/_private", ".omx", ".codex", ".claude"]
+markers = [
+    "llm: marks tests that make real external model/provider API calls (deselect with '-m \"not llm\"')",
+    "llm_smoke: low-cost live LLM smoke tests",
+    "llm_costly: slower or more expensive live model/provider tests",
+    "llm_tools: live model tests that exercise tool calling",
+    "llm_embedding: live embedding/vector-provider tests",
+    "llm_reasoning: live reasoning-capable model tests",
+    "llm_gateway: live gateway/end-to-end runtime tests",
+    "llm_image: live image-generation model API tests",
+    "webui_browser: real browser Web UI tests driven by Playwright",
+    "live_channel: marks tests that hit a real channel platform (deselect with '-m \"not live_channel\"')",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Skill-creator template scripts: long lines carry help strings and
+# example code meant to be copy-pasted verbatim; reformatting would
+# harm readability. E402 imports-after-sys.path-munge is intentional.
+"src/opensquilla/skills/bundled/skill-creator/scripts/*.py" = ["E501", "N806", "E402"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+exclude = [
+    "^src/opensquilla/contrib/squilla_router/models/",
+    "^src/opensquilla/skills/bundled/.*/scripts/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "botbuilder.*",
+    "botpy.*",
+    "cachetools.*",
+    "dingtalk_stream.*",
+    "nio.*",
+    "numpy.*",
+    "onnxruntime.*",
+    "readability.*",
+    "src.router.*",
+    "tiktoken.*",
+    "transformers.*",
+    "yaml.*",
+    "yoyo.*",
+]
+ignore_missing_imports = true

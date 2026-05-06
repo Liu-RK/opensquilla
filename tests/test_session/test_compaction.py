@@ -1,0 +1,228 @@
+"""Tests for context window compaction logic."""
+
+import pytest
+
+from opensquilla.session.compaction import (
+    CompactionConfig,
+    CompactionRequest,
+    call_compaction_llm,
+    compact_context,
+)
+
+
+def _make_entries(n: int, tokens_each: int = 100) -> list[dict]:
+    return [
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"message {i} " + "x" * 50,
+            "token_count": tokens_each,
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_compaction_needed_small_context():
+    entries = _make_entries(5, tokens_each=10)  # 50 tokens total
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=10_000,  # huge window
+        )
+    )
+    assert result.removed_count == 0
+    assert result.kept_entries == entries
+    assert result.summary_source == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_compaction_occurs_when_over_budget():
+    entries = _make_entries(20, tokens_each=200)  # 4000 tokens
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=1000,  # tight window
+        )
+    )
+    assert result.removed_count > 0
+    assert result.summary != ""
+    assert result.chunks_processed >= 1
+    assert result.summary_source == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_compaction_source_is_llm_when_all_chunks_use_llm(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_llm(**kwargs):
+        calls.append(kwargs["chunk_text"])
+        return "LLM summary"
+
+    monkeypatch.setattr("opensquilla.session.compaction.call_compaction_llm", fake_llm)
+    entries = _make_entries(12, tokens_each=200)
+
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=500,
+            config=CompactionConfig(model="test/model", api_key="test-key"),
+        )
+    )
+
+    assert calls
+    assert result.removed_count > 0
+    assert result.summary_source == "llm"
+
+
+@pytest.mark.asyncio
+async def test_compaction_source_is_mixed_when_llm_partly_falls_back(monkeypatch):
+    responses = ["LLM summary", None]
+
+    async def fake_llm(**kwargs):
+        return responses.pop(0) if responses else "LLM summary"
+
+    monkeypatch.setattr("opensquilla.session.compaction.call_compaction_llm", fake_llm)
+    entries = _make_entries(12, tokens_each=200)
+
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=500,
+            config=CompactionConfig(model="test/model", api_key="test-key"),
+        )
+    )
+
+    assert result.removed_count > 0
+    assert result.summary_source == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_recent_entries():
+    entries = _make_entries(20, tokens_each=200)
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=1000,
+        )
+    )
+    # kept entries should be a tail of the original
+    if result.kept_entries:
+        last_kept = result.kept_entries[-1]
+        assert last_kept in entries[-len(result.kept_entries) :]
+
+
+@pytest.mark.asyncio
+async def test_empty_entries():
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=[],
+            context_window_tokens=1000,
+        )
+    )
+    assert result.removed_count == 0
+    assert result.kept_entries == []
+    assert result.summary == ""
+
+
+@pytest.mark.asyncio
+async def test_custom_config():
+    entries = _make_entries(20, tokens_each=200)
+    cfg = CompactionConfig(
+        base_chunk_ratio=0.3,
+        min_chunk_ratio=0.1,
+        safety_margin=1.0,
+        default_parts=3,
+        identifier_policy="off",
+    )
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=500,
+            config=cfg,
+        )
+    )
+    assert result.removed_count > 0
+
+
+@pytest.mark.asyncio
+async def test_strict_identifier_policy_in_summary():
+    entries = _make_entries(10, tokens_each=200)
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=500,
+            config=CompactionConfig(identifier_policy="strict"),
+        )
+    )
+    if result.summary:
+        assert "identifier" in result.summary.lower() or "IMPORTANT" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_chunks_processed_count():
+    entries = _make_entries(30, tokens_each=200)
+    result = await compact_context(
+        CompactionRequest(
+            session_id="s1",
+            entries=entries,
+            context_window_tokens=500,
+        )
+    )
+    assert result.chunks_processed >= 1
+
+
+@pytest.mark.asyncio
+async def test_call_compaction_llm_adds_openrouter_app_attribution(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "summary"}}]}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def post(self, url, *, json, headers):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "opensquilla.session.compaction.httpx.AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+
+    result = await call_compaction_llm(
+        chunk_text="old conversation",
+        identifier_instruction="",
+        model="openai/gpt-4o-mini",
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        timeout=10.0,
+    )
+
+    assert result == "summary"
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"] == {
+        "Authorization": "Bearer test-key",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://opensquilla.ai",
+        "X-OpenRouter-Title": "OpenSquilla",
+        "X-OpenRouter-Categories": "cli-agent,personal-agent",
+    }
