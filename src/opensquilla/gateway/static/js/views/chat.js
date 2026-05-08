@@ -2666,6 +2666,7 @@ const ChatView = (() => {
     if (lastSeg && lastSeg.type === 'text') lastSeg.raw = finalText;
     _renderDirty = true;
     _flushRender();
+    _renderStreamArtifacts();
   }
 
   function _reconcileFinalStreamText(finalText) {
@@ -3323,6 +3324,17 @@ const ChatView = (() => {
     const body = bubble.querySelector('.msg-body');
     body.insertAdjacentHTML('beforeend', _renderArtifacts([payload]));
     if (_autoScroll) _scrollToBottom();
+  }
+
+  function _renderStreamArtifacts() {
+    if (!_streamBubble) return;
+    const body = _streamBubble.querySelector('.msg-body');
+    if (!body) return;
+    body.querySelectorAll('.msg-artifacts').forEach((el) => el.remove());
+    if (_streamArtifacts.length > 0) {
+      body.insertAdjacentHTML('beforeend', _renderArtifacts(_streamArtifacts));
+      if (_autoScroll) _scrollToBottom();
+    }
   }
 
   function _artifactDownloadUrl(artifact) {

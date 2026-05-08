@@ -54,6 +54,15 @@ def test_chat_renders_live_and_historical_artifacts_as_header_auth_downloads() -
     assert "Authorization" in source
 
 
+def test_chat_final_text_reconciliation_preserves_live_artifacts() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _replaceStreamText(finalText)")
+    end = source.index("  function _reconcileFinalStreamText", start)
+    body = source[start:end]
+
+    assert "_renderStreamArtifacts();" in body
+
+
 def test_chat_markdown_export_includes_artifact_download_entries() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     start = source.index("function _exportMarkdown()")
