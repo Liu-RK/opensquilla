@@ -22,6 +22,7 @@ from opensquilla.gateway.attachment_ingest import (
 from opensquilla.gateway.auth import Principal
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
+from opensquilla.gateway.rpc_sessions import _normalize_terminal_event_payload
 from opensquilla.gateway.session_streams import get_session_streams
 from opensquilla.gateway.uploads import set_upload_store
 from opensquilla.gateway.websocket import SubscriptionManager, get_registry
@@ -610,6 +611,20 @@ class TestSessionsSend:
         assert ctx_with_sessions.session_manager.applied_intents == [
             (session.session_key, "continue")
         ]
+
+    def test_legacy_session_error_payload_is_terminal_message_normalized(self):
+        payload = _normalize_terminal_event_payload(
+            "session.event.error",
+            {
+                "message": "Session event stream idle before terminal event",
+                "code": "stream_idle_timeout",
+            },
+        )
+
+        assert payload["message"] == "The task timed out before it could finish."
+        assert payload["terminal_message"] == "The task timed out before it could finish."
+        assert payload["terminal_reason"] == "timeout"
+        assert payload["error_message"] == "Session event stream idle before terminal event"
 
     @pytest.mark.asyncio
     async def test_send_reset_same_key_intent_applies_before_append(
