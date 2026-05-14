@@ -14,12 +14,148 @@ from typer.testing import CliRunner
 
 from opensquilla.cli import chat_cmd
 from opensquilla.cli.main import app
+from opensquilla.cli.repl import commands as repl_commands
+from opensquilla.cli.repl import prompt as repl_prompt
 from opensquilla.cli.repl.session_state import ChatSessionState
+from opensquilla.engine.commands import DEFAULT_REGISTRY, Surface
 from opensquilla.engine.types import ArtifactEvent, DoneEvent, TextDeltaEvent
 from opensquilla.session.compaction import CompactionConfig
 from opensquilla.tools.types import CallerKind, ToolContext
 
 runner = CliRunner()
+
+
+EXPECTED_GATEWAY_COMMANDS = {
+    "/new",
+    "/reset",
+    "/compact",
+    "/help",
+    "/status",
+    "/model",
+    "/models",
+    "/cost",
+    "/usage",
+    "/tool-compress",
+    "/save",
+    "/image",
+    "/path",
+    "/file",
+    "/approvals",
+    "/permissions",
+    "/forget",
+    "/sessions",
+    "/resume",
+    "/delete",
+    "/exit",
+}
+
+EXPECTED_STANDALONE_COMMANDS = EXPECTED_GATEWAY_COMMANDS - {
+    "/approvals",
+    "/delete",
+    "/file",
+    "/forget",
+    "/models",
+    "/permissions",
+    "/resume",
+    "/sessions",
+    "/usage",
+}
+
+
+def _handler_words(surface: Surface) -> set[str]:
+    return {word for command in DEFAULT_REGISTRY.for_surface(surface) for word in command.words()}
+
+
+def test_gateway_registry_commands_have_gateway_handlers() -> None:
+    gateway_words = _handler_words(Surface.CLI_GATEWAY)
+
+    assert EXPECTED_GATEWAY_COMMANDS <= gateway_words
+    assert gateway_words == chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+    assert "/elevated" in chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+    assert "/clear" in chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+    assert "/quit" in chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+    assert "/usage" in chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+    assert "/file" in chat_cmd.GATEWAY_SLASH_HANDLER_WORDS
+
+
+def test_standalone_registry_commands_have_standalone_handlers() -> None:
+    standalone_words = _handler_words(Surface.CLI_STANDALONE)
+
+    assert EXPECTED_STANDALONE_COMMANDS <= standalone_words
+    assert standalone_words == chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+    assert "/clear" in chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+    assert "/quit" in chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+    assert "/usage" not in chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+    assert "/file" not in chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+    assert "/models" not in chat_cmd.STANDALONE_SLASH_HANDLER_WORDS
+
+
+def test_usage_is_gateway_only_and_not_standalone_help() -> None:
+    assert "/usage" in _handler_words(Surface.CLI_GATEWAY)
+    assert "/usage" not in _handler_words(Surface.CLI_STANDALONE)
+    assert "/models" in _handler_words(Surface.CLI_GATEWAY)
+    assert "/models" not in _handler_words(Surface.CLI_STANDALONE)
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=100, highlight=False)
+    console.print(repl_commands.render_help_table(Surface.CLI_STANDALONE))
+
+    assert "/usage" not in buffer.getvalue()
+    assert "/models" not in buffer.getvalue()
+
+
+def test_file_is_gateway_only() -> None:
+    assert "/file" in _handler_words(Surface.CLI_GATEWAY)
+    assert "/file" not in _handler_words(Surface.CLI_STANDALONE)
+
+
+@pytest.mark.asyncio
+async def test_prompt_user_uses_surface_specific_completions(monkeypatch) -> None:
+    completion_words: dict[str, set[str]] = {}
+    created_sessions: list[object] = []
+
+    class FakeWordCompleter:
+        def __init__(self, words, *, ignore_case: bool) -> None:
+            self.words = set(words)
+            self.ignore_case = ignore_case
+
+    class FakePromptSession:
+        def __init__(self, **kwargs) -> None:
+            created_sessions.append(self)
+            self.completer = kwargs["completer"]
+
+        async def prompt_async(self, prefix: str) -> str:
+            completion_words[prefix] = self.completer.words
+            return prefix
+
+    class FakePatchStdout:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    repl_prompt._session = None
+    monkeypatch.setattr(repl_prompt.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(repl_prompt.sys, "stdout", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(repl_prompt, "WordCompleter", FakeWordCompleter)
+    monkeypatch.setattr(repl_prompt, "PromptSession", FakePromptSession)
+    monkeypatch.setattr(repl_prompt, "patch_stdout", lambda: FakePatchStdout())
+
+    await repl_prompt.prompt_user("standalone> ", surface=Surface.CLI_STANDALONE)
+    await repl_prompt.prompt_user("gateway> ", surface=Surface.CLI_GATEWAY)
+
+    assert completion_words["standalone> "] == set(
+        repl_commands.slash_words(Surface.CLI_STANDALONE)
+    )
+    assert "/usage" not in completion_words["standalone> "]
+    assert "/file" not in completion_words["standalone> "]
+    assert "/models" not in completion_words["standalone> "]
+    assert completion_words["gateway> "] == set(repl_commands.slash_words(Surface.CLI_GATEWAY))
+    assert "/usage" in completion_words["gateway> "]
+    assert "/file" in completion_words["gateway> "]
+    assert "/models" in completion_words["gateway> "]
+    assert len(created_sessions) == 2
 
 
 class TestChatCommand:
@@ -874,6 +1010,7 @@ class _FakeGatewayClient:
             "agent_token_saving.tool_result_compression_mode": None,
             "agent_token_saving.tool_result_compression_summary_model": "cheap/model",
         }
+        self.usage_status_calls = 0
         self.list_models_calls = 0
         self.delete_result: dict[str, object] = {"deleted": [], "errors": []}
         self.resolved_payload: dict[str, object] = {
@@ -918,6 +1055,10 @@ class _FakeGatewayClient:
     async def list_models(self) -> list[dict[str, object]]:
         self.list_models_calls += 1
         return [{"id": "openai/test", "provider": "openai"}]
+
+    async def usage_status(self) -> dict[str, object]:
+        self.usage_status_calls += 1
+        return {"totalTokens": 1234, "totalCostUsd": 0.05678}
 
     async def abort_session(self, session_key: str) -> dict[str, object]:
         self.abort_calls.append(session_key)
@@ -1416,6 +1557,19 @@ async def test_gateway_slash_models_does_not_hit_model_prefix(monkeypatch) -> No
     assert handled is True
     assert fake.list_models_calls == 1
     assert state.model == "openai/test"
+
+
+@pytest.mark.asyncio
+async def test_gateway_slash_usage_calls_usage_status(monkeypatch) -> None:
+    _FakeGatewayClient.instances.clear()
+    monkeypatch.setattr("opensquilla.cli.gateway_client.GatewayClient", _FakeGatewayClient)
+    fake = _FakeGatewayClient()
+    state = ChatSessionState(session_key="agent:main:abc123", model="openai/test")
+
+    handled = await chat_cmd._handle_gateway_slash_command("/usage", state, fake, {"mode": None})
+
+    assert handled is True
+    assert fake.usage_status_calls == 1
 
 
 @pytest.mark.asyncio

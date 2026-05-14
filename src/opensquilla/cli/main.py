@@ -430,6 +430,27 @@ def agent(
         min=1,
         help="Maximum agent model/tool loop iterations",
     ),
+    iteration_timeout_seconds: float | None = typer.Option(
+        None,
+        "--iteration-timeout-seconds",
+        help="Per-iteration timeout in seconds (one LLM call + its tool executions)",
+    ),
+    tool_timeout_seconds: float | None = typer.Option(
+        None,
+        "--tool-timeout-seconds",
+        help="Per-tool execution timeout in seconds",
+    ),
+    request_timeout_seconds: float | None = typer.Option(
+        None,
+        "--request-timeout-seconds",
+        help="Single LLM HTTP/streaming request timeout in seconds",
+    ),
+    max_provider_retries: int | None = typer.Option(
+        None,
+        "--max-provider-retries",
+        min=0,
+        help="Maximum provider-level retries for transient errors",
+    ),
     thinking: str = typer.Option(
         "",
         "--thinking",
@@ -501,6 +522,10 @@ def agent(
         thinking=thinking,
         timeout=timeout,
         max_iterations=max_iterations,
+        iteration_timeout_seconds=iteration_timeout_seconds,
+        tool_timeout_seconds=tool_timeout_seconds,
+        request_timeout_seconds=request_timeout_seconds,
+        max_provider_retries=max_provider_retries,
         transcript_path=transcript_path,
         usage_path=usage_path,
         session_db_path=session_db_path,

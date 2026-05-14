@@ -28,6 +28,7 @@ from opensquilla.cli.repl.prompt import prompt_approval, prompt_user
 from opensquilla.cli.repl.session_state import ChatSessionState, messages_to_markdown
 from opensquilla.cli.repl.stream import StreamingRenderer, TurnResult, UsageSummary
 from opensquilla.cli.ui import ACCENT, console, error_panel
+from opensquilla.engine.commands import Surface
 from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
     call_compact_with_optional_config,
@@ -41,6 +42,55 @@ _CLI_ATTACHMENT_COMPAT_EXPORTS = (_CLI_ALLOWED_FILE_MIMES, _CLI_INLINE_THRESHOLD
 
 _DEFAULT_STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+
+GATEWAY_SLASH_HANDLER_WORDS = frozenset(
+    {
+        "/approvals",
+        "/clear",
+        "/compact",
+        "/cost",
+        "/delete",
+        "/elevated",
+        "/exit",
+        "/file",
+        "/forget",
+        "/help",
+        "/image",
+        "/model",
+        "/models",
+        "/new",
+        "/path",
+        "/permissions",
+        "/quit",
+        "/reset",
+        "/resume",
+        "/session",
+        "/sessions",
+        "/save",
+        "/status",
+        "/tool-compress",
+        "/usage",
+    }
+)
+STANDALONE_SLASH_HANDLER_WORDS = frozenset(
+    {
+        "/clear",
+        "/compact",
+        "/cost",
+        "/exit",
+        "/help",
+        "/image",
+        "/model",
+        "/new",
+        "/path",
+        "/quit",
+        "/reset",
+        "/save",
+        "/session",
+        "/status",
+        "/tool-compress",
+    }
+)
 
 
 def _turn_stream_error_message(event: Any) -> str:
@@ -518,7 +568,10 @@ async def _standalone_repl(
     try:
         while True:
             try:
-                user_input = await prompt_user(state.prompt_state().label)
+                user_input = await prompt_user(
+                    state.prompt_state().label,
+                    surface=Surface.CLI_STANDALONE,
+                )
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[yellow]Goodbye.[/yellow]")
                 break
@@ -533,7 +586,7 @@ async def _standalone_repl(
 
             if stripped.startswith("/"):
                 if stripped == "/help":
-                    console.print(render_help_table())
+                    console.print(render_help_table(Surface.CLI_STANDALONE))
                     continue
                 if parts := _slash_parts(stripped, "/new"):
                     session_key = f"agent:main:standalone:{uuid4().hex[:8]}"
@@ -726,7 +779,10 @@ async def _gateway_chat(model: str | None, session_id: str | None) -> None:
 
         while True:
             try:
-                user_input = await prompt_user(state.prompt_state().label)
+                user_input = await prompt_user(
+                    state.prompt_state().label,
+                    surface=Surface.CLI_GATEWAY,
+                )
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[yellow]Goodbye.[/yellow]")
                 break
@@ -777,7 +833,7 @@ async def _handle_gateway_slash_command(
     """Handle gateway-mode slash commands. Returns False for unknown commands."""
 
     if cmd == "/help":
-        console.print(render_help_table())
+        console.print(render_help_table(Surface.CLI_GATEWAY))
         return True
 
     if parts := _slash_parts(cmd, "/new"):

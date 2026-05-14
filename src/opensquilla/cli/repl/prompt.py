@@ -13,6 +13,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from opensquilla.cli.repl.commands import slash_words
+from opensquilla.engine.commands import Surface, parse_surface
 from opensquilla.paths import state_dir
 
 
@@ -22,6 +23,7 @@ class PromptConfig:
 
 
 _session: PromptSession[str] | None = None
+_sessions: dict[Surface, PromptSession[str]] = {}
 
 
 def _key_bindings() -> KeyBindings:
@@ -40,19 +42,27 @@ def _history_path() -> str:
     return str(path)
 
 
-def _prompt_session() -> PromptSession[str]:
+def _prompt_session(surface: Surface | str = Surface.CLI_GATEWAY) -> PromptSession[str]:
     global _session
-    if _session is None:
-        _session = PromptSession(
+    parsed = parse_surface(surface) if isinstance(surface, str) else surface
+    if parsed not in _sessions:
+        _sessions[parsed] = PromptSession(
             history=FileHistory(_history_path()),
-            completer=WordCompleter(slash_words(), ignore_case=True),
+            completer=WordCompleter(slash_words(parsed), ignore_case=True),
             enable_history_search=True,
             key_bindings=_key_bindings(),
         )
-    return _session
+    if parsed == Surface.CLI_GATEWAY:
+        _session = _sessions[parsed]
+    return _sessions[parsed]
 
 
-async def prompt_user(prefix: str = "[you] ", *, config: PromptConfig | None = None) -> str | None:
+async def prompt_user(
+    prefix: str = "[you] ",
+    *,
+    config: PromptConfig | None = None,
+    surface: Surface | str = Surface.CLI_GATEWAY,
+) -> str | None:
     """Read one prompt line, using prompt-toolkit for real terminals."""
     cfg = config or PromptConfig()
     if cfg.force_plain or not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -70,7 +80,7 @@ async def prompt_user(prefix: str = "[you] ", *, config: PromptConfig | None = N
 
     try:
         with patch_stdout():
-            return await _prompt_session().prompt_async(prefix)
+            return await _prompt_session(surface).prompt_async(prefix)
     except EOFError:
         return None
 

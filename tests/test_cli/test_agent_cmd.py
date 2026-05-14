@@ -201,6 +201,10 @@ def test_run_agent_command_direct_call_normalizes_typer_defaults(
     assert captured["scratch_dir"] is None
     assert captured["timeout"] is None
     assert captured["max_iterations"] is None
+    assert captured["iteration_timeout"] is None
+    assert captured["tool_timeout"] is None
+    assert captured["request_timeout"] is None
+    assert captured["max_provider_retries"] is None
     assert captured["thinking"] is None
     assert captured["transcript_path"] is None
     assert captured["usage_path"] is None

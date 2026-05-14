@@ -85,6 +85,10 @@ async def run_agent_once(
     thinking: str | None = None,
     timeout: float | None = None,
     max_iterations: int | None = None,
+    iteration_timeout: float | None = None,
+    tool_timeout: float | None = None,
+    request_timeout: float | None = None,
+    max_provider_retries: int | None = None,
     transcript_path: str | None = None,
     usage_path: str | None = None,
     config: Any | None = None,
@@ -252,6 +256,10 @@ async def run_agent_once(
             model=effective_model,
             timeout=timeout,
             max_iterations=max_iterations,
+            iteration_timeout=iteration_timeout,
+            tool_timeout=tool_timeout,
+            request_timeout=request_timeout,
+            max_provider_retries=max_provider_retries,
             history_has_persisted_user=True,
             no_memory_capture=no_memory_capture,
             attachments=run_attachments,
@@ -640,6 +648,27 @@ def run_agent_command(
         min=1,
         help="Maximum agent model/tool loop iterations",
     ),
+    iteration_timeout_seconds: float | None = typer.Option(
+        None,
+        "--iteration-timeout-seconds",
+        help="Per-iteration timeout in seconds (one LLM call + its tool executions)",
+    ),
+    tool_timeout_seconds: float | None = typer.Option(
+        None,
+        "--tool-timeout-seconds",
+        help="Per-tool execution timeout in seconds",
+    ),
+    request_timeout_seconds: float | None = typer.Option(
+        None,
+        "--request-timeout-seconds",
+        help="Single LLM HTTP/streaming request timeout in seconds",
+    ),
+    max_provider_retries: int | None = typer.Option(
+        None,
+        "--max-provider-retries",
+        min=0,
+        help="Maximum provider-level retries for transient errors",
+    ),
     thinking: str = typer.Option(
         "",
         "--thinking",
@@ -709,6 +738,10 @@ def run_agent_command(
     scratch_dir = _unwrap_typer_default(scratch_dir)
     timeout = _unwrap_typer_default(timeout)
     max_iterations = _unwrap_typer_default(max_iterations)
+    iteration_timeout_seconds = _unwrap_typer_default(iteration_timeout_seconds)
+    tool_timeout_seconds = _unwrap_typer_default(tool_timeout_seconds)
+    request_timeout_seconds = _unwrap_typer_default(request_timeout_seconds)
+    max_provider_retries = _unwrap_typer_default(max_provider_retries)
     thinking = _unwrap_typer_default(thinking)
     transcript_path = _unwrap_typer_default(transcript_path)
     usage_path = _unwrap_typer_default(usage_path)
@@ -735,6 +768,10 @@ def run_agent_command(
             thinking=thinking or None,
             timeout=timeout,
             max_iterations=max_iterations,
+            iteration_timeout=iteration_timeout_seconds,
+            tool_timeout=tool_timeout_seconds,
+            request_timeout=request_timeout_seconds,
+            max_provider_retries=max_provider_retries,
             transcript_path=transcript_path or None,
             usage_path=usage_path or None,
             session_db_path=session_db_path,
