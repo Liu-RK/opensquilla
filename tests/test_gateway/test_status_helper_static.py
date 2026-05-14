@@ -37,6 +37,25 @@ def test_sessions_view_uses_status_helper() -> None:
     assert "=== 'running' || s.status === 'active'" not in source
 
 
+def test_sessions_view_uses_run_status_for_active_display() -> None:
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+
+    assert "_sessionRunStatus(" in source
+    assert "activeRuns" in source
+    assert "run_status" in source
+    assert "Executing" in source
+    assert "open ·" in source
+    assert "live conversations" not in source
+
+
+def test_sessions_view_does_not_count_killed_as_errored() -> None:
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+
+    assert "failedOrTimedOut" in source
+    assert "aborted" in source
+    assert "s.status === 'failed' || s.status === 'killed' || s.status === 'timeout'" not in source
+
+
 def test_overview_view_uses_status_helper() -> None:
     source = OVERVIEW_JS.read_text(encoding="utf-8")
 

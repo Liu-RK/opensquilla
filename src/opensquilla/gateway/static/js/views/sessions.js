@@ -31,7 +31,7 @@ const SessionsView = (() => {
           <div class="sess-stage__title-block">
             <span class="sess-stage__eyebrow">Control · Sessions</span>
             <h2 class="sess-stage__title">Sessions</h2>
-            <p class="sess-stage__subtitle">Live conversations and agent runs — open one to chat, or clean up old state.</p>
+            <p class="sess-stage__subtitle">Session history, current task activity, and agent runs — open one to chat, or clean up old state.</p>
           </div>
           <div class="sess-stage__actions">
             <div class="sess-search-wrap">
@@ -194,11 +194,14 @@ const SessionsView = (() => {
     const wrap = _el && _el.querySelector('#stat-row');
     if (!wrap) return;
     const total = _allSessions.length;
-    const running = _allSessions.filter(s => s.status === 'running').length;
+    const lifecycleOpen = _allSessions.filter(s => s.status === 'running').length;
+    const activeRuns = _allSessions.filter(s => {
+      const runStatus = _sessionRunStatus(s);
+      return runStatus === 'queued' || runStatus === 'running';
+    }).length;
     const done = _allSessions.filter(s => s.status === 'done').length;
-    const errored = _allSessions.filter(s =>
-      s.status === 'failed' || s.status === 'killed' || s.status === 'timeout'
-    ).length;
+    const failedOrTimedOut = _allSessions.filter(s => s.status === 'failed' || s.status === 'timeout').length;
+    const aborted = _allSessions.filter(s => s.status === 'killed').length;
     const totalMessages = _allSessions.reduce((acc, s) => acc + (Number(s.message_count) || 0), 0);
     const totalSize = _allSessions.reduce((acc, s) => acc + (Number(s.size_bytes) || 0), 0);
     // Distinct agents derived from key prefix `agent:NAME:...` (best-effort).
@@ -212,14 +215,14 @@ const SessionsView = (() => {
       <div class="stat stat--hero">
         <div class="stat-label">Total sessions</div>
         <div class="stat-value">${total}</div>
-        <div class="stat-hint">${running} running · ${done} done · ${errored} errored</div>
+        <div class="stat-hint">${lifecycleOpen} open · ${done} completed · ${failedOrTimedOut} failed/timed out · ${aborted} aborted</div>
       </div>
-      <div class="stat" title="Sessions currently running">
-        <div class="stat-label">Active</div>
+      <div class="stat" title="Sessions with queued or running tasks">
+        <div class="stat-label">Executing</div>
         <div class="stat-value">
-          ${running}${running ? '<span class="dot ok"></span>' : ''}
+          ${activeRuns}${activeRuns ? '<span class="dot ok"></span>' : ''}
         </div>
-        <div class="stat-hint">${running ? 'live conversations' : 'none active'}</div>
+        <div class="stat-hint">${activeRuns ? 'tasks queued/running' : 'none executing'}</div>
       </div>
       <div class="stat">
         <div class="stat-label">Messages</div>
@@ -295,6 +298,7 @@ const SessionsView = (() => {
       const statusCls = UI.sessionStatusClass(status);
       const statusChip = UI.sessionStatusChip(status);
       const statusTip = UI.sessionStatusLabel(status);
+      const runBadge = _runStatusBadge(row);
       const modified = row.updated_at ? UI.relTime(row.updated_at) : '—';
       const isSel = _selected.has(row.key);
       const agentId = row.agent_id || row.agentId || _agentIdFromKey(row.key);
@@ -306,7 +310,7 @@ const SessionsView = (() => {
           <button type="button" class="sess-key-link" data-open-key="${_esc(row.key)}" title="Open chat">${_esc(row.key)}</button>
           ${agentMeta}
         </td>
-        <td><span class="chip ${statusChip}">${_esc(statusTip)}</span></td>
+        <td><div class="sess-status-stack"><span class="chip ${statusChip}">${_esc(statusTip)}</span>${runBadge}</div></td>
         <td class="sess-mono">${row.message_count != null ? Number(row.message_count).toLocaleString() : '—'}</td>
         <td class="sess-mono sess-dim">${_esc(modified)}</td>
         <td class="sess-table__cell--actions">
@@ -693,6 +697,54 @@ const SessionsView = (() => {
     if (typeof key !== 'string') return '';
     const m = /^agent:([^:]+):/.exec(key);
     return m ? m[1] : '';
+  }
+
+  function _normalizeRunStatus(status) {
+    const value = String(status || '').toLowerCase();
+    if (value === 'abandoned') return 'interrupted';
+    if (value === 'succeeded' || value === 'success' || value === 'complete') return 'idle';
+    if (['queued', 'running', 'interrupted', 'failed', 'timeout', 'cancelled'].includes(value)) {
+      return value;
+    }
+    return 'idle';
+  }
+
+  function _sessionRunStatus(row) {
+    row = row || {};
+    const active = row.active_task || row.activeTask || null;
+    const activeStatus = active ? _normalizeRunStatus(active.status) : '';
+    const rawStatus = row.run_status || row.runStatus || active?.status || row.last_task?.status || row.lastTask?.status || '';
+    const runStatus = _normalizeRunStatus(rawStatus);
+    return active && (activeStatus === 'queued' || activeStatus === 'running') ? activeStatus : runStatus;
+  }
+
+  function _runStatusLabel(status) {
+    return {
+      queued: 'Task queued',
+      running: 'Task running',
+      interrupted: 'Interrupted',
+      failed: 'Last task failed',
+      timeout: 'Last task timed out',
+      cancelled: 'Last task cancelled',
+    }[status] || '';
+  }
+
+  function _runStatusChipClass(status) {
+    return {
+      queued: 'chip-warn',
+      running: 'chip-ok',
+      interrupted: 'chip-warn',
+      failed: 'chip-danger',
+      timeout: 'chip-warn',
+    }[status] || '';
+  }
+
+  function _runStatusBadge(row) {
+    const runStatus = _sessionRunStatus(row);
+    const label = _runStatusLabel(runStatus);
+    if (!label) return '';
+    const chipClass = _runStatusChipClass(runStatus);
+    return `<span class="chip ${chipClass} sess-run-chip" title="${_esc(label)}">${_esc(label)}</span>`;
   }
 
   // Render the per-row agent subline. Shows the agent display name when known,

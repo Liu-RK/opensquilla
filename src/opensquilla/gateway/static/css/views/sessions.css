@@ -224,6 +224,15 @@
   gap: 8px;
   min-width: 240px;
 }
+.sess-status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.sess-run-chip {
+  font-size: 10.5px;
+}
 
 .sess-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .sess-dim { color: var(--text-muted); }
