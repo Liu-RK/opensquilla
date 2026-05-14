@@ -108,6 +108,63 @@ def _resolve_webhook_token(
     return None
 
 
+def _build_failure_destination_dict(
+    *,
+    mode: str | None,
+    channel: str | None,
+    to: str | None,
+    account: str | None,
+    webhook_url: str | None,
+    webhook_token: str | None,
+) -> dict[str, Any] | None:
+    """Translate --failure-* flags into a delivery.failureDestination dict.
+
+    Returns None when no failure-* flag is set. Raises BadParameter when the
+    selected mode is missing required fields (webhook URL for webhook mode,
+    channel + recipient for channel mode).
+    """
+    any_failure_flag = any(
+        bool(v) for v in (mode, channel, to, account, webhook_url, webhook_token)
+    )
+    if not any_failure_flag:
+        return None
+    if not mode:
+        raise typer.BadParameter(
+            "--failure-* flags require --failure-mode (channel or webhook)"
+        )
+    mode_norm = mode.strip().lower()
+    if mode_norm not in ("channel", "webhook"):
+        raise typer.BadParameter("--failure-mode must be 'channel' or 'webhook'")
+
+    if mode_norm == "webhook":
+        if not webhook_url:
+            raise typer.BadParameter(
+                "--failure-mode=webhook requires --failure-webhook-url"
+            )
+        fd: dict[str, Any] = {"mode": "webhook", "webhookUrl": webhook_url}
+        if webhook_token:
+            fd["webhookToken"] = webhook_token
+        return fd
+
+    # channel mode
+    if webhook_url or webhook_token:
+        raise typer.BadParameter(
+            "--failure-webhook-* requires --failure-mode=webhook"
+        )
+    if not (channel or to):
+        raise typer.BadParameter(
+            "--failure-mode=channel requires --failure-channel and/or --failure-to"
+        )
+    fd = {"mode": "channel"}
+    if channel:
+        fd["channelName"] = channel.strip().lower()
+    if to:
+        fd["to"] = to
+    if account:
+        fd["accountId"] = account
+    return fd
+
+
 def _build_delivery_params(
     *,
     announce: bool,
@@ -118,11 +175,15 @@ def _build_delivery_params(
     best_effort: bool,
     webhook_url: str | None,
     webhook_token: str | None,
+    failure_destination: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Translate CLI delivery flags into a delivery dict for the cron.add RPC.
 
-    Returns None when the user did not request any delivery override — the
-    backend then falls back to its own inference (session last_channel or none).
+    Returns None when the user did not request any delivery override AND no
+    failure_destination was provided — the backend then falls back to its
+    own inference (session last_channel or none). When only a failure
+    destination is set, returns ``{"failureDestination": {...}}`` so the
+    backend attaches it to the inferred or default primary delivery.
     """
     declared = sum([announce, no_deliver, bool(webhook_url)])
     if declared > 1:
@@ -137,6 +198,8 @@ def _build_delivery_params(
             delivery["webhookToken"] = webhook_token
         if best_effort:
             delivery["bestEffort"] = True
+        if failure_destination is not None:
+            delivery["failureDestination"] = failure_destination
         return delivery
 
     if webhook_token and not webhook_url:
@@ -145,7 +208,10 @@ def _build_delivery_params(
         )
 
     if no_deliver:
-        return {"mode": "none"}
+        result: dict[str, Any] = {"mode": "none"}
+        if failure_destination is not None:
+            result["failureDestination"] = failure_destination
+        return result
 
     # Channel-mode announce. 'last' is a CLI sentinel that means "let the
     # backend infer from the session's last route"; do not forward it as an
@@ -154,6 +220,9 @@ def _build_delivery_params(
     channel_norm = (channel or "").strip().lower()
     has_target = bool(to) or (channel_norm not in ("", "last"))
     if not announce and not has_target and not best_effort and not account:
+        if failure_destination is not None:
+            # FD-only — backend keeps inferred primary delivery and attaches FD.
+            return {"failureDestination": failure_destination}
         return None  # nothing requested
 
     delivery = {"mode": "announce"}
@@ -165,6 +234,8 @@ def _build_delivery_params(
         delivery["accountId"] = account
     if best_effort:
         delivery["bestEffort"] = True
+    if failure_destination is not None:
+        delivery["failureDestination"] = failure_destination
     return delivery
 
 
@@ -368,6 +439,52 @@ def cron_add(
         "--webhook-token-file",
         help="Read webhook bearer token from this file (whitespace-trimmed).",
     ),
+    failure_mode: str | None = typer.Option(
+        None,
+        "--failure-mode",
+        help=(
+            "Route failure alerts separately from primary delivery. "
+            "One of: 'channel', 'webhook'."
+        ),
+    ),
+    failure_channel: str | None = typer.Option(
+        None,
+        "--failure-channel",
+        help="Failure-destination channel name (slack, feishu, …) for --failure-mode=channel.",
+    ),
+    failure_to: str | None = typer.Option(
+        None,
+        "--failure-to",
+        help="Failure-destination recipient (channel-specific) for --failure-mode=channel.",
+    ),
+    failure_account: str | None = typer.Option(
+        None,
+        "--failure-account",
+        help="Failure-destination channel account id (multi-account setups).",
+    ),
+    failure_webhook_url: str | None = typer.Option(
+        None,
+        "--failure-webhook-url",
+        help="Failure-destination webhook URL (http/https) for --failure-mode=webhook.",
+    ),
+    failure_webhook_token: str | None = typer.Option(
+        None,
+        "--failure-webhook-token",
+        help=(
+            "Failure-destination webhook bearer token (visible in shell history; "
+            "prefer --failure-webhook-token-env or --failure-webhook-token-file)."
+        ),
+    ),
+    failure_webhook_token_env: str | None = typer.Option(
+        None,
+        "--failure-webhook-token-env",
+        help="Read failure-destination webhook token from this environment variable.",
+    ),
+    failure_webhook_token_file: str | None = typer.Option(
+        None,
+        "--failure-webhook-token-file",
+        help="Read failure-destination webhook token from this file (trimmed).",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Add a scheduled cron job."""
@@ -399,6 +516,19 @@ def cron_add(
         env=webhook_token_env,
         path=webhook_token_file,
     )
+    failure_token = _resolve_webhook_token(
+        inline=failure_webhook_token,
+        env=failure_webhook_token_env,
+        path=failure_webhook_token_file,
+    )
+    failure_destination = _build_failure_destination_dict(
+        mode=failure_mode,
+        channel=failure_channel,
+        to=failure_to,
+        account=failure_account,
+        webhook_url=failure_webhook_url,
+        webhook_token=failure_token,
+    )
     delivery = _build_delivery_params(
         announce=announce,
         no_deliver=no_deliver,
@@ -408,6 +538,7 @@ def cron_add(
         best_effort=best_effort_deliver,
         webhook_url=webhook_url,
         webhook_token=token,
+        failure_destination=failure_destination,
     )
     if delivery is not None:
         params["delivery"] = delivery
@@ -440,14 +571,60 @@ def cron_update(
         "--wake",
         help="Wake mode: now or next-heartbeat",
     ),
+    failure_mode: str | None = typer.Option(
+        None,
+        "--failure-mode",
+        help=(
+            "Patch the failure-alert route. One of: 'channel', 'webhook'. "
+            "Other delivery fields (primary channel/webhook) are not patchable "
+            "from this CLI — remove + re-add to repoint primary delivery."
+        ),
+    ),
+    failure_channel: str | None = typer.Option(
+        None,
+        "--failure-channel",
+        help="Failure-destination channel name for --failure-mode=channel.",
+    ),
+    failure_to: str | None = typer.Option(
+        None,
+        "--failure-to",
+        help="Failure-destination recipient for --failure-mode=channel.",
+    ),
+    failure_account: str | None = typer.Option(
+        None,
+        "--failure-account",
+        help="Failure-destination channel account id (multi-account setups).",
+    ),
+    failure_webhook_url: str | None = typer.Option(
+        None,
+        "--failure-webhook-url",
+        help="Failure-destination webhook URL for --failure-mode=webhook.",
+    ),
+    failure_webhook_token: str | None = typer.Option(
+        None,
+        "--failure-webhook-token",
+        help=(
+            "Failure-destination webhook bearer token (prefer "
+            "--failure-webhook-token-env or --failure-webhook-token-file)."
+        ),
+    ),
+    failure_webhook_token_env: str | None = typer.Option(
+        None,
+        "--failure-webhook-token-env",
+        help="Read failure-destination webhook token from this environment variable.",
+    ),
+    failure_webhook_token_file: str | None = typer.Option(
+        None,
+        "--failure-webhook-token-file",
+        help="Read failure-destination webhook token from this file (trimmed).",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Update a scheduled cron job.
 
-    Delivery is intentionally NOT patchable from this CLI. Re-pointing a
-    scheduled job to a different channel or webhook is high-impact and the
-    gateway's update path only partially supports it; remove + re-add when
-    delivery needs to change.
+    Primary delivery (channel / webhook URL) is intentionally NOT patchable
+    from this CLI — remove + re-add when those need to change. Failure
+    destination IS patchable via the --failure-* flags.
     """
 
     params: dict[str, Any] = {"id": job_id}
@@ -468,6 +645,23 @@ def cron_update(
         if wake_norm not in _WAKE_MODES:
             raise typer.BadParameter("--wake must be now or next-heartbeat")
         params["wakeMode"] = wake_norm
+
+    failure_token = _resolve_webhook_token(
+        inline=failure_webhook_token,
+        env=failure_webhook_token_env,
+        path=failure_webhook_token_file,
+    )
+    failure_destination = _build_failure_destination_dict(
+        mode=failure_mode,
+        channel=failure_channel,
+        to=failure_to,
+        account=failure_account,
+        webhook_url=failure_webhook_url,
+        webhook_token=failure_token,
+    )
+    if failure_destination is not None:
+        params["delivery"] = {"failureDestination": failure_destination}
+
     if len(params) == 1:
         raise typer.BadParameter("provide at least one field to update")
 

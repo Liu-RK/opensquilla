@@ -43,7 +43,21 @@ def _job_to_wire(j: Any) -> dict[str, Any]:
     session_target = str(d.get("session_target", "isolated"))
     wake_mode = d.get("wake_mode", "now")
     wake_mode_str = wake_mode.value if hasattr(wake_mode, "value") else str(wake_mode)
-    delivery = None if session_target == "main" else d.get("delivery")
+    raw_delivery = d.get("delivery")
+    # Webhook delivery is permitted for any sessionTarget (including main); only
+    # channel/announce modes are suppressed for main because the heartbeat
+    # pipeline handles routing there. Suppressing webhook for main caused
+    # round-trip data loss on read-back.
+    if session_target == "main" and raw_delivery is not None:
+        if isinstance(raw_delivery, dict):
+            mode_value = raw_delivery.get("mode") or ""
+        else:
+            mode_attr = getattr(raw_delivery, "mode", None)
+            mode_value = getattr(mode_attr, "value", "") or str(mode_attr or "")
+        mode_norm = mode_value.strip().lower() if isinstance(mode_value, str) else ""
+        delivery = raw_delivery if mode_norm == "webhook" else None
+    else:
+        delivery = raw_delivery
     text = payload_text(payload, session_target)
     kind = payload_kind(payload, session_target)
     return {  # noqa: PIE810 — wire schema favors flat literal dict
@@ -684,14 +698,44 @@ async def _handle_cron_update(params: dict | None, ctx: RpcContext) -> dict[str,
         _ensure_delivery_supported(session_target=effective_target, delivery_raw=delivery_raw)
         if isinstance(delivery_raw, dict) and delivery_raw.get("mode") == "none":
             patch["delivery"] = DeliveryConfig()
+        elif _is_webhook_delivery(delivery_raw):
+            new_delivery = _build_webhook_delivery(delivery_raw)
+            new_delivery.ws_topic = current_job.delivery.ws_topic
+            patch["delivery"] = new_delivery
         elif isinstance(delivery_raw, dict) and delivery_raw.get("channelName"):
-            patch["delivery"] = type(current_job.delivery)(
-                mode=type(current_job.delivery.mode).CHANNEL,
+            patch["delivery"] = DeliveryConfig(
+                mode=DeliveryMode.CHANNEL,
                 channel_name=delivery_raw["channelName"],
-                channel_id=delivery_raw.get("channelId", ""),
+                channel_id=delivery_raw.get("channelId") or delivery_raw.get("to", ""),
                 account_id=delivery_raw.get("accountId", ""),
                 thread_id=delivery_raw.get("threadId", ""),
                 ws_topic=current_job.delivery.ws_topic,
+                best_effort=bool(delivery_raw.get("bestEffort", False)),
+                failure_destination=_build_failure_destination(
+                    delivery_raw.get("failureDestination")
+                ),
+            )
+        elif (
+            isinstance(delivery_raw, dict)
+            and delivery_raw.get("failureDestination") is not None
+        ):
+            # Standalone FD patch: keep the existing primary delivery target,
+            # only update the failure_destination side.
+            existing = current_job.delivery
+            patch["delivery"] = DeliveryConfig(
+                mode=existing.mode,
+                channel_name=existing.channel_name,
+                channel_id=existing.channel_id,
+                account_id=existing.account_id,
+                thread_id=existing.thread_id,
+                ws_topic=existing.ws_topic,
+                originating_reply_target=existing.originating_reply_target,
+                webhook_url=existing.webhook_url,
+                webhook_token=existing.webhook_token,
+                best_effort=existing.best_effort,
+                failure_destination=_build_failure_destination(
+                    delivery_raw["failureDestination"]
+                ),
             )
 
     if "toolPolicy" in params or "tool_policy" in params:

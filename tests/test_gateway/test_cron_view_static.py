@@ -46,3 +46,24 @@ def test_cron_form_explains_main_vs_agent_task_session_targets() -> None:
     assert "Main is locked for reminders." in source
     assert "runs in its own cron session, separate from Main" in source
     assert 'placeholder="agent:main:webchat:abc123"' in source
+
+
+def test_cron_form_exposes_timezone_and_advanced_delivery() -> None:
+    """Timezone field + Advanced fold (wake/delivery/failure-destination)
+    must be present in the panel so the WebUI can reach scheduler features
+    that the RPC and CLI already expose."""
+    source = CRON_JS.read_text(encoding="utf-8")
+
+    assert 'id="cp-tz"' in source
+    assert 'id="cp-wake-mode"' in source
+    assert 'id="cp-delivery-mode"' in source
+    assert 'id="cp-delivery-webhook-url"' in source
+    assert 'id="cp-delivery-best-effort"' in source
+    assert 'id="cp-fd-mode"' in source
+    assert 'id="cp-fd-webhook-url"' in source
+    assert 'class="cron-advanced"' in source
+
+    # _saveJob must forward the new fields onto the wire payload.
+    assert "payload.tz = tz" in source
+    assert "payload.wakeMode = wakeMode" in source
+    assert "payload.delivery = delivery" in source

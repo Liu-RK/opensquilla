@@ -8,7 +8,6 @@ hit a gateway.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,6 @@ import pytest
 import typer
 
 from opensquilla.cli import cron_cmd
-
 
 # --- _parse_duration_seconds ---------------------------------------------
 
@@ -239,6 +237,92 @@ def test_build_delivery_with_account_implies_announce() -> None:
     }
 
 
+# --- _build_failure_destination_dict -------------------------------------
+
+
+def test_failure_dest_none_when_no_flags() -> None:
+    assert (
+        cron_cmd._build_failure_destination_dict(
+            mode=None,
+            channel=None,
+            to=None,
+            account=None,
+            webhook_url=None,
+            webhook_token=None,
+        )
+        is None
+    )
+
+
+def test_failure_dest_webhook() -> None:
+    fd = cron_cmd._build_failure_destination_dict(
+        mode="webhook",
+        channel=None,
+        to=None,
+        account=None,
+        webhook_url="https://hooks.example/alert",
+        webhook_token="bearer-x",
+    )
+    assert fd == {
+        "mode": "webhook",
+        "webhookUrl": "https://hooks.example/alert",
+        "webhookToken": "bearer-x",
+    }
+
+
+def test_failure_dest_channel() -> None:
+    fd = cron_cmd._build_failure_destination_dict(
+        mode="channel",
+        channel="Slack",
+        to="C-ops",
+        account="acct-1",
+        webhook_url=None,
+        webhook_token=None,
+    )
+    assert fd == {
+        "mode": "channel",
+        "channelName": "slack",
+        "to": "C-ops",
+        "accountId": "acct-1",
+    }
+
+
+def test_failure_dest_webhook_requires_url() -> None:
+    with pytest.raises(typer.BadParameter, match="--failure-webhook-url"):
+        cron_cmd._build_failure_destination_dict(
+            mode="webhook",
+            channel=None,
+            to=None,
+            account=None,
+            webhook_url=None,
+            webhook_token=None,
+        )
+
+
+def test_failure_dest_rejects_unknown_mode() -> None:
+    with pytest.raises(typer.BadParameter, match="channel.*webhook"):
+        cron_cmd._build_failure_destination_dict(
+            mode="email",
+            channel=None,
+            to=None,
+            account=None,
+            webhook_url=None,
+            webhook_token=None,
+        )
+
+
+def test_failure_dest_flag_without_mode() -> None:
+    with pytest.raises(typer.BadParameter, match="--failure-mode"):
+        cron_cmd._build_failure_destination_dict(
+            mode=None,
+            channel="slack",
+            to="C-x",
+            account=None,
+            webhook_url=None,
+            webhook_token=None,
+        )
+
+
 # --- cron_add / cron_update RPC param construction ------------------------
 
 
@@ -287,6 +371,14 @@ def test_cron_add_with_announce_and_channel(stub_gateway) -> None:
         webhook_token=None,
         webhook_token_env=None,
         webhook_token_file=None,
+        failure_mode=None,
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url=None,
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
         json_output=False,
     )
     assert stub_gateway.calls, "no RPC call was issued"
@@ -322,6 +414,14 @@ def test_cron_add_with_webhook(stub_gateway, monkeypatch) -> None:
         webhook_token=None,
         webhook_token_env="HOOK_TOKEN",
         webhook_token_file=None,
+        failure_mode=None,
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url=None,
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
         json_output=False,
     )
     method, params = stub_gateway.calls[-1]
@@ -330,6 +430,51 @@ def test_cron_add_with_webhook(stub_gateway, monkeypatch) -> None:
         "mode": "webhook",
         "webhookUrl": "https://hooks.example/cron",
         "webhookToken": "from-env",
+    }
+
+
+def test_cron_add_with_failure_destination(stub_gateway) -> None:
+    cron_cmd.cron_add(
+        expression="0 9 * * *",
+        text="Daily brief",
+        name=None,
+        agent=None,
+        session_target="isolated",
+        timeout=None,
+        tz=None,
+        wake=None,
+        exact=False,
+        jitter=None,
+        announce=True,
+        no_deliver=False,
+        channel="slack",
+        to="C123",
+        account=None,
+        best_effort_deliver=False,
+        webhook_url=None,
+        webhook_token=None,
+        webhook_token_env=None,
+        webhook_token_file=None,
+        failure_mode="webhook",
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url="https://hooks.example/alert",
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
+        json_output=False,
+    )
+    method, params = stub_gateway.calls[-1]
+    assert method == "cron.add"
+    assert params["delivery"] == {
+        "mode": "announce",
+        "channelName": "slack",
+        "to": "C123",
+        "failureDestination": {
+            "mode": "webhook",
+            "webhookUrl": "https://hooks.example/alert",
+        },
     }
 
 
@@ -355,6 +500,14 @@ def test_cron_add_with_wake_and_jitter_duration(stub_gateway) -> None:
         webhook_token=None,
         webhook_token_env=None,
         webhook_token_file=None,
+        failure_mode=None,
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url=None,
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
         json_output=False,
     )
     method, params = stub_gateway.calls[-1]
@@ -400,6 +553,14 @@ def test_cron_update_with_wake(stub_gateway) -> None:
         timeout=None,
         tz=None,
         wake="now",
+        failure_mode=None,
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url=None,
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
         json_output=False,
     )
     method, params = stub_gateway.calls[-1]
@@ -419,5 +580,96 @@ def test_cron_update_requires_at_least_one_field(stub_gateway) -> None:
             timeout=None,
             tz=None,
             wake=None,
+            failure_mode=None,
+            failure_channel=None,
+            failure_to=None,
+            failure_account=None,
+            failure_webhook_url=None,
+            failure_webhook_token=None,
+            failure_webhook_token_env=None,
+            failure_webhook_token_file=None,
+            json_output=False,
+        )
+
+
+def test_cron_update_with_failure_destination_webhook(stub_gateway) -> None:
+    cron_cmd.cron_update(
+        job_id="job-1",
+        expression=None,
+        text=None,
+        name=None,
+        enabled=None,
+        timeout=None,
+        tz=None,
+        wake=None,
+        failure_mode="webhook",
+        failure_channel=None,
+        failure_to=None,
+        failure_account=None,
+        failure_webhook_url="https://hooks.example/alert",
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
+        json_output=False,
+    )
+    method, params = stub_gateway.calls[-1]
+    assert method == "cron.update"
+    assert params["delivery"] == {
+        "failureDestination": {
+            "mode": "webhook",
+            "webhookUrl": "https://hooks.example/alert",
+        }
+    }
+
+
+def test_cron_update_with_failure_destination_channel(stub_gateway) -> None:
+    cron_cmd.cron_update(
+        job_id="job-1",
+        expression=None,
+        text=None,
+        name=None,
+        enabled=None,
+        timeout=None,
+        tz=None,
+        wake=None,
+        failure_mode="channel",
+        failure_channel="slack",
+        failure_to="C-ops",
+        failure_account=None,
+        failure_webhook_url=None,
+        failure_webhook_token=None,
+        failure_webhook_token_env=None,
+        failure_webhook_token_file=None,
+        json_output=False,
+    )
+    method, params = stub_gateway.calls[-1]
+    assert params["delivery"] == {
+        "failureDestination": {
+            "mode": "channel",
+            "channelName": "slack",
+            "to": "C-ops",
+        }
+    }
+
+
+def test_cron_update_failure_webhook_missing_url(stub_gateway) -> None:
+    with pytest.raises(typer.BadParameter, match="--failure-webhook-url"):
+        cron_cmd.cron_update(
+            job_id="job-1",
+            expression=None,
+            text=None,
+            name=None,
+            enabled=None,
+            timeout=None,
+            tz=None,
+            wake=None,
+            failure_mode="webhook",
+            failure_channel=None,
+            failure_to=None,
+            failure_account=None,
+            failure_webhook_url=None,
+            failure_webhook_token=None,
+            failure_webhook_token_env=None,
+            failure_webhook_token_file=None,
             json_output=False,
         )

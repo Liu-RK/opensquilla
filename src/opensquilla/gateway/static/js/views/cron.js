@@ -116,6 +116,12 @@ const CronView = (() => {
             <input class="cron-field__input" id="cp-at" type="text" placeholder="09:00">
           </div>
 
+          <div class="cron-field" id="cp-tz-row">
+            <label class="cron-field__label" for="cp-tz">Timezone (IANA)</label>
+            <input class="cron-field__input cron-field__input--mono" id="cp-tz" type="text" placeholder="America/Los_Angeles" autocomplete="off" spellcheck="false">
+            <div class="cron-field__hint">Leave empty to evaluate the cron expression in UTC. Example: <code>Asia/Shanghai</code>, <code>Europe/London</code>.</div>
+          </div>
+
           <div class="cron-field">
             <label class="cron-field__label" for="cp-payload-kind">Job mode</label>
             <select class="cron-field__input" id="cp-payload-kind">
@@ -152,6 +158,92 @@ const CronView = (() => {
             <textarea class="cron-field__input cron-field__input--textarea" id="cp-message" rows="4" placeholder="Run daily report…"></textarea>
           </div>
 
+          <details class="cron-advanced" id="cp-advanced">
+            <summary class="cron-advanced__summary">Advanced delivery &amp; wake</summary>
+            <div class="cron-advanced__body">
+              <div class="cron-field">
+                <label class="cron-field__label" for="cp-wake-mode">Wake mode</label>
+                <select class="cron-field__input" id="cp-wake-mode">
+                  <option value="now">Now (fire immediately on schedule)</option>
+                  <option value="next-heartbeat">Next heartbeat (defer to main loop)</option>
+                </select>
+                <div class="cron-field__hint">Use <code>next-heartbeat</code> for main-session jobs that should ride the existing turn queue.</div>
+              </div>
+
+              <div class="cron-field">
+                <label class="cron-field__label" for="cp-delivery-mode">Delivery mode</label>
+                <select class="cron-field__input" id="cp-delivery-mode">
+                  <option value="">Default (inferred from session)</option>
+                  <option value="none">None (run silently)</option>
+                  <option value="announce">Announce to channel</option>
+                  <option value="webhook">Post to webhook</option>
+                </select>
+              </div>
+
+              <div class="cron-field" id="cp-delivery-channel-row" hidden>
+                <label class="cron-field__label" for="cp-delivery-channel">Channel</label>
+                <input class="cron-field__input" id="cp-delivery-channel" type="text" placeholder="slack" autocomplete="off">
+              </div>
+              <div class="cron-field" id="cp-delivery-to-row" hidden>
+                <label class="cron-field__label" for="cp-delivery-to">Recipient</label>
+                <input class="cron-field__input" id="cp-delivery-to" type="text" placeholder="C-team-alerts" autocomplete="off">
+              </div>
+              <div class="cron-field" id="cp-delivery-account-row" hidden>
+                <label class="cron-field__label" for="cp-delivery-account">Account id</label>
+                <input class="cron-field__input" id="cp-delivery-account" type="text" placeholder="" autocomplete="off">
+              </div>
+
+              <div class="cron-field" id="cp-delivery-webhook-url-row" hidden>
+                <label class="cron-field__label" for="cp-delivery-webhook-url">Webhook URL</label>
+                <input class="cron-field__input cron-field__input--mono" id="cp-delivery-webhook-url" type="url" placeholder="https://hooks.example/cron" autocomplete="off">
+              </div>
+              <div class="cron-field" id="cp-delivery-webhook-token-row" hidden>
+                <label class="cron-field__label" for="cp-delivery-webhook-token">Webhook bearer token</label>
+                <input class="cron-field__input" id="cp-delivery-webhook-token" type="password" placeholder="optional bearer token" autocomplete="off">
+              </div>
+
+              <label class="cron-toggle" id="cp-delivery-best-effort-row" hidden>
+                <input type="checkbox" id="cp-delivery-best-effort">
+                <span class="cron-toggle__track"><span class="cron-toggle__thumb"></span></span>
+                <span class="cron-toggle__label">Best-effort delivery (do not fail the job when delivery fails)</span>
+              </label>
+
+              <details class="cron-advanced cron-advanced--nested" id="cp-fd-fold">
+                <summary class="cron-advanced__summary">Failure destination</summary>
+                <div class="cron-advanced__body">
+                  <div class="cron-field">
+                    <label class="cron-field__label" for="cp-fd-mode">Route failures to</label>
+                    <select class="cron-field__input" id="cp-fd-mode">
+                      <option value="">Disabled (no separate failure alert)</option>
+                      <option value="channel">A channel</option>
+                      <option value="webhook">A webhook</option>
+                    </select>
+                  </div>
+                  <div class="cron-field" id="cp-fd-channel-row" hidden>
+                    <label class="cron-field__label" for="cp-fd-channel">Channel</label>
+                    <input class="cron-field__input" id="cp-fd-channel" type="text" placeholder="slack" autocomplete="off">
+                  </div>
+                  <div class="cron-field" id="cp-fd-to-row" hidden>
+                    <label class="cron-field__label" for="cp-fd-to">Recipient</label>
+                    <input class="cron-field__input" id="cp-fd-to" type="text" placeholder="C-ops-alerts" autocomplete="off">
+                  </div>
+                  <div class="cron-field" id="cp-fd-account-row" hidden>
+                    <label class="cron-field__label" for="cp-fd-account">Account id</label>
+                    <input class="cron-field__input" id="cp-fd-account" type="text" placeholder="" autocomplete="off">
+                  </div>
+                  <div class="cron-field" id="cp-fd-webhook-url-row" hidden>
+                    <label class="cron-field__label" for="cp-fd-webhook-url">Webhook URL</label>
+                    <input class="cron-field__input cron-field__input--mono" id="cp-fd-webhook-url" type="url" placeholder="https://hooks.example/alert" autocomplete="off">
+                  </div>
+                  <div class="cron-field" id="cp-fd-webhook-token-row" hidden>
+                    <label class="cron-field__label" for="cp-fd-webhook-token">Webhook bearer token</label>
+                    <input class="cron-field__input" id="cp-fd-webhook-token" type="password" placeholder="optional bearer token" autocomplete="off">
+                  </div>
+                </div>
+              </details>
+            </div>
+          </details>
+
           <label class="cron-toggle">
             <input type="checkbox" id="cp-enabled" checked>
             <span class="cron-toggle__track"><span class="cron-toggle__thumb"></span></span>
@@ -184,6 +276,8 @@ const CronView = (() => {
         inp.focus();
       });
     });
+    _el.querySelector('#cp-delivery-mode').addEventListener('change', _onDeliveryModeChange);
+    _el.querySelector('#cp-fd-mode').addEventListener('change', _onFailureDestModeChange);
     _el.querySelector('#cron-search').addEventListener('input', (e) => {
       _searchText = e.target.value.toLowerCase();
       _renderTable();
@@ -814,7 +908,12 @@ const CronView = (() => {
     _el.querySelector('#cp-cron').value = expression;
     _el.querySelector('#cp-every').value = job ? (job.every_seconds || '') : '';
     _el.querySelector('#cp-at').value = job ? (job.at_time || '') : '';
+    _el.querySelector('#cp-tz').value = job ? (job.tz || '') : (tpl.tz || '');
+    _el.querySelector('#cp-wake-mode').value = job ? (job.wakeMode || job.wake_mode || 'now') : (tpl.wakeMode || 'now');
+    _populateDeliveryFields(job);
     _onTypeChange();
+    _onDeliveryModeChange();
+    _onFailureDestModeChange();
     _renderCronExplain(expression);
 
     panel.hidden = false;
@@ -894,6 +993,127 @@ const CronView = (() => {
     }
   }
 
+  function _onDeliveryModeChange() {
+    const mode = _el.querySelector('#cp-delivery-mode').value;
+    const isAnnounce = mode === 'announce';
+    const isWebhook = mode === 'webhook';
+    const showAny = isAnnounce || isWebhook;
+    _el.querySelector('#cp-delivery-channel-row').hidden = !isAnnounce;
+    _el.querySelector('#cp-delivery-to-row').hidden = !isAnnounce;
+    _el.querySelector('#cp-delivery-account-row').hidden = !isAnnounce;
+    _el.querySelector('#cp-delivery-webhook-url-row').hidden = !isWebhook;
+    _el.querySelector('#cp-delivery-webhook-token-row').hidden = !isWebhook;
+    _el.querySelector('#cp-delivery-best-effort-row').hidden = !showAny;
+  }
+
+  function _onFailureDestModeChange() {
+    const mode = _el.querySelector('#cp-fd-mode').value;
+    const isChannel = mode === 'channel';
+    const isWebhook = mode === 'webhook';
+    _el.querySelector('#cp-fd-channel-row').hidden = !isChannel;
+    _el.querySelector('#cp-fd-to-row').hidden = !isChannel;
+    _el.querySelector('#cp-fd-account-row').hidden = !isChannel;
+    _el.querySelector('#cp-fd-webhook-url-row').hidden = !isWebhook;
+    _el.querySelector('#cp-fd-webhook-token-row').hidden = !isWebhook;
+  }
+
+  function _populateDeliveryFields(job) {
+    const d = (job && job.delivery) || {};
+    const mode = (d.mode || '').toLowerCase();
+    // 'none' from the wire is a real user choice; '' / null means "inferred".
+    const uiMode =
+      mode === 'webhook' ? 'webhook'
+      : mode === 'announce' || mode === 'channel' ? 'announce'
+      : mode === 'none' ? 'none'
+      : '';
+    _el.querySelector('#cp-delivery-mode').value = uiMode;
+    _el.querySelector('#cp-delivery-channel').value = d.channelName || '';
+    _el.querySelector('#cp-delivery-to').value = d.to || d.channelId || '';
+    _el.querySelector('#cp-delivery-account').value = d.accountId || '';
+    _el.querySelector('#cp-delivery-webhook-url').value = d.webhookUrl || '';
+    _el.querySelector('#cp-delivery-webhook-token').value = '';
+    _el.querySelector('#cp-delivery-best-effort').checked = !!d.bestEffort;
+
+    const fd = d.failureDestination || {};
+    const fdMode = (fd.mode || '').toLowerCase();
+    const uiFdMode =
+      fdMode === 'webhook' ? 'webhook'
+      : fdMode === 'channel' || fdMode === 'announce' ? 'channel'
+      : '';
+    _el.querySelector('#cp-fd-mode').value = uiFdMode;
+    _el.querySelector('#cp-fd-channel').value = fd.channelName || '';
+    _el.querySelector('#cp-fd-to').value = fd.to || fd.channelId || '';
+    _el.querySelector('#cp-fd-account').value = fd.accountId || '';
+    _el.querySelector('#cp-fd-webhook-url').value = fd.webhookUrl || '';
+    _el.querySelector('#cp-fd-webhook-token').value = '';
+  }
+
+  function _buildDeliveryFromForm() {
+    const mode = _el.querySelector('#cp-delivery-mode').value;
+    const fdMode = _el.querySelector('#cp-fd-mode').value;
+    const bestEffort = _el.querySelector('#cp-delivery-best-effort').checked;
+    if (!mode && !fdMode) return null;
+
+    const fd = _buildFailureDestinationFromForm();
+
+    if (mode === 'none') {
+      const out = { mode: 'none' };
+      if (fd) out.failureDestination = fd;
+      return out;
+    }
+    if (mode === 'webhook') {
+      const url = _el.querySelector('#cp-delivery-webhook-url').value.trim();
+      if (!url) { UI.toast('Webhook URL is required for webhook delivery', 'warn'); return undefined; }
+      const out = { mode: 'webhook', webhookUrl: url };
+      const tok = _el.querySelector('#cp-delivery-webhook-token').value.trim();
+      if (tok) out.webhookToken = tok;
+      if (bestEffort) out.bestEffort = true;
+      if (fd) out.failureDestination = fd;
+      return out;
+    }
+    if (mode === 'announce') {
+      const out = { mode: 'announce' };
+      const ch = _el.querySelector('#cp-delivery-channel').value.trim();
+      const to = _el.querySelector('#cp-delivery-to').value.trim();
+      const acct = _el.querySelector('#cp-delivery-account').value.trim();
+      if (ch) out.channelName = ch.toLowerCase();
+      if (to) out.to = to;
+      if (acct) out.accountId = acct;
+      if (bestEffort) out.bestEffort = true;
+      if (fd) out.failureDestination = fd;
+      return out;
+    }
+    // mode is empty but fd is set → standalone failure-destination patch.
+    if (fd) return { failureDestination: fd };
+    return null;
+  }
+
+  function _buildFailureDestinationFromForm() {
+    const mode = _el.querySelector('#cp-fd-mode').value;
+    if (!mode) return null;
+    if (mode === 'webhook') {
+      const url = _el.querySelector('#cp-fd-webhook-url').value.trim();
+      if (!url) { UI.toast('Failure-destination webhook URL is required', 'warn'); return undefined; }
+      const out = { mode: 'webhook', webhookUrl: url };
+      const tok = _el.querySelector('#cp-fd-webhook-token').value.trim();
+      if (tok) out.webhookToken = tok;
+      return out;
+    }
+    // channel mode
+    const ch = _el.querySelector('#cp-fd-channel').value.trim();
+    const to = _el.querySelector('#cp-fd-to').value.trim();
+    const acct = _el.querySelector('#cp-fd-account').value.trim();
+    if (!ch && !to) {
+      UI.toast('Failure destination channel needs a channel or recipient', 'warn');
+      return undefined;
+    }
+    const out = { mode: 'channel' };
+    if (ch) out.channelName = ch.toLowerCase();
+    if (to) out.to = to;
+    if (acct) out.accountId = acct;
+    return out;
+  }
+
   function _saveJob() {
     const name = _el.querySelector('#cp-name').value.trim();
     if (!name) { UI.toast('Name is required', 'warn'); return; }
@@ -910,6 +1130,17 @@ const CronView = (() => {
     const payload = { name, enabled, payloadKind, agentId, sessionTarget, text: message };
     if (type !== 'cron') { UI.toast('Only cron expressions are supported currently', 'warn'); return; }
     payload.expression = _el.querySelector('#cp-cron').value.trim();
+
+    const tz = _el.querySelector('#cp-tz').value.trim();
+    if (tz) payload.tz = tz;
+
+    const wakeMode = _el.querySelector('#cp-wake-mode').value;
+    if (wakeMode && wakeMode !== 'now') payload.wakeMode = wakeMode;
+
+    const delivery = _buildDeliveryFromForm();
+    if (delivery === undefined) return; // validation toast already emitted
+    if (delivery !== null) payload.delivery = delivery;
+
     if (sessionTarget === 'current') {
       const boundSessionKey =
         targetSessionKey || _activeChatSessionKey() || _jobSessionKey(_editingJob);

@@ -12,12 +12,17 @@ from typing import Any
 import pytest
 
 from opensquilla.gateway.rpc import RpcContext
-from opensquilla.gateway.rpc_cron import _handle_cron_add, _job_to_wire
+from opensquilla.gateway.rpc_cron import (
+    _handle_cron_add,
+    _handle_cron_update,
+    _job_to_wire,
+)
 from opensquilla.scheduler.payloads import AGENT_TURN_KIND, SYSTEM_EVENT_KIND
 from opensquilla.scheduler.types import (
     CronJob,
     DeliveryConfig,
     DeliveryMode,
+    FailureDestination,
     SessionTarget,
 )
 
@@ -149,3 +154,148 @@ def test_job_to_wire_includes_webhook_fields() -> None:
     assert wire["delivery"]["mode"] == "webhook"
     assert wire["delivery"]["webhookUrl"] == "https://hooks.example/cron"
     assert wire["delivery"]["bestEffort"] is True
+
+
+def test_job_to_wire_preserves_webhook_for_main_session_target() -> None:
+    """Main + webhook must survive _job_to_wire; only channel modes are suppressed."""
+    job = CronJob(
+        id="job-main-hook",
+        name="main hook",
+        cron_expr="0 9 * * *",
+        schedule_raw="0 9 * * *",
+        handler_key="system_event",
+        payload={"kind": SYSTEM_EVENT_KIND, "text": "x", "agent_id": "main"},
+        session_target=SessionTarget.MAIN,
+        delivery=DeliveryConfig(
+            mode=DeliveryMode.WEBHOOK,
+            webhook_url="https://hooks.example/main",
+        ),
+    )
+    wire = _job_to_wire(job)
+    assert wire["delivery"]["mode"] == "webhook"
+    assert wire["delivery"]["webhookUrl"] == "https://hooks.example/main"
+
+
+def test_job_to_wire_suppresses_channel_delivery_for_main() -> None:
+    """Channel-mode delivery on main is still hidden from the wire payload."""
+    job = CronJob(
+        id="job-main-channel",
+        name="main channel",
+        cron_expr="0 9 * * *",
+        schedule_raw="0 9 * * *",
+        handler_key="system_event",
+        payload={"kind": SYSTEM_EVENT_KIND, "text": "x", "agent_id": "main"},
+        session_target=SessionTarget.MAIN,
+        delivery=DeliveryConfig(
+            mode=DeliveryMode.CHANNEL,
+            channel_name="slack",
+            channel_id="C-x",
+        ),
+    )
+    wire = _job_to_wire(job)
+    assert wire["delivery"]["mode"] == "none"
+
+
+class _UpdateScheduler:
+    """Minimal scheduler stub that records `update_job` and returns a mutated job."""
+
+    def __init__(self, current: CronJob) -> None:
+        self._current = current
+        self.last_patch: dict[str, Any] | None = None
+
+    async def get_job(self, job_id: str) -> CronJob | None:
+        return self._current if job_id == self._current.id else None
+
+    async def update_job(self, job_id: str, **patch) -> CronJob:
+        self.last_patch = patch
+        for key, value in patch.items():
+            setattr(self._current, key, value)
+        return self._current
+
+    async def pause_job(self, job_id: str) -> CronJob:  # pragma: no cover
+        return self._current
+
+    async def resume_job(self, job_id: str) -> CronJob:  # pragma: no cover
+        return self._current
+
+
+async def test_rpc_cron_update_patches_webhook_with_best_effort_and_fd() -> None:
+    """cron.update accepts a webhook delivery patch with bestEffort + failureDestination."""
+    current = CronJob(
+        id="job-1",
+        name="hook",
+        cron_expr="*/5 * * * *",
+        schedule_raw="*/5 * * * *",
+        handler_key="agent_run",
+        payload={"kind": AGENT_TURN_KIND, "task": "x", "agent_id": "main"},
+        session_target=SessionTarget.ISOLATED,
+        delivery=DeliveryConfig(),
+    )
+    scheduler = _UpdateScheduler(current)
+    await _handle_cron_update(
+        {
+            "id": "job-1",
+            "delivery": {
+                "mode": "webhook",
+                "webhookUrl": "https://hooks.example/cron",
+                "webhookToken": "secret",
+                "bestEffort": True,
+                "failureDestination": {
+                    "mode": "channel",
+                    "channelName": "slack",
+                    "channelId": "C-ops",
+                },
+            },
+        },
+        RpcContext(conn_id="t", cron_scheduler=scheduler),
+    )
+    assert scheduler.last_patch is not None
+    new_delivery: DeliveryConfig = scheduler.last_patch["delivery"]
+    assert new_delivery.mode == DeliveryMode.WEBHOOK
+    assert new_delivery.webhook_url == "https://hooks.example/cron"
+    assert new_delivery.webhook_token == "secret"
+    assert new_delivery.best_effort is True
+    fd = new_delivery.failure_destination
+    assert isinstance(fd, FailureDestination)
+    assert fd.mode == DeliveryMode.CHANNEL
+    assert fd.channel_name == "slack"
+    assert fd.channel_id == "C-ops"
+
+
+async def test_rpc_cron_update_standalone_failure_destination_keeps_primary() -> None:
+    """A delivery patch carrying only failureDestination preserves primary delivery."""
+    current = CronJob(
+        id="job-2",
+        name="hook",
+        cron_expr="*/5 * * * *",
+        schedule_raw="*/5 * * * *",
+        handler_key="agent_run",
+        payload={"kind": AGENT_TURN_KIND, "task": "x", "agent_id": "main"},
+        session_target=SessionTarget.ISOLATED,
+        delivery=DeliveryConfig(
+            mode=DeliveryMode.WEBHOOK,
+            webhook_url="https://hooks.example/primary",
+            best_effort=True,
+        ),
+    )
+    scheduler = _UpdateScheduler(current)
+    await _handle_cron_update(
+        {
+            "id": "job-2",
+            "delivery": {
+                "failureDestination": {
+                    "mode": "webhook",
+                    "webhookUrl": "https://hooks.example/alert",
+                }
+            },
+        },
+        RpcContext(conn_id="t", cron_scheduler=scheduler),
+    )
+    new_delivery: DeliveryConfig = scheduler.last_patch["delivery"]
+    assert new_delivery.mode == DeliveryMode.WEBHOOK
+    assert new_delivery.webhook_url == "https://hooks.example/primary"
+    assert new_delivery.best_effort is True
+    fd = new_delivery.failure_destination
+    assert isinstance(fd, FailureDestination)
+    assert fd.mode == DeliveryMode.WEBHOOK
+    assert fd.webhook_url == "https://hooks.example/alert"
