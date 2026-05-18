@@ -203,6 +203,35 @@ class SessionUsage:
         ]
 
 
+@dataclass
+class SessionTotalsSnapshot:
+    """Point-in-time aggregate of a session's token usage and cost.
+
+    Embedded in `DoneEvent` so consumers do not need a follow-up
+    `usage.status` RPC to render session totals. `None` on `DoneEvent`
+    means "no snapshot available" (legacy replay), distinct from a
+    populated snapshot whose numeric fields happen to be zero.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float = 0.0
+    billed_cost: float = 0.0
+
+    @classmethod
+    def from_session(cls, usage: "SessionUsage") -> "SessionTotalsSnapshot":
+        return cls(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            cost_usd=usage.total_cost,
+            billed_cost=usage.billed_cost,
+        )
+
+
 class UsageTracker:
     """Tracks per-session token usage and cost."""
 
@@ -244,6 +273,13 @@ class UsageTracker:
     def get(self, session_key: str) -> SessionUsage | None:
         """Return accumulated usage for a session, or None."""
         return self._sessions.get(session_key)
+
+    def session_snapshot(self, session_key: str) -> SessionTotalsSnapshot | None:
+        """Return the current SessionTotalsSnapshot for *session_key*, or None if unknown."""
+        usage = self._sessions.get(session_key)
+        if usage is None:
+            return None
+        return SessionTotalsSnapshot.from_session(usage)
 
     def get_cost(self, session_key: str) -> float:
         """Return accumulated cost in USD for a session."""

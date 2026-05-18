@@ -512,10 +512,8 @@ class _RecordingRenderer:
         usage=None,
         *,
         cancelled: bool = False,
-        cumulative_cost: float | None = None,
     ) -> None:
         self.finalized = True
-        self.cumulative_cost = cumulative_cost
 
 
 @pytest.mark.asyncio
@@ -869,80 +867,6 @@ async def test_standalone_turnrunner_wires_tool_strip(monkeypatch) -> None:
         ("call-2", False),
         ("call-3", False),
     ]
-
-
-@pytest.mark.asyncio
-async def test_resolve_gateway_session_cost_picks_matching_entry() -> None:
-    """The helper must return the cost for *this* session, not the first one."""
-
-    class _Client:
-        async def usage_status(self):
-            return {
-                "sessions": [
-                    {"session_key": "agent:other", "cost_usd": 9.99},
-                    {"session_key": "agent:main:cli:abc", "cost_usd": 2.789012},
-                ]
-            }
-
-    cost = await chat_cmd._resolve_gateway_session_cost(_Client(), "agent:main:cli:abc")
-    assert cost == pytest.approx(2.789012)
-
-
-@pytest.mark.asyncio
-async def test_resolve_gateway_session_cost_returns_none_on_unknown_session() -> None:
-    """Unknown session → no ∑ segment, never silently mis-attribute another session's spend."""
-
-    class _Client:
-        async def usage_status(self):
-            return {"sessions": [{"session_key": "agent:other", "cost_usd": 9.99}]}
-
-    cost = await chat_cmd._resolve_gateway_session_cost(_Client(), "agent:main:cli:abc")
-    assert cost is None
-
-
-@pytest.mark.asyncio
-async def test_resolve_gateway_session_cost_returns_none_on_rpc_failure() -> None:
-    """RPC errors must downgrade silently — footer just omits the ∑ segment."""
-
-    class _Client:
-        async def usage_status(self):
-            raise RuntimeError("gateway down")
-
-    cost = await chat_cmd._resolve_gateway_session_cost(_Client(), "agent:main:cli:abc")
-    assert cost is None
-
-
-@pytest.mark.asyncio
-async def test_resolve_gateway_session_cost_propagates_cancellation() -> None:
-    """Don't swallow CancelledError — let asyncio teardown work normally."""
-
-    class _Client:
-        async def usage_status(self):
-            raise asyncio.CancelledError()
-
-    with pytest.raises(asyncio.CancelledError):
-        await chat_cmd._resolve_gateway_session_cost(_Client(), "agent:main:cli:abc")
-
-
-@pytest.mark.asyncio
-async def test_resolve_gateway_session_cost_swallows_timeout() -> None:
-    """A slow gateway must NOT crash the completed turn.
-
-    An earlier draft re-raised asyncio.TimeoutError alongside CancelledError,
-    so any gateway taking longer than the helper's budget would abort the
-    turn just to print the ∑ segment. Timeout has to fall back to None like
-    every other gateway-side failure.
-    """
-
-    class _Client:
-        async def usage_status(self):
-            await asyncio.sleep(0.5)
-            return {"sessions": []}
-
-    cost = await chat_cmd._resolve_gateway_session_cost(
-        _Client(), "agent:main:cli:abc", timeout=0.05
-    )
-    assert cost is None
 
 
 @pytest.mark.asyncio

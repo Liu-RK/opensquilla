@@ -233,33 +233,16 @@ def _usage(turn_cost: float = 0.5) -> UsageSummary:
     )
 
 
-def test_footer_omits_cumulative_segment_when_no_total() -> None:
-    """Backward-compat: no cumulative_cost → footer matches the pre-upgrade form."""
+def test_footer_renders_per_turn_cost() -> None:
+    """Footer shows per-turn cost; no cumulative segment."""
     renderer = StreamingRenderer()
     line = renderer.footer(_usage(turn_cost=0.123456), elapsed=1.0)
     assert "$0.123456" in line
-    assert "∑" not in line, "cumulative segment must be suppressed when source is absent"
-
-
-def test_footer_appends_session_total_with_sigma() -> None:
-    """Gateway path: pass a session total → footer adds `(∑$X)` after turn cost."""
-    renderer = StreamingRenderer()
-    line = renderer.footer(_usage(turn_cost=0.123456), elapsed=1.0, cumulative_cost=2.789012)
-    assert "$0.123456 (∑$2.789012)" in line, line
-
-
-def test_footer_drops_cumulative_when_zero_or_negative() -> None:
-    """A 0 cumulative is treated as 'no useful data' — keeps ∑ semantics clean."""
-    renderer = StreamingRenderer()
-    zero_line = renderer.footer(_usage(turn_cost=0.5), elapsed=1.0, cumulative_cost=0.0)
-    negative_line = renderer.footer(_usage(turn_cost=0.5), elapsed=1.0, cumulative_cost=-0.01)
-    assert "∑" not in zero_line
-    assert "∑" not in negative_line
-
-
-def test_footer_skips_cumulative_when_turn_cost_zero() -> None:
-    """Free-tier turns don't render a turn-cost segment, so ∑ has no anchor either."""
-    renderer = StreamingRenderer()
-    line = renderer.footer(_usage(turn_cost=0.0), elapsed=1.0, cumulative_cost=2.5)
-    assert "$" not in line, line
     assert "∑" not in line
+
+
+def test_footer_skips_cost_when_turn_cost_zero() -> None:
+    """Free-tier turns with zero cost don't render a cost segment."""
+    renderer = StreamingRenderer()
+    line = renderer.footer(_usage(turn_cost=0.0), elapsed=1.0)
+    assert "$" not in line, line

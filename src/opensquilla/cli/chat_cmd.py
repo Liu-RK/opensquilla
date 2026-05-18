@@ -736,7 +736,7 @@ async def _standalone_repl(
                     )
                     state.transcript.add("user", _image_prompt_from_command(stripped))
                     state.transcript.add("assistant", result.text)
-                    state.usage.add(result.usage)
+                    state.usage.apply(result.usage)
                     continue
                 if parts := _slash_parts(stripped, "/path"):
                     if len(parts) == 1 or not parts[1].strip():
@@ -761,7 +761,7 @@ async def _standalone_repl(
                     )
                     state.transcript.add("user", prompt)
                     state.transcript.add("assistant", result.text)
-                    state.usage.add(result.usage)
+                    state.usage.apply(result.usage)
                     continue
                 console.print("[red]Unknown command.[/red] [dim]Use /help.[/dim]")
                 continue
@@ -777,7 +777,7 @@ async def _standalone_repl(
             )
             state.transcript.add("user", user_input)
             state.transcript.add("assistant", result.text)
-            state.usage.add(result.usage)
+            state.usage.apply(result.usage)
     finally:
         await svc.close()
 
@@ -877,7 +877,7 @@ async def _gateway_chat(model: str | None, session_id: str | None) -> None:
             state.model = result.model_after or state.model
             state.transcript.add("user", user_input)
             state.transcript.add("assistant", result.text)
-            state.usage.add(result.usage)
+            state.usage.apply(result.usage)
     finally:
         await client.close()
 
@@ -1049,7 +1049,7 @@ async def _handle_gateway_slash_command(
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
-        state.usage.add(result.usage)
+        state.usage.apply(result.usage)
         return True
 
     if parts := _slash_parts(cmd, "/path"):
@@ -1073,7 +1073,7 @@ async def _handle_gateway_slash_command(
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
-        state.usage.add(result.usage)
+        state.usage.apply(result.usage)
         return True
 
     if parts := _slash_parts(cmd, "/file"):
@@ -1100,7 +1100,7 @@ async def _handle_gateway_slash_command(
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
-        state.usage.add(result.usage)
+        state.usage.apply(result.usage)
         return True
 
     if _slash_parts_any(cmd, "/permissions", "/elevated"):
@@ -1555,50 +1555,6 @@ def _artifact_status_line(artifact: dict[str, Any]) -> str:
     return f"Generated file: {name} -> {target or artifact.get('id', '')}"
 
 
-async def _resolve_gateway_session_cost(
-    client: _GatewayClientLike,
-    session_key: str,
-    *,
-    timeout: float = 2.0,
-) -> float | None:
-    """Look up the gateway-authoritative cumulative cost for *session_key*.
-
-    Returns ``None`` on RPC failure / timeout / unknown session so the footer
-    falls back to its single-turn snapshot — the ``(∑…)`` segment is reserved
-    for trustworthy session-total numbers that match the WebUI usage panel.
-    """
-    try:
-        payload = await asyncio.wait_for(client.usage_status(), timeout=timeout)
-    except asyncio.CancelledError:
-        # Real teardown signal — propagate so asyncio can unwind the task
-        # tree. The footer ∑ segment is not worth delaying cancellation for.
-        raise
-    except TimeoutError:
-        # 2s budget elapsed; the turn already finished, so silently fall back
-        # to "no ∑ segment" rather than crashing a successful turn.
-        return None
-    except Exception:  # noqa: BLE001 — best-effort lookup, never fail the turn
-        return None
-    sessions = payload.get("sessions") if isinstance(payload, dict) else None
-    if not isinstance(sessions, list):
-        return None
-    for entry in sessions:
-        if not isinstance(entry, dict):
-            continue
-        key = entry.get("session_key") or entry.get("sessionKey")
-        if key != session_key:
-            continue
-        raw = entry.get("cost_usd") if "cost_usd" in entry else entry.get("costUsd")
-        if raw is None:
-            return None
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0 else None
-    return None
-
-
 async def _stream_response_gateway(
     client: _GatewayClientLike,
     session_key: str,
@@ -1671,13 +1627,7 @@ async def _stream_response_gateway(
             _clear_current_cancel()
             await client.abort_session(session_key)
             cancelled = True
-        # Best-effort gateway-side session total: matches the number the WebUI
-        # usage panel shows for the same session_key. Falls back to None (no
-        # ∑ segment) on RPC failure, unknown session, or after a cancel.
-        cumulative_cost = (
-            None if cancelled else await _resolve_gateway_session_cost(client, session_key)
-        )
-        renderer.finalize(usage, cancelled=cancelled, cumulative_cost=cumulative_cost)
+        renderer.finalize(usage, cancelled=cancelled)
     return TurnResult(
         text=renderer.buffer,
         usage=usage,

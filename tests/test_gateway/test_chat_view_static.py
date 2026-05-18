@@ -578,7 +578,7 @@ def test_session_api_token_totals_load_independently_of_token_widget() -> None:
 
     assert "OPENSQUILLA_FEATURES?.tokenViz" not in body
     assert "const usage = await _rpc.call('usage.status');" in body
-    assert "Session API total" in source
+    assert "Turn — input:" in source
 
 
 def test_combo_display_requires_current_saved_turn_but_suppressed_savings_can_count() -> None:

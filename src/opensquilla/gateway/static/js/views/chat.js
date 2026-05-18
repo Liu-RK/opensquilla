@@ -650,7 +650,28 @@ const ChatView = (() => {
       const span = document.createElement('span');
       span.className = 'msg-meta__tokens';
       span.textContent = `↑${_fmtTok(totalIn)} ↓${_fmtTok(totalOut)}`;
-      span.title = `Session API total — input: ${totalIn.toLocaleString()}, output: ${totalOut.toLocaleString()} tokens`;
+      span.title = `Turn — input: ${totalIn.toLocaleString()}, output: ${totalOut.toLocaleString()} tokens`;
+      meta.appendChild(span);
+    }
+    if (u.cached_tokens > 0) {
+      const span = document.createElement('span');
+      span.className = 'msg-meta__cached';
+      span.textContent = `cache:${_fmtTok(u.cached_tokens)}`;
+      span.title = `Cached tokens: ${u.cached_tokens.toLocaleString()}`;
+      meta.appendChild(span);
+    }
+    if (u.reasoning_tokens > 0) {
+      const span = document.createElement('span');
+      span.className = 'msg-meta__reasoning';
+      span.textContent = `think:${_fmtTok(u.reasoning_tokens)}`;
+      span.title = `Reasoning tokens: ${u.reasoning_tokens.toLocaleString()}`;
+      meta.appendChild(span);
+    }
+    if (u.cost_usd > 0) {
+      const span = document.createElement('span');
+      span.className = 'msg-meta__cost';
+      span.textContent = `$${u.cost_usd.toFixed(6).replace(/\.?0+$/, '')}`;
+      span.title = `Turn cost: $${u.cost_usd.toFixed(6)}`;
       meta.appendChild(span);
     }
     if (hasSaved) {
@@ -2336,7 +2357,16 @@ const ChatView = (() => {
         // routed_tier, routing_source, ... }
         // Also support nested { usage: { ... } } for future compat
         const u = payload?.usage || payload || {};
-        if (u.input_tokens || u.output_tokens) {
+        const snapshot = u.session_totals;
+        if (snapshot && typeof snapshot === 'object') {
+          // Authoritative: overwrite from snapshot
+          _usageAccum.input = snapshot.input_tokens | 0;
+          _usageAccum.output = snapshot.output_tokens | 0;
+          _usageAccum.cacheRead = snapshot.cache_read_tokens | 0;
+          _usageAccum.cacheWrite = snapshot.cache_write_tokens | 0;
+          _usageAccum.cost = Number(snapshot.cost_usd || 0);
+        } else if (u.input_tokens || u.output_tokens) {
+          // Fallback: legacy accumulation for transcripts without session_totals
           _usageAccum.input += u.input_tokens || 0;
           _usageAccum.output += u.output_tokens || 0;
           _usageAccum.cacheRead += u.cached_tokens || 0;
@@ -2344,13 +2374,13 @@ const ChatView = (() => {
           if (u.cost_usd != null) {
             _usageAccum.cost = (_usageAccum.cost || 0) + u.cost_usd;
           }
-          if (u.savings_usd > 0) {
-            _usageAccum.sessionSaved = (_usageAccum.sessionSaved || 0) + u.savings_usd;
-          }
-          if (u.model) _usageModel = u.model;
-          _viz.update({ ..._usageAccum, model: _usageModel });
-          _saveWidgetState();
         }
+        if (u.savings_usd > 0) {
+          _usageAccum.sessionSaved = (_usageAccum.sessionSaved || 0) + u.savings_usd;
+        }
+        if (u.model) _usageModel = u.model;
+        _viz.update({ ..._usageAccum, model: _usageModel });
+        _saveWidgetState();
         // Track context usage
         const total = (u.input_tokens || 0) + (u.output_tokens || 0);
         if (total > 0) {
@@ -2382,10 +2412,10 @@ const ChatView = (() => {
         _maybeFireSavingsPopup(_finishedBubble, u);
 
         // Attach model + session token footer below the assistant bubble
-        _attachTurnMeta(_finishedBubble, _usageModel, _usageAccum.input, _usageAccum.output, u);
+        _attachTurnMeta(_finishedBubble, _usageModel, u.input_tokens | 0, u.output_tokens | 0, u);
         const _metaIdx = _messages.filter(m => m.role === 'assistant').length - 1;
         if (_metaIdx >= 0) {
-          _storeTurnMeta(_sessionKey, _metaIdx, _usageModel, _usageAccum.input, _usageAccum.output, {
+          _storeTurnMeta(_sessionKey, _metaIdx, _usageModel, u.input_tokens | 0, u.output_tokens | 0, {
             cached_tokens: u.cached_tokens || 0,
             cache_hit_active: !!u.cache_hit_active,
             model: u.model || _usageModel || null,

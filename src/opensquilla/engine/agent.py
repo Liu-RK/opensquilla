@@ -2507,6 +2507,11 @@ class Agent:
         if terminal_error is None or has_usage:
             if terminal_error is None:
                 yield self._transition(AgentState.DONE)
+            session_totals = (
+                self._usage_tracker.session_snapshot(self._session_key)
+                if self._usage_tracker and self._session_key
+                else None
+            )
             yield DoneEvent(
                 text="".join(final_text_parts),
                 input_tokens=total_input_tokens,
@@ -2524,6 +2529,7 @@ class Agent:
                 reasoning_content=(
                     "\n".join(final_reasoning_parts) if final_reasoning_parts else None
                 ),
+                session_totals=session_totals,
             )
         # Reset for next turn
         self._state = AgentState.IDLE

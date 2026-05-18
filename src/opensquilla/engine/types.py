@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from opensquilla.execution_status import ExecutionStatus
 from opensquilla.tool_boundary import ToolCall as ToolCall
 from opensquilla.tool_boundary import ToolResult as ToolResult
+
+if TYPE_CHECKING:
+    from opensquilla.engine.usage import SessionTotalsSnapshot
 
 
 class ThinkingLevel(StrEnum):
@@ -147,6 +150,7 @@ class DoneEvent:
     # args.
     cache_write_tokens: int = 0
     reasoning_content: str | None = None
+    session_totals: SessionTotalsSnapshot | None = None
 
     @property
     def upstream_cost_usd(self) -> float:

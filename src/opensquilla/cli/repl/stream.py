@@ -7,7 +7,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from opensquilla.engine.usage import SessionTotalsSnapshot
 
 from rich.live import Live
 from rich.text import Text
@@ -60,6 +63,7 @@ class UsageSummary:
     cost_source: str = "none"
     model: str = ""
     aggregate: bool = False
+    session_totals: "SessionTotalsSnapshot | None" = None
 
     @classmethod
     def from_done_event(cls, event: object) -> UsageSummary:
@@ -76,6 +80,19 @@ class UsageSummary:
 
     @classmethod
     def from_gateway_payload(cls, payload: dict[str, Any]) -> UsageSummary:
+        from opensquilla.engine.usage import SessionTotalsSnapshot  # noqa: PLC0415
+
+        raw_totals = payload.get("session_totals")
+        session_totals: SessionTotalsSnapshot | None = None
+        if isinstance(raw_totals, dict):
+            session_totals = SessionTotalsSnapshot(
+                input_tokens=int(raw_totals.get("input_tokens") or 0),
+                output_tokens=int(raw_totals.get("output_tokens") or 0),
+                cache_read_tokens=int(raw_totals.get("cache_read_tokens") or 0),
+                cache_write_tokens=int(raw_totals.get("cache_write_tokens") or 0),
+                cost_usd=float(raw_totals.get("cost_usd") or 0.0),
+                billed_cost=float(raw_totals.get("billed_cost") or 0.0),
+            )
         return cls(
             input_tokens=int(payload.get("input_tokens") or payload.get("inputTokens") or 0),
             output_tokens=int(payload.get("output_tokens") or payload.get("outputTokens") or 0),
@@ -89,6 +106,7 @@ class UsageSummary:
                 payload.get("cost_source") or payload.get("costSource") or "none"
             ),
             model=str(payload.get("model") or ""),
+            session_totals=session_totals,
         )
 
     def has_values(self) -> bool:
@@ -119,6 +137,28 @@ class UsageCounter:
         self.reasoning_tokens += usage.reasoning_tokens
         self.cached_tokens += usage.cached_tokens
         self.cost_usd += usage.cost_usd
+
+    def apply(self, usage: "UsageSummary | None") -> None:
+        """Update counter from a turn's UsageSummary.
+
+        If the upstream DoneEvent shipped a `session_totals` snapshot, the
+        caller passes a UsageSummary carrying `session_totals`; we overwrite
+        from it (authoritative). Otherwise we fall back to `+=` accumulation
+        so transcripts without the new field still render reasonable totals.
+        """
+        if usage is None:
+            return
+        snapshot = getattr(usage, "session_totals", None)
+        if snapshot is not None:
+            self.input_tokens = snapshot.input_tokens
+            self.output_tokens = snapshot.output_tokens
+            self.cached_tokens = snapshot.cache_read_tokens
+            self.cost_usd = snapshot.cost_usd
+            # reasoning_tokens is per-turn only; aggregate via fallback path
+            # since the snapshot does not carry it.
+            self.reasoning_tokens += usage.reasoning_tokens
+        else:
+            self.add(usage)
 
     def reset(self) -> None:
         self.input_tokens = 0
@@ -416,7 +456,6 @@ class StreamingRenderer:
         usage: UsageSummary | None = None,
         *,
         cancelled: bool = False,
-        cumulative_cost: float | None = None,
     ) -> None:
         self._strip.flush()
         self._end_stream_line()
@@ -424,7 +463,7 @@ class StreamingRenderer:
         elapsed = time.monotonic() - self.started_at
         if cancelled:
             console.print("[yellow]turn cancelled[/yellow]")
-        footer = self.footer(usage, elapsed, cumulative_cost=cumulative_cost)
+        footer = self.footer(usage, elapsed)
         if footer:
             console.print(f"[dim]{footer}[/dim]")
 
@@ -432,8 +471,6 @@ class StreamingRenderer:
         self,
         usage: UsageSummary | None,
         elapsed: float,
-        *,
-        cumulative_cost: float | None = None,
     ) -> str:
         parts: list[str] = []
         if usage and usage.model:
@@ -446,11 +483,6 @@ class StreamingRenderer:
             parts.append(f"{usage.reasoning_tokens:,} reasoning")
         if usage and usage.cost_usd:
             cost_part = f"${usage.cost_usd:.6f}"
-            # ∑ marker is reserved for gateway-authoritative session totals so
-            # users can distinguish "single-turn snapshot" from "session total".
-            # Absent ∑ = no cumulative source (standalone mode or RPC failure).
-            if cumulative_cost is not None and cumulative_cost > 0:
-                cost_part += f" (∑${cumulative_cost:.6f})"
             parts.append(cost_part)
         if usage and usage.aggregate:
             parts.append("aggregate")
