@@ -316,21 +316,110 @@ def _merge_summaries(summaries: list[str]) -> str:
     return "\n".join(merged_lines)
 
 
-async def compact_context(request: CompactionRequest) -> CompactionResult:
-    """
-    Determine which entries to compact, summarize them, and return what to keep.
+def _find_turn_boundary_cut(
+    entries: list[dict[str, Any]],
+    keep_budget: int,
+) -> int:
+    """Return the index of the first entry to keep (the cut point).
+
+    The cut is placed at a turn boundary — where the last removed entry is
+    NOT an assistant message with a pending tool call, and the first kept
+    entry is NOT a tool result that belongs to a removed tool call.
 
     Strategy:
-    - Calculate how many tokens we need to free (entries * safety_margin vs window)
-    - Split entries to compact into chunks using base_chunk_ratio
-    - Summarize each chunk via LLM (fallback to text preview on failure)
-    - Keep the most recent entries that fit within budget
+    1. Start from the token-budget cut (walk from the end, accumulate up to budget).
+    2. Walk backward from that cut until we find a boundary that is NOT
+       mid-turn (i.e. the cut does not orphan a tool_call/tool_result pair).
+    3. If no clean boundary exists before reaching the start, accept the
+       initial cut — correctness beats perfect cut placement.
+    """
+    if not entries:
+        return 0
+
+    # Compute the legacy cut index: walk from the end, accumulate up to budget.
+    kept_tokens = 0
+    legacy_keep_start = len(entries)
+    for i in range(len(entries) - 1, -1, -1):
+        t = _entry_tokens(entries[i])
+        if kept_tokens + t <= keep_budget:
+            kept_tokens += t
+            legacy_keep_start = i
+        else:
+            break
+
+    if legacy_keep_start == 0:
+        # Nothing to remove; caller handles no-op.
+        return 0
+
+    # Walk backward from legacy_keep_start toward index 1 looking for a clean
+    # turn boundary. A clean boundary: the last removed entry (index cut-1)
+    # is NOT an assistant message that ends with a tool call whose result is
+    # the first kept entry.
+    cut = legacy_keep_start
+    while cut > 1:
+        last_removed = entries[cut - 1]
+        first_kept = entries[cut] if cut < len(entries) else None
+
+        last_role = last_removed.get("role", "")
+        last_content = str(last_removed.get("content") or "")
+        first_role = first_kept.get("role", "") if first_kept else ""
+
+        # Mid-turn: assistant tool_call removed, tool result would be first kept
+        if (
+            last_role == "assistant"
+            and "[tool_call:" in last_content
+            and first_role == "tool"
+        ):
+            # Move cut one step earlier to avoid splitting the pair.
+            cut -= 1
+            continue
+
+        # Also avoid cutting when a tool result is the first kept entry but its
+        # corresponding assistant call is the last removed entry.
+        # (covered above — same condition)
+
+        # Clean boundary found.
+        break
+
+    return cut
+
+
+async def compact_context_new(request: CompactionRequest) -> CompactionResult:
+    """Cut-point + turn-boundary-aware + incremental-summary compaction (Phase D).
+
+    Differences from :func:`compact_context_legacy`:
+
+    * **Turn-boundary cut**: the split point avoids orphaning an assistant
+      ``[tool_call:...]`` from its paired ``tool`` result.  The legacy path
+      uses a pure token-budget split that may land mid-turn.
+    * **Previous-summary prefix**: if ``request.custom_instructions`` carries a
+      ``__prev_summary__:<text>`` marker the summary is prepended to the new
+      chunk summary so incremental context accumulates.  Normal custom
+      instructions are unaffected.
+
+    Everything else (chunk splitting, LLM calls, fallback, token accounting)
+    is identical to the legacy path so the eval gate can compare the two
+    implementations on the same sessions.
     """
     cfg = request.config
     entries = request.entries
     window = request.context_window_tokens
     total_tokens = sum(_entry_tokens(e) for e in entries)
-    custom_instructions = _normalize_custom_instructions(request.custom_instructions)
+
+    # Extract an optional previous-summary prefix injected by the caller.
+    # Convention: ``custom_instructions`` may carry ``__prev_summary__:<text>``
+    # as the first line.  Strip it before forwarding to ``_normalize_custom_instructions``.
+    raw_ci = request.custom_instructions or ""
+    prev_summary: str = ""
+    if raw_ci.startswith("__prev_summary__:"):
+        first_newline = raw_ci.find("\n")
+        if first_newline == -1:
+            prev_summary = raw_ci[len("__prev_summary__:") :]
+            raw_ci = ""
+        else:
+            prev_summary = raw_ci[len("__prev_summary__:") : first_newline]
+            raw_ci = raw_ci[first_newline + 1 :]
+    custom_instructions = _normalize_custom_instructions(raw_ci or None)
 
     if not entries:
         return CompactionResult(
@@ -344,7 +433,7 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
             remaining_budget_tokens=max(window, 0),
         )
 
-    # If we're within budget, no compaction needed
+    # If we're within budget, no compaction needed.
     if total_tokens * cfg.safety_margin <= window:
         return CompactionResult(
             summary="",
@@ -357,19 +446,12 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
             remaining_budget_tokens=max(window - total_tokens, 0),
         )
 
-    # Determine how many recent entries to keep (fitting in half the window)
     keep_budget = window // 2
-    kept: list[dict[str, Any]] = []
-    kept_tokens = 0
-    for entry in reversed(entries):
-        t = _entry_tokens(entry)
-        if kept_tokens + t <= keep_budget:
-            kept.insert(0, entry)
-            kept_tokens += t
-        else:
-            break
 
-    to_compact = entries[: len(entries) - len(kept)]
+    # Phase D: use turn-boundary-aware cut instead of raw token split.
+    cut = _find_turn_boundary_cut(entries, keep_budget)
+    kept = entries[cut:]
+    to_compact = entries[:cut]
 
     if not to_compact:
         return CompactionResult(
@@ -383,7 +465,6 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
             remaining_budget_tokens=max(window - total_tokens, 0),
         )
 
-    # Determine chunk ratio, falling back to min if chunk would be too large
     chunk_ratio = max(cfg.min_chunk_ratio, cfg.base_chunk_ratio / cfg.default_parts)
     chunks = _chunk_entries(to_compact, chunk_ratio)
 
@@ -403,17 +484,21 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
                 api_key=cfg.api_key,
                 base_url=cfg.base_url,
                 timeout=cfg.timeout_seconds,
-                custom_instructions=custom_instructions,
+                custom_instructions=custom_instructions or None,
             )
             if llm_result:
                 summaries.append(llm_result)
                 llm_chunks += 1
                 continue
-        # Fallback: structured preview (no API key, or LLM call failed)
         summaries.append(_summarize_chunk_fallback(chunk, cfg.identifier_policy))
         fallback_chunks += 1
 
     merged = _merge_summaries(summaries)
+
+    # Prepend previous summary when present (incremental accumulation).
+    if prev_summary:
+        merged = f"[Previous context]\n{prev_summary}\n\n[New context]\n{merged}"
+
     tokens_after = _estimate_tokens(merged) + sum(_entry_tokens(e) for e in kept)
     if llm_chunks and fallback_chunks:
         summary_source = "mixed"
@@ -423,12 +508,13 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
         summary_source = "fallback"
 
     log.info(
-        "compaction.done",
+        "compaction.new.done",
         removed=len(to_compact),
         kept=len(kept),
         chunks=len(chunks),
         llm_model=cfg.model or "fallback",
         summary_source=summary_source,
+        prev_summary_chars=len(prev_summary),
     )
 
     return CompactionResult(
@@ -441,3 +527,13 @@ async def compact_context(request: CompactionRequest) -> CompactionResult:
         tokens_after=tokens_after,
         remaining_budget_tokens=max(window - tokens_after, 0),
     )
+
+
+async def compact_context(request: CompactionRequest) -> CompactionResult:
+    """Summarize older messages to free context-window budget.
+
+    Delegates to :func:`compact_context_new` — the Phase D cut-point +
+    turn-boundary-aware pipeline.  The public signature is unchanged so
+    every existing call site keeps working without modification.
+    """
+    return await compact_context_new(request)
