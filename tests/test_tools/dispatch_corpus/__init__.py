@@ -722,6 +722,109 @@ def _case_argument_clamping_truncates() -> CorpusCase:
     )
 
 
+def _case_run_budget_exhausted_before_handler() -> CorpusCase:
+    """
+    Run-budget reservation denial — handler is not called.
+
+    The per-turn web_fetch call budget is already exhausted at reservation time.
+    Dispatch must build a ToolRunBudgetExceededError envelope and still run
+    after_tool hooks against that envelope.
+    """
+    def _ctx() -> ToolContext:
+        from opensquilla.result_budget import ToolRunBudgetPolicy
+
+        return ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.AGENT,
+            interaction_mode=InteractionMode.INTERACTIVE,
+            agent_id="main",
+            session_key="agent:main:corpus",
+            tool_run_budget_key="corpus-run-budget-reserve",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=0,
+                max_single_fetch_chars=400,
+                max_external_text_chars_per_turn=1_000,
+            ),
+        )
+
+    return CorpusCase(
+        name="run_budget_exhausted_before_handler",
+        tool_call=ToolCall(
+            tool_use_id="tc-run-budget-reserve",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 10_000},
+        ),
+        ctx_factory=_ctx,
+        registry_factory=_web_fetch_registry,
+        expected_is_error=True,
+        expected_error_class="ToolRunBudgetExceededError",
+        expected_status_status="error",
+        expected_status_reason="tool_run_budget_exhausted",
+    )
+
+
+def _case_run_budget_exhausted_after_handler() -> CorpusCase:
+    """
+    Run-budget result denial — handler returns too much external text.
+
+    The reservation succeeds, but committing the returned external text exceeds
+    the per-turn run budget. Dispatch must convert that budget exception into
+    the same ToolRunBudgetExceededError envelope shape as reservation denial.
+    """
+    def _ctx() -> ToolContext:
+        from opensquilla.result_budget import ToolRunBudgetPolicy
+
+        return ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.AGENT,
+            interaction_mode=InteractionMode.INTERACTIVE,
+            agent_id="main",
+            session_key="agent:main:corpus",
+            tool_run_budget_key="corpus-run-budget-commit",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=2,
+                max_single_fetch_chars=200,
+                max_external_text_chars_per_turn=200,
+            ),
+        )
+
+    def _reg() -> ToolRegistry:
+        reg = ToolRegistry()
+
+        async def web_fetch(url: str, max_chars: int | None = None) -> str:
+            del url, max_chars
+            return "x" * 250
+
+        reg.register(
+            ToolSpec(
+                name="web_fetch",
+                description="fetch",
+                parameters={
+                    "url": {"type": "string"},
+                    "max_chars": {"type": "integer"},
+                },
+                result_budget_class="external",
+            ),
+            web_fetch,
+        )
+        return reg
+
+    return CorpusCase(
+        name="run_budget_exhausted_after_handler",
+        tool_call=ToolCall(
+            tool_use_id="tc-run-budget-commit",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 200},
+        ),
+        ctx_factory=_ctx,
+        registry_factory=_reg,
+        expected_is_error=True,
+        expected_error_class="ToolRunBudgetExceededError",
+        expected_status_status="error",
+        expected_status_reason="tool_run_budget_exhausted",
+    )
+
+
 def _case_approval_pending_unsupported_surface() -> CorpusCase:
     """
     Unsupported approval surface — legacy lines 354–394.
@@ -1006,6 +1109,8 @@ ALL_CASES: list[CorpusCase] = [
     _case_happy_path_no_artifacts(),
     _case_happy_path_with_artifacts_budget_bypassed(),
     _case_argument_clamping_truncates(),
+    _case_run_budget_exhausted_before_handler(),
+    _case_run_budget_exhausted_after_handler(),
     _case_approval_pending_unsupported_surface(),
     _case_approval_denied_payload(),
     _case_denial_payload_generic(),

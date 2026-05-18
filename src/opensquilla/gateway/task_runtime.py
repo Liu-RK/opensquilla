@@ -1094,8 +1094,11 @@ class TaskRuntime:
             "error_message": error_message,
         }
         if (
-            status == AgentTaskStatus.TIMEOUT
-            or terminal_reason in {"timeout", "hard_deadline_exceeded"}
+            (
+                status == AgentTaskStatus.TIMEOUT
+                and terminal_reason != "hard_deadline_exceeded"
+            )
+            or terminal_reason == "timeout"
             or is_context_payload_too_large(terminal_payload)
             or (
                 terminal_reason == "output_truncated"

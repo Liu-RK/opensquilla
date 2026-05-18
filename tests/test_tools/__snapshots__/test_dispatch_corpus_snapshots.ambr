@@ -381,6 +381,52 @@
     'is_error': False,
   })
 # ---
+# name: test_dispatch_corpus_snapshot[run_budget_exhausted_after_handler]
+  dict({
+    'artifact_count': 0,
+    'content': dict({
+      'error_class': 'ToolRunBudgetExceededError',
+      'retry_allowed': False,
+      'status': 'error',
+      'tool': 'web_fetch',
+      'user_message': 'The tool run budget for this turn is exhausted.',
+    }),
+    'execution_status': dict({
+      'exit_code': None,
+      'preservation_class': 'diagnostic',
+      'reason': 'tool_run_budget_exhausted',
+      'source': 'tool_runtime',
+      'status': 'error',
+      'timed_out': False,
+      'truncated': False,
+      'version': 1,
+    }),
+    'is_error': True,
+  })
+# ---
+# name: test_dispatch_corpus_snapshot[run_budget_exhausted_before_handler]
+  dict({
+    'artifact_count': 0,
+    'content': dict({
+      'error_class': 'ToolRunBudgetExceededError',
+      'retry_allowed': False,
+      'status': 'error',
+      'tool': 'web_fetch',
+      'user_message': 'The tool run budget for this turn is exhausted.',
+    }),
+    'execution_status': dict({
+      'exit_code': None,
+      'preservation_class': 'diagnostic',
+      'reason': 'tool_run_budget_exhausted',
+      'source': 'tool_runtime',
+      'status': 'error',
+      'timed_out': False,
+      'truncated': False,
+      'version': 1,
+    }),
+    'is_error': True,
+  })
+# ---
 # name: test_dispatch_corpus_snapshot[skill_call_mismatch]
   dict({
     'artifact_count': 0,
