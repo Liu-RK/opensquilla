@@ -30,17 +30,17 @@ matches your use case; per-path prerequisites are summarized below.
 | Path | Audience | When to use |
 | --- | --- | --- |
 | [Windows portable](#windows-portable-no-python) | Windows users | No Python toolchain; one-zip launch |
-| [Install with uv](#install-with-uv) **(recommended)** | End users on any OS | Stable release wheel from a terminal |
+| [Quick terminal install](#quick-terminal-install) **(recommended)** | End users on any OS | Stable release wheel from a terminal |
 | [Install from source](#install-from-source) | Users tracking `main` | Run from a checkout, not edit it |
 | [Develop from source](#develop-from-source) | Contributors | Edit, test, or debug the source |
 
 ### Prerequisites
 
-| Requirement | Windows portable | Install with uv | Install from source | Develop from source |
+| Requirement | Windows portable | Quick terminal install | Install from source | Develop from source |
 | --- | :---: | :---: | :---: | :---: |
 | Python 3.12+ | bundled | via `uv` | via `uv` or system | via `uv` |
 | Git + Git LFS | — | — | required | required |
-| `uv` | — | required | recommended | required |
+| `uv` | — | installed if missing | recommended | required |
 | Windows VC++ runtime | auto-installed | recommended | auto-installed | recommended |
 
 `SquillaRouter` is included by default in every path. Set
@@ -58,17 +58,21 @@ Install links: [Git](https://git-scm.com/downloads) ·
 The fastest path on Windows. The zip ships a bundled CPython runtime, so
 no separate Python install is required.
 
-1. Download `OpenSquilla-windows-x64-portable.zip` from
-   [GitHub Releases](https://github.com/opensquilla/opensquilla/releases/latest).
+OpenSquilla 0.2.0 Preview 1 is distributed as a GitHub pre-release.
+Preview install commands use version-pinned download URLs. Stable releases
+can use `/releases/latest/download/` aliases after `0.2.0` is published.
+
+1. Download the 0.2.0 Preview 1 portable zip:
+   <https://github.com/opensquilla/opensquilla/releases/download/v0.2.0rc1/OpenSquilla-0.2.0rc1-windows-x64-py312-recommended-portable.zip>
 2. Extract it to Downloads, Documents, or another writable folder.
 3. Right-click `Start OpenSquilla.cmd` → **Run as administrator**.
 4. Complete onboarding, then open <http://127.0.0.1:18791/control/>.
 
 > [!NOTE]
-> OpenSquilla 0.1.0 preview builds are unsigned. Administrator launch is
+> OpenSquilla preview builds are unsigned. Administrator launch is
 > the supported path. If SmartScreen appears, choose **More info** →
 > **Run anyway**. If Smart App Control or enterprise policy blocks the
-> unsigned app, use [Install with uv](#install-with-uv) instead.
+> unsigned app, use [Quick terminal install](#quick-terminal-install) instead.
 > References: [SmartScreen][ms-smartscreen] · [Smart App Control][ms-sac].
 
 <details>
@@ -99,19 +103,51 @@ call the bundled launcher directly:
 [ms-smartscreen]: https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/
 [ms-sac]: https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview
 
-### Install with uv
+### Quick terminal install
 
-Terminal install on Windows, macOS, or Linux. `uv` manages Python
-automatically — no system Python required.
+Terminal install on Windows, macOS, or Linux. The installer bootstraps
+`uv` if needed, then installs the version-pinned release wheel. It does
+not run onboarding or start the gateway. This path is release-only; use
+[Install from source](#install-from-source) for `main`, development
+branches, or local checkouts.
+
+**Linux / macOS**
+
+```sh
+curl -LsSf https://opensquilla.ai/install.sh | bash -s -- --version v0.2.0rc1
+```
+
+**Windows PowerShell**
+
+```powershell
+$env:OPENSQUILLA_VERSION="v0.2.0rc1"; irm https://opensquilla.ai/install.ps1 | iex
+```
+
+After installation:
+
+```sh
+opensquilla onboard
+opensquilla gateway run
+```
+
+> [!NOTE]
+> If `opensquilla` is not found immediately after a fresh `uv` install,
+> open a new terminal. On Linux/macOS you can also run
+> `. "$HOME/.local/bin/env"`; on Windows PowerShell you can run
+> `$env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path`.
+
+### Manual uv install
+
+Use this path if you prefer to audit every command instead of running a
+remote installer script. `uv` manages Python automatically — no system
+Python required.
 
 **Linux / macOS**
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
 . "$HOME/.local/bin/env"
-uv tool install "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/latest/download/opensquilla-latest-py3-none-any.whl"
-opensquilla onboard
-opensquilla gateway run
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.2.0rc1/opensquilla-0.2.0rc1-py3-none-any.whl"
 ```
 
 **Windows PowerShell**
@@ -119,17 +155,18 @@ opensquilla gateway run
 ```powershell
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
-uv tool install "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/latest/download/opensquilla-latest-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.2.0rc1/opensquilla-0.2.0rc1-py3-none-any.whl"
+```
+
+Then run:
+
+```sh
 opensquilla onboard
 opensquilla gateway run
 ```
 
-> [!NOTE]
-> Keep the quotes around `"opensquilla[recommended] @ …"` exactly as
-> shown — the quotes prevent shells from interpreting the `[`, and the
-> `@` form lets `uv` apply `[recommended]` to a URL install. Local
-> wheel paths can use the simpler `path/to/wheel.whl[recommended]` form
-> directly.
+For stable releases, the wheel can use the stable alias:
+`https://github.com/opensquilla/opensquilla/releases/latest/download/opensquilla-latest-py3-none-any.whl`.
 
 After install, see [Configuration](#configuration) for provider setup
 and runtime options.
@@ -159,13 +196,13 @@ modify the code.
    **macOS / Linux**
 
    ```sh
-   bash install.sh
+   bash scripts/install_source.sh
    ```
 
    **Windows PowerShell**
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   powershell -ExecutionPolicy Bypass -File .\scripts\install_source.ps1
    ```
 
    PowerShell 7 users can substitute `pwsh` for `powershell`. The
@@ -185,11 +222,11 @@ modify the code.
    - `document-extras` — PDF generation via WeasyPrint
 
    ```sh
-   OPENSQUILLA_INSTALL_EXTRAS=matrix bash install.sh                       # macOS / Linux
+   OPENSQUILLA_INSTALL_EXTRAS=matrix bash scripts/install_source.sh        # macOS / Linux
    ```
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extras matrix   # Windows
+   powershell -ExecutionPolicy Bypass -File .\scripts\install_source.ps1 -Extras matrix   # Windows
    ```
 
 4. **Configure and run** — see [Configuration](#configuration).
@@ -198,8 +235,8 @@ modify the code.
 <summary>Installer environment variables and PATH checks</summary>
 
 ```sh
-OPENSQUILLA_INSTALL_PROFILE=core   bash install.sh   # minimal runtime, no SquillaRouter
-OPENSQUILLA_INSTALL_DRY_RUN=1      bash install.sh   # print the plan only
+OPENSQUILLA_INSTALL_PROFILE=core   bash scripts/install_source.sh   # minimal runtime, no SquillaRouter
+OPENSQUILLA_INSTALL_DRY_RUN=1      bash scripts/install_source.sh   # print the plan only
 ```
 
 ```powershell
@@ -461,7 +498,7 @@ router fallback, but the bundled SquillaRouter runtime is inactive
 until the Visual C++ Redistributable for Visual Studio 2015–2022
 (x64) is installed.
 
-`install.ps1` attempts to install the redistributable via `winget`.
+The Windows installers attempt to install the redistributable via `winget`.
 If that fails or `winget` is not present, install it manually and
 restart PowerShell: <https://aka.ms/vs/17/release/vc_redist.x64.exe>.
 

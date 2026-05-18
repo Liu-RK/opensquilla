@@ -178,14 +178,21 @@ def test_release_sop_documents_github_only_validation_boundary() -> None:
     assert ".sha256" not in text
 
 
-def test_readme_documents_canonical_uv_install_commands() -> None:
+def test_readme_documents_quick_and_manual_terminal_install_commands() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
 
-    assert 'uv tool install "opensquilla[recommended] @ https://github.com' in text
+    assert "curl -LsSf https://opensquilla.ai/install.sh | bash -s -- --version v0.2.0rc1" in text
+    assert (
+        '$env:OPENSQUILLA_VERSION="v0.2.0rc1"; '
+        "irm https://opensquilla.ai/install.ps1 | iex"
+    ) in text
+    assert 'uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com' in text
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in text
     assert '. "$HOME/.local/bin/env"' in text
     assert 'powershell -c "irm https://astral.sh/uv/install.ps1 | iex"' in text
     assert "$env:Path" in text
+    assert "bash scripts/install_source.sh" in text
+    assert ".\\scripts\\install_source.ps1" in text
 
 
 def test_readme_uses_gateway_default_port() -> None:

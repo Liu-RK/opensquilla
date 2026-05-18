@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           if [[ -n "${RELEASE_TAG}" && ! "${RELEASE_TAG}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+.*$ ]]; then
-            echo "Release tag must look like v0.1.0rc1: ${RELEASE_TAG}" >&2
+            echo "Release tag must look like v0.2.0rc1 or v0.2.0: ${RELEASE_TAG}" >&2
             exit 1
           fi
           if [[ ! "${PYTHON_RUNTIME_RELEASE}" =~ ^[0-9]{8}$ ]]; then
@@ -299,8 +299,34 @@ jobs:
           TAG: ${{ env.RELEASE_TAG }}
         shell: bash
         run: |
+          IS_PRERELEASE="$(python - <<'PY'
+          import os
+          import re
+
+          tag = os.environ["TAG"]
+          print("true" if re.search(r"(?:a|b|rc)[0-9]+$", tag) else "false")
+          PY
+          )"
+          TITLE="OpenSquilla ${TAG#v}"
+          create_args=("${TAG}" --draft --verify-tag)
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            TITLE="$(python - <<'PY'
+          import os
+          import re
+
+          version = os.environ["TAG"].removeprefix("v")
+          match = re.fullmatch(r"([0-9]+[.][0-9]+[.][0-9]+)(?:a|b|rc)([0-9]+)", version)
+          if match:
+              print(f"OpenSquilla {match.group(1)} Preview {match.group(2)}")
+          else:
+              print(f"OpenSquilla {version} Preview")
+          PY
+          )"
+            create_args+=(--prerelease)
+          fi
+          create_args+=(--title "${TITLE}")
           gh release view "${TAG}" >/dev/null 2>&1 || \
-            gh release create "${TAG}" --draft --verify-tag --title "${TAG}"
+            gh release create "${create_args[@]}"
           python - <<'PY'
           import json
           import os
