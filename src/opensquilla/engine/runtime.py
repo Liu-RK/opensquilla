@@ -223,6 +223,7 @@ _SAFE_TOOL_NAMES: frozenset[str] = frozenset({
     "skill_view",
     "tts",
     "web_fetch",
+    "web_search",
 })
 
 # Per-call-chain owner tracking for session-lock re-entry detection.

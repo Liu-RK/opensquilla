@@ -236,6 +236,9 @@ class AgentConfig:
     request_timeout: float = 120.0
     # Per-tool execution timeout
     tool_timeout: float = 60.0
+    # Upper bound for same-turn safe tool execution. Safe tools can overlap, but
+    # unbounded fan-out can overload local/network resources.
+    max_safe_tool_concurrency: int = 6
     max_tokens: int = 8192
     temperature: float | None = None
     thinking: bool | ThinkingLevel = False

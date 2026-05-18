@@ -96,6 +96,11 @@ async def _collect(agent: Agent, message: str = "go") -> list[Any]:
 _SAFE_SAMPLE = sorted(_SAFE_TOOL_NAMES)[:6]  # pick 6 safe names for the concurrent test
 
 
+def test_web_search_is_safe_for_same_turn_concurrency() -> None:
+    """web_search is read-only network I/O and should batch with safe tools."""
+    assert "web_search" in _SAFE_TOOL_NAMES
+
+
 # ---------------------------------------------------------------------------
 # Test 1: 6 safe tools run concurrently
 # ---------------------------------------------------------------------------
@@ -142,6 +147,41 @@ async def test_six_safe_tools_run_concurrent() -> None:
     )
     # All 6 tools were called
     assert sorted(call_order) == sorted(_SAFE_SAMPLE)
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_concurrency_limit_caps_in_flight_tasks() -> None:
+    """Safe tools should run concurrently, but not without an upper bound."""
+    tool_names = _SAFE_SAMPLE
+    max_in_flight = 0
+    in_flight = 0
+
+    async def _handler(tc: ToolCall) -> ToolResult:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(_TOOL_SLEEP_S)
+        in_flight -= 1
+        return ToolResult(
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            content="ok",
+        )
+
+    provider = _FixedToolCallProvider(tool_names)
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(max_iterations=2, max_safe_tool_concurrency=2),
+        tool_definitions=[_tool_def(n) for n in tool_names],
+        tool_handler=_handler,
+    )
+
+    t0 = time.monotonic()
+    await _collect(agent)
+    elapsed = time.monotonic() - t0
+
+    assert max_in_flight == 2
+    assert 2 * _TOOL_SLEEP_S <= elapsed < 4 * _TOOL_SLEEP_S
 
 
 # ---------------------------------------------------------------------------

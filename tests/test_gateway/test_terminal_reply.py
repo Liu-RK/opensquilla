@@ -49,6 +49,15 @@ RAW_INTERNAL_STRINGS = (
             },
             "cancelled",
         ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "provider_request_budget_exhausted",
+                "error_class": "provider_request_budget_exhausted",
+                "error_message": '{"fallback_reason":"provider_request_budget_exhausted"}',
+            },
+            "automatic context compaction",
+        ),
     ],
 )
 def test_build_terminal_reply_returns_user_readable_messages(

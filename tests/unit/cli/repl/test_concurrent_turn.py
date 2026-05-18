@@ -475,6 +475,73 @@ async def test_ctrl_g_cancels_inflight_turn_through_helper(monkeypatch) -> None:
     assert dispatch_cancelled[0] is True
 
 
+@pytest.mark.asyncio
+async def test_ctrl_g_gateway_turn_schedules_remote_abort(monkeypatch) -> None:
+    """Gateway Ctrl+G must abort the server-side turn, not just local streaming."""
+    from contextlib import asynccontextmanager
+
+    from opensquilla.cli import chat_cmd
+
+    captured_cb: list[object] = []
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    dispatch_started = asyncio.Event()
+    abort_calls: list[str] = []
+
+    class _FakeClient:
+        async def abort_session(self, session_key: str) -> None:
+            abort_calls.append(session_key)
+
+    class _FakeHandle:
+        async def next_line(self) -> str | None:
+            return await inputs.get()
+
+        def set_toolbar(self, key, value) -> None:
+            return None
+
+        @property
+        def application(self):
+            class _FakeApp:
+                def set_cancel_callback(self, cb) -> None:  # noqa: N805
+                    captured_cb.append(cb)
+
+            return _FakeApp()
+
+    @asynccontextmanager
+    async def _fake_session(**kwargs):
+        yield _FakeHandle()
+
+    monkeypatch.setattr(chat_cmd, "interactive_session", _fake_session)
+
+    async def _slow_dispatch(_user_input: str) -> bool:
+        dispatch_started.set()
+        await asyncio.sleep(5)
+        return True
+
+    repl_task = asyncio.create_task(
+        chat_cmd._run_concurrent_repl(
+            surface=Surface.CLI_GATEWAY,
+            scope={
+                "model": None,
+                "session_key": "agent:main:cli-test",
+                "client": _FakeClient(),
+            },
+            dispatch=_slow_dispatch,
+        )
+    )
+
+    await inputs.put("trigger")
+    await asyncio.wait_for(dispatch_started.wait(), timeout=2.0)
+
+    active_cb = next((cb for cb in reversed(captured_cb) if cb is not None), None)
+    assert active_cb is not None, "no cancel callback registered"
+    active_cb()  # type: ignore[misc]
+
+    await inputs.put(None)
+    await asyncio.wait_for(repl_task, timeout=2.0)
+
+    assert abort_calls == ["agent:main:cli-test"]
+
+
 # --------------------------------------------------------------------------- #
 # Slash classification routing through _run_concurrent_repl                   #
 # --------------------------------------------------------------------------- #

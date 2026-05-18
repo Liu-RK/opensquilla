@@ -280,4 +280,6 @@ async def test_task_runtime_rolls_back_persisted_user_on_provider_budget_error()
     payload = emitted[0][2]
     assert payload["code"] == "provider_request_budget_exhausted"
     assert "too large" in payload["terminal_message"]
+    assert "automatic context compaction" in payload["terminal_message"]
+    assert "send less text" not in payload["terminal_message"]
     assert "failed before" not in payload["terminal_message"]

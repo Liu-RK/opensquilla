@@ -3568,10 +3568,12 @@ const ChatView = (() => {
         if (toolsBody) resultTarget = toolsBody;
 
         // web_search: add provider badge to collapsible summary (may already be present from running state)
-        const provider = _toolResultProvider(payload, content);
-        if (provider) {
-          if (!_searchProvider) _searchProvider = provider;
-          _injectProviderBadge(details.querySelector('.chat-tools-summary'), provider);
+        if (toolName === 'web_search') {
+          const provider = _toolResultProvider(payload, content);
+          if (provider) {
+            if (!_searchProvider) _searchProvider = provider;
+            _injectProviderBadge(details.querySelector('.chat-tools-summary'), provider);
+          }
         }
       }
     }

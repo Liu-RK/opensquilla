@@ -129,6 +129,7 @@ _TOOL_RESULT_SUMMARY_SYSTEM = (
 )
 _LARGE_JSON_TOOL_FIELD_KEYS: frozenset[str] = frozenset({"body", "body_base64"})
 _LARGE_JSON_TOOL_FIELD_CHARS = 20_000
+_TOOL_ARGUMENT_PROJECTION_PREFIX = "[tool_use_argument_projection]\n"
 
 
 def _large_json_field_replacement(value: str) -> dict[str, object]:
@@ -189,6 +190,42 @@ def _is_threshold_denial(result: ToolResult) -> bool:
         and payload.get("status") == "denied"
         and payload.get("reason") == "threshold_exceeded"
     )
+
+
+_PENDING_APPROVAL_STATUSES: frozenset[str] = frozenset(
+    {"approval_required", "approval_pending"}
+)
+
+
+def _pending_approval_payload(content: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("status") not in _PENDING_APPROVAL_STATUSES:
+        return None
+    approval_id = payload.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id:
+        return None
+    return payload
+
+
+async def _wait_for_pending_approval_resolution(
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> None:
+    approval_id = payload.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id:
+        return
+    try:
+        from opensquilla.gateway.approval_queue import get_approval_queue
+
+        await get_approval_queue().wait(approval_id, timeout=timeout)
+    except KeyError:
+        return
 
 
 def _tool_result_content_has_artifact(content: str) -> bool:
@@ -519,6 +556,20 @@ class Agent:
             return float(raw_interval)
         except (TypeError, ValueError):
             return 15.0
+
+    def _approval_wait_timeout(self) -> float:
+        raw_timeout = self.config.metadata.get("approval_wait_timeout_seconds", 180.0)
+        try:
+            return max(0.0, float(raw_timeout))
+        except (TypeError, ValueError):
+            return 180.0
+
+    def _max_safe_tool_concurrency(self) -> int:
+        try:
+            value = int(self.config.max_safe_tool_concurrency)
+        except (TypeError, ValueError):
+            return 6
+        return max(1, value)
 
     def _write_turn_call_log(self, kind: str, **payload: Any) -> None:
         if self._turn_call_logger is not None:
@@ -2011,6 +2062,13 @@ class Agent:
                                 yield terminal_error
                                 break
                             overflow_retries += 1
+                            yield WarningEvent(
+                                code="context_auto_compaction_start",
+                                message=(
+                                    "Provider context limit reached; compacting older "
+                                    "context before retrying."
+                                ),
+                            )
                             overflow_outcome = await self._check_context_overflow(
                                 turn_messages,
                                 self.config.context_window_tokens + 1,
@@ -2056,6 +2114,10 @@ class Agent:
                             turn_messages = overflow_outcome.messages
                             request_context_insert_index = next_request_context_insert_index
                             runtime_context_insert_index = next_runtime_context_insert_index
+                            yield WarningEvent(
+                                code="context_auto_compaction_retry",
+                                message="Context compacted; retrying the provider request.",
+                            )
                             yield CompactionEvent(
                                 summary=overflow_outcome.summary,
                                 kept_entries=overflow_outcome.kept_entries,
@@ -2258,6 +2320,17 @@ class Agent:
                 if visible_text:
                     final_text_parts.append(visible_text)
 
+                preflight_tool_results: dict[str, ToolResult] = {}
+                resolved_tool_calls: list[ToolCall] = []
+                for tc in tool_calls:
+                    resolved = self._rehydrate_projected_tool_arguments(tc)
+                    if isinstance(resolved, ToolResult):
+                        preflight_tool_results[tc.tool_use_id] = resolved
+                        resolved_tool_calls.append(tc)
+                        continue
+                    resolved_tool_calls.append(resolved)
+                tool_calls = resolved_tool_calls
+
                 # Build assistant message for history
                 assistant_content: list[Any] = []
                 if iter_reasoning_content and iter_thinking_signature:
@@ -2356,22 +2429,28 @@ class Agent:
                         arguments=tc.arguments,
                     )
                     tool_timeout = _cap_timeout_by_deadlines(self._tool_execution_timeout(tc))
-                    try:
-                        res = await asyncio.wait_for(
-                            self._execute_tool(tc), timeout=tool_timeout
-                        )
-                    except TimeoutError:
-                        res = ToolResult(
-                            tool_use_id=tc.tool_use_id,
-                            tool_name=tc.tool_name,
-                            content=(f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"),
-                            is_error=True,
-                            execution_status=runtime_execution_status(
-                                "timeout",
-                                reason="runtime_timeout",
-                                timed_out=True,
-                            ),
-                        )
+                    preflight_result = preflight_tool_results.get(tc.tool_use_id)
+                    if preflight_result is not None:
+                        res = preflight_result
+                    else:
+                        try:
+                            res = await asyncio.wait_for(
+                                self._execute_tool(tc), timeout=tool_timeout
+                            )
+                        except TimeoutError:
+                            res = ToolResult(
+                                tool_use_id=tc.tool_use_id,
+                                tool_name=tc.tool_name,
+                                content=(
+                                    f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"
+                                ),
+                                is_error=True,
+                                execution_status=runtime_execution_status(
+                                    "timeout",
+                                    reason="runtime_timeout",
+                                    timed_out=True,
+                                ),
+                            )
                     self._write_turn_call_log(
                         "tool_response",
                         iteration=iterations,
@@ -2507,8 +2586,14 @@ class Agent:
                 ) -> AsyncIterator[RunHeartbeatEvent]:
                     if not batch:
                         return
+                    semaphore = asyncio.Semaphore(self._max_safe_tool_concurrency())
+
+                    async def _run_limited(tc: ToolCall) -> ToolResult:
+                        async with semaphore:
+                            return await _run_one(tc)
+
                     task_to_tool_call = {
-                        asyncio.create_task(_run_one(tc)): tc for tc in batch
+                        asyncio.create_task(_run_limited(tc)): tc for tc in batch
                     }
                     async for event in _collect_tool_tasks(task_to_tool_call):
                         yield event
@@ -2533,7 +2618,6 @@ class Agent:
                     result = await self._compress_tool_result(
                         results_by_id[tc.tool_use_id]
                     )
-                    executed_results.append(result)
                     for artifact in result.artifacts:
                         yield ArtifactEvent(**_artifact_event_kwargs(artifact))
                     yield ToolResultEvent(
@@ -2544,6 +2628,36 @@ class Agent:
                         arguments=tc.arguments,
                         execution_status=result.execution_status,
                     )
+                    pending_approval = _pending_approval_payload(result.content)
+                    if (
+                        pending_approval is not None
+                        and not tc.arguments.get("approval_id")
+                    ):
+                        await _wait_for_pending_approval_resolution(
+                            pending_approval,
+                            timeout=_cap_timeout_by_deadlines(self._approval_wait_timeout()),
+                        )
+                        retry_arguments = dict(tc.arguments)
+                        retry_arguments["approval_id"] = pending_approval["approval_id"]
+                        retry_call = ToolCall(
+                            tool_use_id=tc.tool_use_id,
+                            tool_name=tc.tool_name,
+                            arguments=retry_arguments,
+                            synthetic_from_text=tc.synthetic_from_text,
+                            origin_trace=tc.origin_trace,
+                        )
+                        result = await self._compress_tool_result(await _run_one(retry_call))
+                        for artifact in result.artifacts:
+                            yield ArtifactEvent(**_artifact_event_kwargs(artifact))
+                        yield ToolResultEvent(
+                            tool_use_id=result.tool_use_id,
+                            tool_name=result.tool_name,
+                            result=result.content,
+                            is_error=result.is_error,
+                            arguments=retry_arguments,
+                            execution_status=result.execution_status,
+                        )
+                    executed_results.append(result)
                     while self._pending_warnings:
                         yield self._pending_warnings.pop(0)
                     if self._is_turn_yield_result(result):
@@ -3231,6 +3345,176 @@ class Agent:
                 )
         return None
 
+    @staticmethod
+    def _parse_tool_argument_projection(value: str) -> dict[str, str] | None:
+        if not value.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX):
+            return None
+        metadata: dict[str, str] = {}
+        for line in value.splitlines()[1:]:
+            if line in {"head:", "tail:"}:
+                break
+            key, separator, raw_value = line.partition(":")
+            if not separator:
+                continue
+            metadata[key.strip()] = raw_value.strip()
+        return metadata
+
+    def _projection_rehydrate_error(
+        self,
+        tc: ToolCall,
+        *,
+        field: str,
+        reason: str,
+    ) -> ToolResult:
+        self.config.metadata["tool_argument_projection_rehydrate_failures"] = (
+            self.config.metadata.get(
+                "tool_argument_projection_rehydrate_failures",
+                0,
+            )
+            + 1
+        )
+        self._write_turn_call_log(
+            "tool_argument_projection_rehydrate_failed",
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            field=field,
+            reason=reason,
+        )
+        return ToolResult(
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            content=(
+                f"Projected tool argument for '{tc.tool_name}.{field}' could not be "
+                "restored; refusing to execute provider-context projection."
+            ),
+            is_error=True,
+            execution_status=runtime_execution_status(
+                "error",
+                reason="runtime_error",
+            ),
+        )
+
+    def _rehydrate_projected_tool_arguments(
+        self,
+        tc: ToolCall,
+    ) -> ToolCall | ToolResult:
+        restored_arguments: dict[str, Any] | None = None
+        rehydrated_fields: list[str] = []
+
+        for argument_name, value in tc.arguments.items():
+            if not isinstance(value, str) or not value.startswith(
+                _TOOL_ARGUMENT_PROJECTION_PREFIX
+            ):
+                continue
+            metadata = self._parse_tool_argument_projection(value)
+            if metadata is None:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="invalid_projection",
+                )
+            if metadata.get("tool") != tc.tool_name:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="tool_mismatch",
+                )
+            if metadata.get("field") != argument_name:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="field_mismatch",
+                )
+            handle = metadata.get("tool_argument_handle")
+            expected_sha = metadata.get("sha256")
+            session_id = self.config.tool_result_store_session_id or self._session_key
+            if not self.config.tool_result_store_dir or not session_id:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="missing_store",
+                )
+            if not handle or not expected_sha:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="missing_projection_metadata",
+                )
+            try:
+                record = ToolResultStore(self.config.tool_result_store_dir).read(
+                    handle,
+                    session_id=session_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - invalid projections must not dispatch
+                logger.warning(
+                    "tool_argument_projection.rehydrate_read_failed",
+                    tool_use_id=tc.tool_use_id,
+                    tool_name=tc.tool_name,
+                    field=argument_name,
+                    error=str(exc),
+                )
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="store_read_failed",
+                )
+            if record.tool_name != f"{tc.tool_name}:arguments":
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="stored_tool_mismatch",
+                )
+            if record.sha256 != expected_sha:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="stored_hash_mismatch",
+                )
+            try:
+                raw_input = json.loads(record.content)
+            except json.JSONDecodeError:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="stored_input_invalid_json",
+                )
+            if not isinstance(raw_input, dict) or argument_name not in raw_input:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="stored_field_missing",
+                )
+            if restored_arguments is None:
+                restored_arguments = dict(raw_input)
+            elif raw_input != restored_arguments:
+                return self._projection_rehydrate_error(
+                    tc,
+                    field=argument_name,
+                    reason="stored_input_mismatch",
+                )
+            rehydrated_fields.append(argument_name)
+
+        if restored_arguments is None:
+            return tc
+        self.config.metadata["tool_argument_projection_rehydrated"] = True
+        self.config.metadata["tool_argument_projection_rehydrated_fields"] = (
+            self.config.metadata.get("tool_argument_projection_rehydrated_fields", 0)
+            + len(rehydrated_fields)
+        )
+        self._write_turn_call_log(
+            "tool_argument_projection_rehydrated",
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            fields=rehydrated_fields,
+        )
+        return ToolCall(
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            arguments=restored_arguments,
+            synthetic_from_text=tc.synthetic_from_text,
+            origin_trace=tc.origin_trace,
+        )
+
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Dispatch a tool call to the registered handler."""
         if self.tool_handler is None:
@@ -3245,6 +3529,10 @@ class Agent:
                 ),
             )
         try:
+            resolved = self._rehydrate_projected_tool_arguments(tc)
+            if isinstance(resolved, ToolResult):
+                return resolved
+            tc = resolved
             return await self.tool_handler(tc)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(
@@ -3335,6 +3623,7 @@ class Agent:
             tool_use_argument_provider_request_max_chars=(
                 self.config.tool_use_argument_provider_request_max_chars
             ),
+            max_safe_tool_concurrency=self.config.max_safe_tool_concurrency,
             tool_result_external_keep_recent=self.config.tool_result_external_keep_recent,
             tool_result_store_dir=self.config.tool_result_store_dir,
             tool_result_store_session_id=self.config.tool_result_store_session_id,

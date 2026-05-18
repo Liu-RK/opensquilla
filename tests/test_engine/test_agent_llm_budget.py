@@ -14,6 +14,7 @@ from opensquilla.engine import (
     ErrorEvent,
     RunHeartbeatEvent,
     ToolResult,
+    WarningEvent,
 )
 from opensquilla.engine.session_sanitize import session_payload_chars
 from opensquilla.provider import (
@@ -80,6 +81,36 @@ class _ContextOverflowProvider:
             yield ProviderDone(stop_reason="stop", input_tokens=1, output_tokens=1)
             return
         yield ProviderError(message="context length exceeded", code="400")
+
+    async def list_models(self) -> list[Any]:
+        return []
+
+
+class _ProviderRequestBudgetExceededProvider:
+    provider_name = "openrouter"
+
+    def __init__(self, *, success_after: int | None = None) -> None:
+        self.success_after = success_after
+        self.calls: list[list[Message]] = []
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        config: ChatConfig | None = None,
+    ) -> AsyncIterator[Any]:
+        self.calls.append(messages)
+        return self._stream(len(self.calls))
+
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if self.success_after is not None and call_number > self.success_after:
+            yield ProviderText(text="ok")
+            yield ProviderDone(stop_reason="stop", input_tokens=1, output_tokens=1)
+            return
+        yield ProviderError(
+            message='{"fallback_reason":"provider_request_budget_exhausted"}',
+            code="provider_request_budget_exhausted",
+        )
 
     async def list_models(self) -> list[Any]:
         return []
@@ -358,6 +389,48 @@ async def test_context_overflow_effective_compaction_allows_single_retry(
     assert len(provider.calls) == 2
     assert _provider_payload_is_smaller(provider.calls[0], provider.calls[1])
     assert any(event.kind == "done" and getattr(event, "text", "") == "ok" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_provider_request_budget_exhausted_compacts_warns_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _effective_compact(request: Any) -> CompactionResult:
+        return CompactionResult(
+            summary="short summary",
+            kept_entries=[],
+            removed_count=len(request.entries),
+            chunks_processed=1,
+        )
+
+    monkeypatch.setattr("opensquilla.engine.agent.compact_context", _effective_compact)
+    provider = _ProviderRequestBudgetExceededProvider(success_after=1)
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_provider_retries=0,
+            max_overflow_retries=2,
+            flush_enabled=False,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("x" * 4000)]
+    warning_codes = [
+        event.code for event in events if isinstance(event, WarningEvent)
+    ]
+
+    assert len(provider.calls) == 2
+    assert _provider_payload_is_smaller(provider.calls[0], provider.calls[1])
+    assert warning_codes == [
+        "context_auto_compaction_start",
+        "context_auto_compaction_retry",
+    ]
+    assert any(event.kind == "done" and getattr(event, "text", "") == "ok" for event in events)
+    assert not any(
+        isinstance(event, ErrorEvent)
+        and event.code == "provider_request_budget_exhausted"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

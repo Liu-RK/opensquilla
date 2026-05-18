@@ -126,6 +126,33 @@ def test_chat_memory_search_results_surface_sources() -> None:
     assert "chat-memory-source-citation" in css
 
 
+def test_chat_live_tool_result_provider_badge_is_web_search_only() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _appendToolResult(payload)")
+    end = source.index("    // Only show result preview", start)
+    live_result_body = source[start:end]
+
+    guard_start = live_result_body.index("if (toolName === 'web_search'")
+    block_start = live_result_body.index("{", guard_start)
+    depth = 0
+    block_end = -1
+    for idx in range(block_start, len(live_result_body)):
+        if live_result_body[idx] == "{":
+            depth += 1
+        elif live_result_body[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                block_end = idx
+                break
+    assert block_end != -1
+
+    guarded_block = live_result_body[block_start:block_end]
+    assert live_result_body.count("_toolResultProvider(payload, content)") == 1
+    assert live_result_body.count("_injectProviderBadge") == 1
+    assert "_toolResultProvider(payload, content)" in guarded_block
+    assert "_injectProviderBadge" in guarded_block
+
+
 def test_chat_url_agent_query_resolves_default_webchat_session() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

@@ -46,8 +46,9 @@ def build_terminal_reply(
         or "provider_request_budget_exhausted" in error_message
     ):
         return (
-            "The request is too large for the provider context window. "
-            "Start a new session or send less text."
+            "The request is still too large for the provider context window "
+            "after automatic context compaction. Start a new session or use "
+            "a larger-context model."
         )
     if status == AgentTaskStatus.CANCELLED.value or reason.startswith("cancelled"):
         return "The task was cancelled before it finished."

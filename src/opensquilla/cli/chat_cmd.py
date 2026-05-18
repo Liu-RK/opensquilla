@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import getpass
 import inspect
 import json
@@ -468,12 +469,26 @@ async def _run_concurrent_repl(
         scope["chat_app"] = chat_app
         turn_task: asyncio.Task[bool] | None = None
 
+        def _schedule_gateway_abort() -> None:
+            client = scope.get("client")
+            session_key = scope.get("session_key")
+            if not session_key or client is None or not hasattr(client, "abort_session"):
+                return
+
+            async def _abort() -> None:
+                with contextlib.suppress(Exception):
+                    await client.abort_session(str(session_key))
+
+            asyncio.create_task(_abort())
+
         def _cancel_inflight_turn() -> None:
             # Registered as the Ctrl+G callback. The task may have completed
             # between the keypress and the callback firing — guard with
             # `done()` so cancel() on a finished task is a no-op.
             task = turn_task
             if task is not None and not task.done():
+                if surface is Surface.CLI_GATEWAY:
+                    _schedule_gateway_abort()
                 task.cancel()
 
         chat_app.set_cancel_callback(_cancel_inflight_turn)

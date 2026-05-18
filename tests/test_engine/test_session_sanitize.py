@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from opensquilla.engine import Agent, AgentConfig, ToolResult
+from opensquilla.engine import Agent, AgentConfig, ToolResult, ToolResultEvent
 from opensquilla.engine.history import limit_turns
 from opensquilla.engine.session_sanitize import sanitize_session_messages
 from opensquilla.engine.types import ThinkingLevel
@@ -131,6 +131,40 @@ class LargeArgumentToolLoopCapturingProvider(ToolLoopCapturingProvider):
             return
         yield ProviderText(text="done")
         yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
+
+
+class CopiedProjectionToolLoopCapturingProvider(LargeArgumentToolLoopCapturingProvider):
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if call_number == 1:
+            async for event in super()._stream(call_number):
+                yield event
+            return
+        if call_number == 2:
+            projection = self._latest_projected_code_argument()
+            yield ProviderToolUseStart(tool_use_id="tool-2", tool_name="execute_code")
+            yield ProviderToolUseEnd(
+                tool_use_id="tool-2",
+                tool_name="execute_code",
+                arguments={"code": projection, "timeout": 99},
+            )
+            yield ProviderDone(stop_reason="tool_use", input_tokens=3, output_tokens=1)
+            return
+        yield ProviderText(text="done")
+        yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
+
+    def _latest_projected_code_argument(self) -> str:
+        for message in self.calls[-1]["messages"]:
+            if not isinstance(message.content, list):
+                continue
+            for block in message.content:
+                if not isinstance(block, ContentBlockToolUse):
+                    continue
+                code = block.input.get("code")
+                if isinstance(code, str) and code.startswith(
+                    "[tool_use_argument_projection]\n"
+                ):
+                    return code
+        raise AssertionError("provider request did not contain a projected code argument")
 
 
 class CapturingTurnLog:
@@ -929,6 +963,119 @@ async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) 
         if isinstance(block, ContentBlockToolUse)
     )
     assert history_block.input["code"] == large_code
+
+
+@pytest.mark.asyncio
+async def test_agent_rehydrates_copied_tool_argument_projection_before_dispatch(
+    tmp_path,
+) -> None:
+    large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
+    provider = CopiedProjectionToolLoopCapturingProvider(large_code)
+    dispatched_code_arguments: list[str] = []
+    dispatched_arguments: list[dict[str, Any]] = []
+
+    async def tool_handler(call: Any) -> ToolResult:
+        dispatched_code_arguments.append(call.arguments["code"])
+        dispatched_arguments.append(call.arguments)
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="tool ok",
+        )
+
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_iterations=3,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+        tool_handler=tool_handler,
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert any(event.kind == "done" for event in events)
+    assert dispatched_code_arguments == [large_code, large_code]
+    assert dispatched_arguments == [
+        {"code": large_code, "timeout": 10},
+        {"code": large_code, "timeout": 10},
+    ]
+    assert all(
+        not value.startswith("[tool_use_argument_projection]\n")
+        for value in dispatched_code_arguments
+    )
+    result_event = next(
+        event
+        for event in events
+        if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-2"
+    )
+    assert result_event.arguments["code"] == large_code
+    assert result_event.arguments["timeout"] == 10
+    history_block = next(
+        block
+        for message in agent._history
+        if message.role == "assistant" and isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, ContentBlockToolUse) and block.id == "tool-2"
+    )
+    assert history_block.input["code"] == large_code
+    assert history_block.input["timeout"] == 10
+
+
+@pytest.mark.asyncio
+async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> None:
+    large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
+    provider = CopiedProjectionToolLoopCapturingProvider(large_code)
+    dispatched_tool_ids: list[str] = []
+
+    original_latest_projection = provider._latest_projected_code_argument
+
+    def corrupted_projection() -> str:
+        projection = original_latest_projection()
+        bad_hash = "0" * 64
+        return projection.replace(
+            "sha256: ",
+            f"sha256: {bad_hash}\nprevious_sha256: ",
+            1,
+        )
+
+    provider._latest_projected_code_argument = corrupted_projection  # type: ignore[method-assign]
+
+    async def tool_handler(call: Any) -> ToolResult:
+        dispatched_tool_ids.append(call.tool_use_id)
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="tool ok",
+        )
+
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_iterations=3,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+        tool_handler=tool_handler,
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    result_event = next(
+        event
+        for event in events
+        if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-2"
+    )
+    assert dispatched_tool_ids == ["tool-1"]
+    assert result_event.is_error is True
+    assert "refusing to execute provider-context projection" in result_event.result
 
 
 @pytest.mark.asyncio
