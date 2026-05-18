@@ -256,6 +256,8 @@ async def test_publish_artifact_tool_allows_workspace_file_only(tmp_path: Path) 
     assert payload["artifact"]["local_path"] == str(output.resolve())
     assert "note" in payload
     assert "local_path" in payload["note"]
+    assert "final response" in payload["note"]
+    assert "Do not run more tools" in payload["note"]
     # The frontend event path still gets the full payload (with download_url).
     assert len(ctx.published_artifacts) == 1
     full_artifact = ctx.published_artifacts[0]
@@ -298,6 +300,7 @@ async def test_publish_artifact_tool_hides_local_path_from_non_owner_channel(
     assert "local_path" not in payload["artifact"]
     assert "workspace_path" not in payload["artifact"]
     assert "local_path" not in payload["note"]
+    assert "final response" in payload["note"]
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,7 @@ class EventFrame(BaseModel):
     type: Literal["event"] = "event"
     event: str
     payload: Any | None = None
+    meta: dict[str, Any] | None = None
     seq: int | None = None
     state_version: StateVersion | None = None
 
@@ -189,5 +190,10 @@ def make_ok_res(req_id: str, payload: Any = None) -> ResFrame:
     return ResFrame(id=req_id, ok=True, payload=payload)
 
 
-def make_event(event: str, payload: Any = None, seq: int | None = None) -> EventFrame:
-    return EventFrame(event=event, payload=payload, seq=seq)
+def make_event(
+    event: str,
+    payload: Any = None,
+    seq: int | None = None,
+    meta: dict[str, Any] | None = None,
+) -> EventFrame:
+    return EventFrame(event=event, payload=payload, seq=seq, meta=meta)

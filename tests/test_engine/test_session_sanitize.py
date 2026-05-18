@@ -27,6 +27,10 @@ from opensquilla.provider import ToolUseEndEvent as ProviderToolUseEnd
 from opensquilla.provider import ToolUseStartEvent as ProviderToolUseStart
 
 
+def test_agent_config_disables_tool_argument_projection_by_default() -> None:
+    assert AgentConfig().tool_use_argument_projection_enabled is False
+
+
 class CapturingProvider:
     provider_name = "fake"
 

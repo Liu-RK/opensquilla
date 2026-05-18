@@ -1654,6 +1654,8 @@ class Agent:
         window_output_tokens = 0
         final_text_parts: list[str] = []
         final_reasoning_parts: list[str] = []
+        artifact_delivery_final_response_pending = False
+        artifact_delivery_final_response_artifacts: list[dict[str, Any]] = []
         _fallback = FallbackPolicy(
             max_retries=self.config.max_provider_retries,
             base_backoff_ms=self.config.retry_base_backoff_ms,
@@ -1730,6 +1732,15 @@ class Agent:
                     provider_error_for_log: ProviderErrorEvent | None = None
                     call_id = f"{iterations}.{_call_attempt}"
                     call_started_at = time.monotonic()
+                    provider_tools_for_call = (
+                        None
+                        if artifact_delivery_final_response_pending
+                        else provider_tool_definitions
+                    )
+                    tools_supported_for_call = (
+                        tools_supported and not artifact_delivery_final_response_pending
+                    )
+                    ignored_post_delivery_tool_use = False
                     request_source_messages = self._with_request_context_messages(
                         turn_messages,
                         request_context_message,
@@ -1768,14 +1779,14 @@ class Agent:
                         iteration=iterations,
                         attempt=_call_attempt,
                         messages=request_messages,
-                        tools=provider_tool_definitions,
+                        tools=provider_tools_for_call,
                         config=chat_cfg,
                     )
                     cache_prompt_snapshot = None
                     if self._session_key:
                         cache_prompt_snapshot = record_prompt_state(
                             messages=request_messages,
-                            tools=provider_tool_definitions,
+                            tools=provider_tools_for_call,
                             config=chat_cfg,
                             model=self.config.model_id or "",
                         )
@@ -1785,7 +1796,7 @@ class Agent:
                     try:
                         raw_stream = self.provider.chat(
                             request_messages,
-                            tools=provider_tool_definitions,
+                            tools=provider_tools_for_call,
                             config=chat_cfg,
                         )
                         async for raw_ev in self._stream_provider_events_with_deadline(
@@ -1800,7 +1811,9 @@ class Agent:
                                 yield TextDeltaEvent(text=raw_ev.text)
 
                             elif isinstance(raw_ev, ProviderToolUseStart):
-                                if not tools_supported:
+                                if not tools_supported_for_call:
+                                    if artifact_delivery_final_response_pending:
+                                        ignored_post_delivery_tool_use = True
                                     continue
                                 pending_tools[raw_ev.tool_use_id] = _StreamAccumulator(
                                     tool_use_id=raw_ev.tool_use_id,
@@ -1816,7 +1829,7 @@ class Agent:
                                 )
 
                             elif raw_ev.kind == "tool_use_delta":
-                                if not tools_supported:
+                                if not tools_supported_for_call:
                                     continue
                                 acc = pending_tools.get(raw_ev.tool_use_id)  # type: ignore[union-attr]
                                 if acc:
@@ -1845,7 +1858,9 @@ class Agent:
                                         )
 
                             elif isinstance(raw_ev, ToolUseEndEvent):
-                                if not tools_supported:
+                                if not tools_supported_for_call:
+                                    if artifact_delivery_final_response_pending:
+                                        ignored_post_delivery_tool_use = True
                                     continue
                                 acc = pending_tools.pop(raw_ev.tool_use_id, None)
                                 tool_argument_heartbeat_chars.pop(
@@ -1984,6 +1999,17 @@ class Agent:
 
                     # -- after async for (retry loop level) --
                     response_text = "".join(assistant_text_parts)
+                    if (
+                        artifact_delivery_final_response_pending
+                        and ignored_post_delivery_tool_use
+                        and not response_text.strip()
+                    ):
+                        response_text = self._artifact_delivery_final_response_text(
+                            artifact_delivery_final_response_artifacts
+                        )
+                        assistant_text_parts.append(response_text)
+                        attempt_user_visible_emitted = True
+                        yield TextDeltaEvent(text=response_text)
                     last_request_msg = request_messages[-1] if request_messages else None
                     post_tool_turn = _message_has_tool_result(last_request_msg)
                     stop_reason = (
@@ -2933,6 +2959,13 @@ class Agent:
                         )
                     )
 
+                terminal_artifacts = self._terminal_artifact_delivery_artifacts(
+                    executed_results
+                )
+                if terminal_artifacts:
+                    artifact_delivery_final_response_pending = True
+                    artifact_delivery_final_response_artifacts = terminal_artifacts
+
                 if any(_is_threshold_denial(result) for result in executed_results):
                     yield self._transition(AgentState.ERROR)
                     terminal_error = ErrorEvent(
@@ -3240,6 +3273,43 @@ class Agent:
         if not isinstance(payload, dict):
             return False
         return payload.get("status") == "yielded"
+
+    @staticmethod
+    def _terminal_artifact_delivery_artifacts(
+        results: list[ToolResult],
+    ) -> list[dict[str, Any]]:
+        artifacts: list[dict[str, Any]] = []
+        for result in results:
+            if result.tool_name != "publish_artifact" or result.is_error:
+                continue
+            if result.artifacts:
+                artifacts.extend(result.artifacts)
+                continue
+            try:
+                payload = json.loads(result.content)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("status") not in {"published", "already_published"}:
+                continue
+            artifact = payload.get("artifact")
+            artifacts.append(artifact if isinstance(artifact, dict) else {})
+        return artifacts
+
+    @staticmethod
+    def _artifact_delivery_final_response_text(
+        artifacts: list[dict[str, Any]],
+    ) -> str:
+        names = [
+            str(item.get("name") or item.get("filename") or "").strip()
+            for item in artifacts
+            if isinstance(item, dict)
+        ]
+        named = [name for name in names if name]
+        if named:
+            return "The generated file is ready: " + ", ".join(named) + "."
+        return "The generated file is ready."
 
     def _build_compaction_config(self) -> CompactionConfig:
         return build_compaction_config_from_provider(

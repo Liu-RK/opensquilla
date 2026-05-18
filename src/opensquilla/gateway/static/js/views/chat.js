@@ -1113,6 +1113,7 @@ const ChatView = (() => {
   function _normalizeRunStatus(status) {
     const value = String(status || '').toLowerCase();
     if (value === 'abandoned') return 'interrupted';
+    if (value === 'killed') return 'cancelled';
     if (value === 'succeeded' || value === 'success' || value === 'complete') return 'idle';
     if (['queued', 'running', 'interrupted', 'failed', 'timeout', 'cancelled'].includes(value)) {
       return value;
@@ -1152,6 +1153,31 @@ const ChatView = (() => {
 
   function _clearActiveTaskGroups() {
     _activeTaskGroups.clear();
+  }
+
+  function _isCurrentSessionPayload(payload) {
+    const key = payload?.key || payload?.session_key || payload?.sessionKey || '';
+    return !key || !_sessionKey || key === _sessionKey;
+  }
+
+  function _sessionChangeIsTerminal(payload) {
+    const reason = String(payload?.reason || '').toLowerCase();
+    if (reason === 'turn_complete' || reason === 'task_terminal') return true;
+    const lifecycle = String(payload?.status || '').toLowerCase();
+    if (['done', 'failed', 'killed', 'timeout'].includes(lifecycle)) return true;
+    const runStatus = _normalizeRunStatus(payload?.run_status || payload?.runStatus);
+    return ['failed', 'timeout', 'cancelled', 'interrupted'].includes(runStatus);
+  }
+
+  function _syncTerminalSessionChange(payload = {}) {
+    if (!_isCurrentSessionPayload(payload)) return false;
+    _clearActiveTaskGroups();
+    const state = _sessionRunStatus(payload);
+    const interrupted = state.status === 'cancelled' || state.status === 'interrupted';
+    if (_isStreaming) _endStreaming(interrupted ? { reason: 'aborted' } : undefined);
+    _applySessionRunState(payload);
+    _scheduleHistorySync();
+    return true;
   }
 
   function _activeTaskGroupRunState(payload = {}) {
@@ -2166,7 +2192,9 @@ const ChatView = (() => {
       if (res && res.subscribed === false) throw new Error('No subscription manager available');
       _applySessionRunState(res);
       if (res && res.replay_complete === false) {
-        _lastStreamSeq = typeof res.current_stream_seq === 'number' ? res.current_stream_seq : 0;
+        _lastStreamSeq = typeof res.current_stream_seq === 'number'
+          ? Math.max(_lastStreamSeq, res.current_stream_seq)
+          : _lastStreamSeq;
         UI.toast('Session stream gap detected; reloading transcript.', 'warn', 5000);
         _loadHistory();
       } else if (res && typeof res.current_stream_seq === 'number') {
@@ -2200,7 +2228,8 @@ const ChatView = (() => {
     return '';
   }
 
-  function _showCompactionToast(payload) {
+  function _showCompactionToast(payload, meta = {}) {
+    if (meta && meta.replayed) return;
     const status = String(payload && payload.status || '').toLowerCase();
     const source = String(payload && payload.source || '').toLowerCase();
     const details = _compactionTokenStats(payload || {});
@@ -2328,10 +2357,10 @@ const ChatView = (() => {
       );
     }));
 
-    _unsubs.push(_rpc.on('session.event.compaction', (payload) => {
+    _unsubs.push(_rpc.on('session.event.compaction', (payload, meta) => {
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
-      _showCompactionToast(payload || {});
+      _showCompactionToast(payload || {}, meta || {});
     }));
 
     // Non-persistent warnings surfaced by the turn runner (e.g. model claimed
@@ -2368,6 +2397,12 @@ const ChatView = (() => {
     // sessions.changed carries epoch — drop if stale.
     _unsubs.push(_rpc.on('sessions.changed', (payload) => {
       if (_isStaleEpoch(payload)) return;
+      if (!_isCurrentSessionPayload(payload)) return;
+      if (_sessionChangeIsTerminal(payload)) {
+        _syncTerminalSessionChange(payload);
+        return;
+      }
+      _applySessionRunState(payload);
     }));
 
     _unsubs.push(_rpc.on('task.queued', (payload) => {
@@ -2439,8 +2474,7 @@ const ChatView = (() => {
       if (!_acceptStreamSeq(payload)) return;
       if (event.startsWith('session.event.task_group.')) return;
 
-      if (event === 'sessions.changed' && payload?.reason === 'turn_complete' && (!payload?.key || payload.key === _sessionKey)) {
-        _scheduleHistorySync();
+      if (event === 'sessions.changed') {
         return;
       }
 
@@ -2533,7 +2567,12 @@ const ChatView = (() => {
         } else if (_pendingQueue.length > 0) {
           _drainQueueHead();
         }
-        if (_activeTaskGroups.size > 0) {
+        if (_doneWasAborted) {
+          _applySessionRunState({
+            run_status: 'cancelled',
+            last_task: { ...(payload || {}), status: 'cancelled' },
+          });
+        } else if (_activeTaskGroups.size > 0) {
           _applySessionRunState(_activeTaskGroupRunState({ reason: 'task_group_active' }));
         } else {
           _applySessionRunState({ run_status: 'idle', last_task: { status: 'succeeded' } });
@@ -2652,6 +2691,15 @@ const ChatView = (() => {
       const data = await _rpc.call('chat.history', { sessionKey: _sessionKey });
       const messages = data.messages || [];
       if (messages.length === 0) {
+        if (_isStreaming && _streamBubble) {
+          _thread.querySelectorAll('.msg').forEach((el) => {
+            if (el !== _streamBubble) el.remove();
+          });
+          _thread.querySelectorAll('.chat-day-sep, .chat-empty').forEach((el) => el.remove());
+          if (!_streamBubble.isConnected) _thread.appendChild(_streamBubble);
+          _scrollToBottom();
+          return;
+        }
         _thread.innerHTML = '';
         _messages = [];
         _lastHeaderRole = '';
@@ -3348,6 +3396,15 @@ const ChatView = (() => {
     }
   }
 
+  function _flushPendingTextSegment() {
+    if (!_renderDirty) return;
+    if (_renderRafId) {
+      cancelAnimationFrame(_renderRafId);
+      _renderRafId = null;
+    }
+    _flushRender();
+  }
+
   function _flushRender() {
     _renderRafId = null;
     if (!_renderDirty || !_streamBubble) { _renderDirty = false; return; }
@@ -3471,7 +3528,43 @@ const ChatView = (() => {
 
   /* ── Tool Call / Tool Result Display ────────────────────────────────── */
 
+  function _toolInputObject(input) {
+    if (!input) return null;
+    if (typeof input === 'object') return input;
+    if (typeof input !== 'string') return null;
+    const trimmed = input.trim();
+    if (!trimmed || !trimmed.startsWith('{')) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function _basename(path) {
+    const raw = String(path || '').trim();
+    if (!raw) return '';
+    const parts = raw.split(/[\\/]+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : raw;
+  }
+
+  function _publishArtifactTargetName(input) {
+    input = _toolInputObject(input);
+    if (!input) return '';
+    return _basename(input.name || input.path);
+  }
+
+  function _toolDisplayName(name, input) {
+    if (name === 'publish_artifact') {
+      const target = _publishArtifactTargetName(input);
+      if (target) return `${name} - ${target}`;
+    }
+    return name || 'tool';
+  }
+
   function _buildToolCallDOM(name, toolId, input, isRunning) {
+    const displayName = _toolDisplayName(name, input);
     const preview = _truncate(
       typeof input === 'string' ? input : JSON.stringify(input || '', null, 2),
       200
@@ -3493,7 +3586,7 @@ const ChatView = (() => {
     iconSpan.className = 'chat-tools-icon';
     iconSpan.textContent = _toolEmoji(name);
     summary.appendChild(iconSpan);
-    summary.appendChild(document.createTextNode(' ' + name));
+    summary.appendChild(document.createTextNode(' ' + displayName));
 
     const toolsBody = document.createElement('div');
     toolsBody.className = 'chat-tools-body';
@@ -3649,6 +3742,7 @@ const ChatView = (() => {
     if (name === 'web_search' && _searchProvider) {
       _injectProviderBadge(details.querySelector('.chat-tools-summary'), _searchProvider);
     }
+    _flushPendingTextSegment();
     body.appendChild(details);
     _segments.push({ type: 'tool', el: details });
 

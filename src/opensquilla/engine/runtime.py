@@ -744,6 +744,27 @@ def _artifact_delivery_failure_notice(*, partial: bool = False) -> str:
     )
 
 
+def _cancelled_partial_response_text(
+    partial_text: str,
+    artifacts: list[dict[str, Any]],
+) -> str:
+    partial_text = partial_text.rstrip()
+    if artifacts:
+        names = [
+            str(item.get("name") or item.get("filename") or "").strip()
+            for item in artifacts
+            if isinstance(item, dict)
+        ]
+        named = [name for name in names if name]
+        delivered = (
+            "The generated file was delivered: " + ", ".join(named) + "."
+            if named
+            else "The generated file was delivered."
+        )
+        return f"{partial_text}\n\n{delivered}" if partial_text else delivered
+    return f"{partial_text}\n\n[interrupted]" if partial_text else "[interrupted]"
+
+
 def _should_add_artifact_delivery_failure_notice(
     *,
     failure_summaries: list[str],
@@ -2097,10 +2118,7 @@ class TurnRunner:
                 partial_text or turn_segments or turn_artifacts
             ) and self._session_manager is not None:
                 try:
-                    # Neutral marker: under Proposal C, new user input does not
-                    # cancel a turn (it queues). Cancellation now means ESC /
-                    # Stop / idle timeout. "[interrupted]" is accurate for all.
-                    body = f"{partial_text}\n\n[interrupted]" if partial_text else "[interrupted]"
+                    body = _cancelled_partial_response_text(partial_text, turn_artifacts)
                     if turn_artifacts:
                         body = json.dumps(
                             {"text": body, "artifacts": turn_artifacts},

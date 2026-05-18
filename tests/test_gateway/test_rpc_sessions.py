@@ -290,10 +290,15 @@ class _LegacyCompactManager:
 class _ReplayConn:
     def __init__(self, conn_id: str) -> None:
         self.conn_id = conn_id
-        self.events: list[tuple[str, dict]] = []
+        self.events: list[tuple[str, dict, dict | None]] = []
 
-    async def send_event(self, event: str, payload: dict | None = None) -> None:
-        self.events.append((event, payload or {}))
+    async def send_event(
+        self,
+        event: str,
+        payload: dict | None = None,
+        meta: dict | None = None,
+    ) -> None:
+        self.events.append((event, payload or {}, meta))
 
 
 class _RecordingTurnRunner:
@@ -1503,7 +1508,7 @@ class TestSessionsMessagesSubscribe:
         assert res.payload["current_stream_seq"] == second["stream_seq"]
         assert res.payload["replay_complete"] is True
         assert res.payload["replayed_count"] == 1
-        assert conn.events == [("session.event.done", second)]
+        assert conn.events == [("session.event.done", second, {"replayed": True})]
 
     @pytest.mark.asyncio
     async def test_messages_subscribe_replays_task_group_events(self, dispatcher):
@@ -1547,7 +1552,9 @@ class TestSessionsMessagesSubscribe:
 
         assert res.ok is True
         assert res.payload["replayed_count"] == 1
-        assert conn.events == [("session.event.task_group.done", done)]
+        assert conn.events == [
+            ("session.event.task_group.done", done, {"replayed": True})
+        ]
 
     @pytest.mark.asyncio
     async def test_messages_subscribe_reports_persisted_task_state_and_replay_gap(

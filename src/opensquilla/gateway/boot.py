@@ -38,9 +38,11 @@ from opensquilla.gateway.app import create_gateway_app
 from opensquilla.gateway.config import GatewayConfig, is_public_bind
 from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 from opensquilla.gateway.rpc import get_dispatcher
+from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.gateway.session_lifecycle import (
     TaskLifecycleEvent,
     apply_task_lifecycle_to_session,
+    session_status_for_task_status,
 )
 from opensquilla.gateway.session_services import get_session_storage
 from opensquilla.gateway.session_streams import get_session_streams
@@ -676,15 +678,37 @@ def build_cron_result_payload(
     }
 
 
-def build_sessions_changed_payload(session_key: str, reason: str) -> dict[str, str]:
-    """Build the WS payload for a ``sessions.changed`` broadcast.
+def _task_run_status_for_session_change(event: TaskLifecycleEvent) -> str:
+    status = getattr(event.task_status, "value", str(event.task_status))
+    if event.phase == "running":
+        return "running"
+    if status == "succeeded":
+        return "idle"
+    if status == "abandoned":
+        return "interrupted"
+    if status in {"failed", "timeout", "cancelled"}:
+        return status
+    return "idle"
 
-    Trivial helper — but having one symbol is the only way to ground a
-    gate-4 snapshot in actual production code rather than an invented
-    literal that production drift would silently ignore. Sites that
-    emit this event must call this helper.
-    """
-    return {"key": session_key, "reason": reason}
+
+def _task_state_for_session_change(event: TaskLifecycleEvent) -> dict[str, Any]:
+    status = getattr(event.task_status, "value", str(event.task_status))
+    task: dict[str, Any] = {
+        "task_id": event.task_id,
+        "status": "running" if event.phase == "running" else status,
+    }
+    if event.terminal_reason:
+        task["terminal_reason"] = event.terminal_reason
+    if event.phase == "terminal" and status != "succeeded":
+        task["terminal_message"] = build_terminal_reply(
+            {
+                "status": status,
+                "terminal_reason": event.terminal_reason,
+                "error_class": event.error_class,
+                "error_message": event.error_message,
+            }
+        )
+    return task
 
 
 def _make_task_session_lifecycle_listener(
@@ -702,10 +726,19 @@ def _make_task_session_lifecycle_listener(
         if not changed:
             return
         reason = "task_running" if event.phase == "running" else "task_terminal"
+        session_status = session_status_for_task_status(event.task_status)
+        task_state = _task_state_for_session_change(event)
+        state_field = "active_task" if event.phase == "running" else "last_task"
         await event_emitter(
             event.session_key,
             "sessions.changed",
-            build_sessions_changed_payload(event.session_key, reason),
+            build_sessions_changed_payload(
+                event.session_key,
+                reason,
+                status=getattr(session_status, "value", session_status),
+                run_status=_task_run_status_for_session_change(event),
+                **{state_field: task_state},
+            ),
         )
 
     return _listener

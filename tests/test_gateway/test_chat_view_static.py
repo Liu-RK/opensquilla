@@ -114,6 +114,24 @@ def test_chat_tool_results_use_execution_status_for_state() -> None:
     assert "_toolResultIsTruncated(seg)," in source
 
 
+def test_chat_publish_artifact_tool_cards_show_target_filename() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    build_start = source.index("function _buildToolCallDOM")
+    build_end = source.index("  function _findToolDetailsById", build_start)
+    build_body = source[build_start:build_end]
+
+    assert "function _toolDisplayName(name, input)" in source
+    assert "function _publishArtifactTargetName(input)" in source
+    assert "name === 'publish_artifact'" in source
+    assert "input.name || input.path" in source
+    assert "summary.appendChild(document.createTextNode(' ' + displayName));" in build_body
+    assert "_buildToolCallDOM(name, toolId, input, true)" in source
+    assert (
+        "_buildToolCallDOM(seg.name || 'tool', seg.tool_use_id || '', seg.input || '', false)"
+        in source
+    )
+
+
 def test_chat_memory_search_results_surface_sources() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     css = CHAT_CSS.read_text(encoding="utf-8")
@@ -320,6 +338,27 @@ def test_chat_maps_task_terminal_events_during_migration() -> None:
     assert "_sessionErrorMessage(payload)" in error_handler
 
 
+def test_chat_reconciles_terminal_session_changed_events() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    assert "if (value === 'killed') return 'cancelled';" in source
+    assert "function _sessionChangeIsTerminal(payload)" in source
+    assert "function _syncTerminalSessionChange(payload = {})" in source
+    sessions_changed = source[
+        source.index("_rpc.on('sessions.changed'") :
+        source.index("_rpc.on('task.queued'", source.index("_rpc.on('sessions.changed'"))
+    ]
+    assert "_sessionChangeIsTerminal(payload)" in sessions_changed
+    assert "_syncTerminalSessionChange(payload);" in sessions_changed
+    assert "_applySessionRunState(payload);" in sessions_changed
+    done_handler = source[
+        source.index("const _doneWasAborted = payload?.reason === 'aborted';") :
+        source.index("} else if (event.endsWith('.error'))")
+    ]
+    assert "run_status: 'cancelled'" in done_handler
+    assert "status: 'cancelled'" in done_handler
+
+
 def test_chat_failed_task_message_prefers_payload_error_detail() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 
@@ -399,13 +438,23 @@ def test_chat_resets_replay_cursor_after_stream_gap() -> None:
     body = source[start:end]
 
     assert "if (res && res.replay_complete === false)" in body
-    assert (
-        "_lastStreamSeq = typeof res.current_stream_seq === 'number' "
-        "? res.current_stream_seq : 0;"
-    ) in body
+    assert "_lastStreamSeq = typeof res.current_stream_seq === 'number'" in body
+    assert "? Math.max(_lastStreamSeq, res.current_stream_seq)" in body
+    assert ": _lastStreamSeq;" in body
     assert body.index("_lastStreamSeq = typeof res.current_stream_seq") < body.index(
         "_loadHistory();"
     )
+
+
+def test_chat_empty_history_preserves_live_stream_bubble() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("async function _loadHistory() {")
+    end = source.index("      const existingByStableIdentity = new Map();", start)
+    body = source[start:end]
+
+    assert "if (_isStreaming && _streamBubble)" in body
+    assert "_thread.appendChild(_streamBubble);" in body
+    assert "return;" in body[body.index("if (_isStreaming && _streamBubble)") :]
 
 
 def test_chat_task_succeeded_clears_run_state_without_session_done() -> None:
@@ -437,7 +486,7 @@ def test_chat_surfaces_manual_and_passive_compaction_toasts() -> None:
         source.index("case 'compact_context':") : source.index("case 'usage_status':")
     ]
 
-    assert "function _showCompactionToast(payload)" in source
+    assert "function _showCompactionToast(payload, meta = {})" in source
     assert "Compacting session context..." in source
     assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
     assert "session.event.compaction" in source
@@ -568,13 +617,43 @@ def test_chat_done_event_reconciles_final_text_before_ending_stream() -> None:
 
 def test_chat_turn_complete_event_schedules_history_sync() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
-    start = source.index("_unsubs.push(_rpc.on('*'")
-    end = source.index("    // Connection state changes", start)
+    start = source.index("_rpc.on('sessions.changed'")
+    end = source.index("_rpc.on('task.queued'", start)
     body = source[start:end]
 
     assert "function _scheduleHistorySync()" in source
-    assert "payload?.reason === 'turn_complete'" in body
-    assert "_scheduleHistorySync();" in body
+    assert "reason === 'turn_complete'" in source
+    assert "_sessionChangeIsTerminal(payload)" in body
+    helper = source[
+        source.index("function _syncTerminalSessionChange(payload = {})") :
+        source.index(
+            "  function _activeTaskGroupRunState",
+            source.index("function _syncTerminalSessionChange(payload = {})"),
+        )
+    ]
+    assert "_scheduleHistorySync();" in helper
+
+
+def test_chat_ignores_replayed_compaction_toasts() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _showCompactionToast(payload, meta = {})")
+    end = source.index("  /* ── RPC Event Subscriptions", start)
+    body = source[start:end]
+
+    assert "function _showCompactionToast(payload, meta = {})" in source
+    assert "if (meta && meta.replayed) return;" in body
+    assert body.index("meta.replayed") < body.index("UI.toast('Compacting session context...'")
+
+
+def test_rpc_client_passes_event_meta_without_polluting_payload() -> None:
+    source = RPC_JS.read_text(encoding="utf-8")
+    event_start = source.index("} else if (data.type === 'event') {")
+    event_end = source.index("    };\n", event_start)
+    event_body = source[event_start:event_end]
+
+    assert "const meta = data.meta || {};" in event_body
+    assert "h(data.payload, meta)" in event_body
+    assert "h(data.event, data.payload, meta)" in event_body
 
 
 def test_chat_history_reconciles_by_message_identity_without_clear_replace() -> None:
@@ -643,6 +722,22 @@ def test_chat_first_delta_marks_render_dirty_before_flush() -> None:
     body = source[start:end]
 
     assert "_renderDirty = true;\n      _flushRender();" in body
+
+
+def test_chat_flushes_pending_text_before_tool_segment_boundary() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    helper_start = source.index("function _flushPendingTextSegment() {")
+    helper_end = source.index("  function _flushRender()", helper_start)
+    helper_body = source[helper_start:helper_end]
+    tool_start = source.index("function _appendToolCall(payload) {")
+    tool_end = source.index("  function _appendToolResult(payload) {", tool_start)
+    tool_body = source[tool_start:tool_end]
+
+    assert "if (!_renderDirty) return;" in helper_body
+    assert "_flushRender();" in helper_body
+    assert tool_body.index("_flushPendingTextSegment();") < tool_body.index(
+        "_newTextSegment();"
+    )
 
 
 def test_chat_history_replacement_preserves_message_body_rendering() -> None:

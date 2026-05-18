@@ -101,6 +101,10 @@ def _llm_artifact_payload(
 
 
 def _publish_note(ctx: ToolContext, *, already_published: bool = False) -> str:
+    final_response = (
+        "Do not run more tools for this deliverable unless the user explicitly "
+        "asked for another file or a specific verification step. Send the final response now."
+    )
     if _should_expose_local_path(ctx):
         prefix = (
             "This file is already registered for the current surface in this turn. "
@@ -111,16 +115,17 @@ def _publish_note(ctx: ToolContext, *, already_published: bool = False) -> str:
             prefix
             + "Do not include any artifact URL in your reply. "
             + "Mention the local_path as the local entry path when the user needs to open "
-            + "the generated file on this machine."
+            + f"the generated file on this machine. {final_response}"
         )
     if already_published:
         return (
             "This file is already registered for the current surface in this turn. "
-            "Do not call publish_artifact again for the same file; just confirm it is ready."
+            "Do not call publish_artifact again for the same file; just confirm it is ready. "
+            + final_response
         )
     return (
         "The active surface handles artifact download or native channel delivery. "
-        "Do not include any URL in your reply."
+        f"Do not include any URL in your reply. {final_response}"
     )
 
 

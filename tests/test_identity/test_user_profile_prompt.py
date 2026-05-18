@@ -136,6 +136,8 @@ def test_system_prompt_guides_generated_file_delivery() -> None:
     assert "local entry path" in prompt
     assert "Do not invent artifact download URLs" in prompt
     assert "do not call `publish_artifact` again" in prompt
+    assert "After `publish_artifact` succeeds" in prompt
+    assert "final response" in prompt
 
 
 def test_system_prompt_limits_file_delivery_when_no_file_authoring_tools() -> None:

@@ -9,6 +9,7 @@ import pytest
 
 from opensquilla.gateway.boot import _make_task_session_lifecycle_listener
 from opensquilla.gateway.routing import RouteEnvelope, SourceKind
+from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.gateway.session_lifecycle import (
     TaskLifecycleEvent,
     apply_task_lifecycle_to_session,
@@ -104,6 +105,15 @@ def _make_session(
     )
 
 
+def test_sessions_changed_payload_has_shared_schema_fields() -> None:
+    assert build_sessions_changed_payload("agent:main:test", "turn_complete") == {
+        "schema_version": 1,
+        "key": "agent:main:test",
+        "reason": "turn_complete",
+        "run_status": "idle",
+    }
+
+
 def _make_runtime(
     turn_handler: Callable[..., Awaitable[Any]],
     *,
@@ -149,7 +159,19 @@ async def test_task_timeout_terminalizes_running_session_and_broadcasts_change()
     assert events[-1] == (
         session.session_key,
         "sessions.changed",
-        {"key": session.session_key, "reason": "task_terminal"},
+        {
+            "schema_version": 1,
+            "key": session.session_key,
+            "reason": "task_terminal",
+            "status": "timeout",
+            "run_status": "timeout",
+            "last_task": {
+                "task_id": handle.task_id,
+                "status": "timeout",
+                "terminal_reason": "timeout",
+                "terminal_message": "The task timed out before it could finish.",
+            },
+        },
     )
     assert manager.finish_calls == []
     assert manager.update_calls[0][1]["status"] == SessionStatus.TIMEOUT
@@ -245,12 +267,29 @@ async def test_task_running_reactivates_terminal_session_before_next_turn() -> N
     assert events[2] == (
         session.session_key,
         "sessions.changed",
-        {"key": session.session_key, "reason": "task_running"},
+        {
+            "schema_version": 1,
+            "key": session.session_key,
+            "reason": "task_running",
+            "run_status": "running",
+            "active_task": {"task_id": handle.task_id, "status": "running"},
+        },
     )
     assert events[-1] == (
         session.session_key,
         "sessions.changed",
-        {"key": session.session_key, "reason": "task_terminal"},
+        {
+            "schema_version": 1,
+            "key": session.session_key,
+            "reason": "task_terminal",
+            "status": "done",
+            "run_status": "idle",
+            "last_task": {
+                "task_id": handle.task_id,
+                "status": "succeeded",
+                "terminal_reason": "completed",
+            },
+        },
     )
     assert manager.finish_calls == []
     assert manager.update_calls[0][1]["status"] == SessionStatus.RUNNING

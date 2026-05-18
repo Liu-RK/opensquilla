@@ -72,6 +72,7 @@ class _OutboundFrame:
     payload: Any
     event_name: str | None
     res_frame: ResFrame | None
+    meta: dict[str, Any] | None = None
 
 
 def _payload_field(payload: Any, key: str) -> Any:
@@ -127,7 +128,12 @@ class WsConnection:
     # Public send entry points
     # ------------------------------------------------------------------
 
-    async def send_event(self, event: str, payload: Any = None) -> None:
+    async def send_event(
+        self,
+        event: str,
+        payload: Any = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
         # Atomic check + enqueue. The check and ``put_nowait`` are part of
         # one synchronous flow with no ``await`` between them, so
         # ``_force_close`` cannot flip ``_closing`` mid-flight (asyncio is
@@ -144,13 +150,14 @@ class WsConnection:
                 payload=payload,
                 event_name=event,
                 res_frame=None,
+                meta=meta,
             )
             self._enqueue_frame(frame)
             return
         # Legacy direct-send path (pre-auth, kill-switch off, or post-stop).
         async with self._send_lock:
             if self.ws.client_state == WebSocketState.CONNECTED:
-                wire = make_event(event, payload, seq=self.next_seq())
+                wire = make_event(event, payload, seq=self.next_seq(), meta=meta)
                 await self.ws.send_text(wire.model_dump_json())
 
     async def send_res(self, frame: ResFrame) -> None:
@@ -309,7 +316,10 @@ class WsConnection:
                 try:
                     if item.event_name is not None:
                         wire = make_event(
-                            item.event_name, item.payload, seq=self.next_seq()
+                            item.event_name,
+                            item.payload,
+                            seq=self.next_seq(),
+                            meta=item.meta,
                         )
                         await self.ws.send_text(wire.model_dump_json())
                     elif item.res_frame is not None:

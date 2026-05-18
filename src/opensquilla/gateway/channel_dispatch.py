@@ -49,6 +49,7 @@ from opensquilla.channels.types import IncomingMessage, OutgoingMessage
 from opensquilla.engine.start_turn import start_turn_via_runtime
 from opensquilla.engine.types import ArtifactEvent, ErrorEvent, RunHeartbeatEvent, TextDeltaEvent
 from opensquilla.gateway.attachment_ingest import AttachmentIngestResult, ingest_attachments
+from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.paths import media_root_from_config
 from opensquilla.permissions import configured_default_elevated
 from opensquilla.session.terminal_reply import build_terminal_reply
@@ -2093,5 +2094,5 @@ async def _emit_events(
     await event_bridge.emit(
         session_key,
         "sessions.changed",
-        {"key": session_key, "reason": reason},
+        build_sessions_changed_payload(session_key, reason),
     )

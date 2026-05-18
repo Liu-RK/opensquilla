@@ -15,6 +15,7 @@ from opensquilla.engine.start_turn import start_turn_via_runtime
 from opensquilla.gateway import attachment_ingest as _attachment_ingest
 from opensquilla.gateway.agent_tasks import get_agent_task_registry
 from opensquilla.gateway.rpc import RpcContext, RpcHandlerError, RpcUnavailableError, get_dispatcher
+from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.gateway.session_services import (
     get_session_epoch,
     get_session_lock,
@@ -1066,7 +1067,10 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                     await _emit_to_subscribers(ctx, key, f"session.event.{event_kind}", event_dict)
 
             await _emit_to_subscribers(
-                ctx, key, "sessions.changed", {"key": key, "reason": "turn_complete"}
+                ctx,
+                key,
+                "sessions.changed",
+                build_sessions_changed_payload(key, "turn_complete"),
             )
         except asyncio.CancelledError:
             log.info("sessions.send.aborted", session_key=key)
@@ -1897,7 +1901,11 @@ async def _handle_sessions_messages_subscribe(params: dict | None, ctx: RpcConte
         conn = get_registry().get(ctx.conn_id)
         if conn is not None:
             for event in replay.events:
-                await conn.send_event(event.event_name, event.payload)
+                await conn.send_event(
+                    event.event_name,
+                    event.payload,
+                    meta={"replayed": True},
+                )
                 replayed_count += 1
 
     storage = get_session_storage(getattr(ctx, "session_manager", None))
