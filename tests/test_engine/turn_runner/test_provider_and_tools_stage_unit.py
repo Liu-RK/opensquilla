@@ -4,9 +4,8 @@ TurnRunner stack).
 Drives a 10-case corpus through ``ProviderAndToolsStage.run`` with
 recording fakes for ``ProviderResolverPort`` and ``ToolBuilderPort``.
 
-Per the coverage-gate-under-feature-flag-seam discipline, two cases (#9
-and #10) register raising fakes so the propagation contract is exercised
-even without the runtime wrapper.
+Two cases (#9 and #10) register raising fakes so the propagation contract is
+exercised without the runtime wrapper.
 """
 
 from __future__ import annotations

@@ -137,6 +137,102 @@ async def test_agent_memory_flush_timeout_enters_backoff_without_retrigger(
 
 
 @pytest.mark.asyncio
+async def test_agent_memory_flush_timeout_does_not_block_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import opensquilla.engine.agent as agent_module
+
+    async def fake_compact_context(_request):
+        return SimpleNamespace(
+            removed_count=1,
+            summary="User asked for memory flush timeout recovery.",
+            kept_entries=[{"role": "user", "content": "latest turn"}],
+        )
+
+    monkeypatch.setattr(agent_module, "compact_context", fake_compact_context)
+
+    agent = Agent(
+        provider=None,  # type: ignore[arg-type]
+        config=AgentConfig(
+            context_window_tokens=100,
+            context_overflow_threshold=0.5,
+            flush_timeout_seconds=0.01,
+            flush_backoff_initial_seconds=10.0,
+            flush_backoff_max_seconds=20.0,
+        ),
+    )
+    calls = 0
+
+    async def slow_flush(_plan, _messages):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(agent, "_run_flush", slow_flush)
+    messages = [
+        Message(role="user", content="older turn"),
+        Message(role="assistant", content="older answer"),
+        Message(role="user", content="latest turn"),
+    ]
+
+    try:
+        outcome = await agent._check_context_overflow(messages, 60)
+    finally:
+        task = agent._active_flush_task
+        if task is not None and not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert outcome is not None
+    assert outcome.compacted is True
+    assert outcome.summary == "User asked for memory flush timeout recovery."
+    assert [message.content for message in outcome.messages] == [
+        "[Context summary]\nUser asked for memory flush timeout recovery.",
+        "Understood. Continuing from summary.",
+        "latest turn",
+    ]
+    assert calls == 1
+    assert agent._flush_backoff_seconds == 10.0
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_flush_service_uses_background_timeout() -> None:
+    class RecordingFlushService:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] | None = None
+
+        async def execute(self, *_args, **kwargs):
+            self.kwargs = kwargs
+            return FlushReceipt(
+                mode="llm",
+                flushed_paths=["memory/ok.md"],
+                slug="ok",
+                message_count=1,
+                duration_ms=1,
+                raw_reason=None,
+                error=None,
+                indexed_chunk_count=1,
+                integrity_status="ok",
+                output_coverage_status="ok",
+                obligation_status="ok",
+            )
+
+    service = RecordingFlushService()
+    agent = Agent(
+        provider=None,  # type: ignore[arg-type]
+        config=AgentConfig(flush_timeout_seconds=0.01, flush_background_timeout_seconds=42.0),
+        session_flush_service=service,
+        session_key="agent:main:webchat:s1",
+    )
+
+    await agent._run_flush(SimpleNamespace(relative_path="memory/2026-05-14.md"), [])
+
+    assert service.kwargs is not None
+    assert service.kwargs["timeout"] == 42.0
+
+
+@pytest.mark.asyncio
 async def test_agent_memory_flush_raw_receipt_keeps_backoff() -> None:
     agent = Agent(
         provider=None,  # type: ignore[arg-type]

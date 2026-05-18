@@ -34,6 +34,98 @@ def test_provider_request_proof_blocks_oversized_payload() -> None:
     assert exc_info.value.proof["top_contributors"][0]["chars"] == 5000
 
 
+def test_provider_request_proof_excludes_native_image_payload_from_text_budget() -> None:
+    proof = prove_provider_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64," + ("a" * 5000),
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+        projection_adapter="openrouter",
+        proof_budget=1000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof["fits"] is True
+    assert proof["media_blocks_excluded"] == 1
+    assert proof["media_chars_excluded"] > 5000
+    assert proof["top_contributors"][0]["chars"] < 5000
+
+
+def test_provider_request_proof_excludes_anthropic_base64_media_from_text_budget() -> None:
+    proof = prove_provider_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "summarize this"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "a" * 5000,
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+        projection_adapter="anthropic",
+        proof_budget=1000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof["fits"] is True
+    assert proof["media_blocks_excluded"] == 1
+    assert proof["media_chars_excluded"] == 5000
+    assert proof["top_contributors"][0]["chars"] < 5000
+
+
+def test_provider_request_proof_still_blocks_large_text_next_to_native_media() -> None:
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "x" * 5000},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64," + ("a" * 5000),
+                        },
+                    },
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ProviderRequestBudgetExceeded) as exc_info:
+        prove_provider_payload(
+            payload,
+            projection_adapter="openrouter",
+            proof_budget=1000,
+            status_projection_mode="content_envelope",
+        )
+
+    proof = exc_info.value.proof
+    assert proof["fits"] is False
+    assert proof["media_blocks_excluded"] == 1
+    assert proof["top_contributors"][0]["chars"] == 5000
+
+
 def test_provider_request_proof_compacts_tool_payload_once() -> None:
     payload = {
         "messages": [

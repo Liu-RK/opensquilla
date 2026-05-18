@@ -1,4 +1,4 @@
-"""Snapshot regression net for ``InputStage`` post-Phase-C.
+"""Snapshot regression net for ``InputStage`` through ``TurnRunner._run_turn``.
 
 The corpus enumerates every input shape the stage has been observed to
 handle and pins the output snapshot. Drives the corpus through
@@ -44,9 +44,8 @@ def _make_resolve_provider_probe(state: _ProbeState):
     ``_InputSliceCapture`` to halt the generator.
 
     ``_run_turn`` exposes ``runtime_message`` / ``semantic_input`` /
-    ``extra_prompt_context`` as locals in BOTH the legacy and the new arm
-    (the new arm assigns them from ``input_out``). The fake's ``calls``
-    list is the cross-arm source of truth for ``persisted_call_shape``;
+    ``extra_prompt_context`` as locals after the input stage has run.
+    The fake's ``calls`` list is the source of truth for ``persisted_call_shape``;
     the fake's recorded return content is the source of truth for
     ``persisted_returned_content``. This way the snapshot shape is
     identical across arms even though ``persisted_entry`` is local to the
@@ -59,10 +58,9 @@ def _make_resolve_provider_probe(state: _ProbeState):
         # Walk up the call stack until we find ``_run_turn``'s frame —
         # identified by the presence of ``runtime_message`` AND
         # ``semantic_input`` AND ``extra_prompt_context`` in ``f_locals``.
-        # When's ProviderAndToolsStage is active (``=new``),
-        # ``_resolve_provider`` is invoked one+ frames below ``_run_turn``;
-        # the legacy arm calls it directly. This lets the same probe work
-        # under both modes.
+        # ``_resolve_provider`` is invoked below ``_run_turn`` through the
+        # provider/tools stage adapter, so the probe climbs until it finds
+        # the runtime locals it needs.
         frame = sys._getframe(1)
         while frame is not None:
             locs = frame.f_locals

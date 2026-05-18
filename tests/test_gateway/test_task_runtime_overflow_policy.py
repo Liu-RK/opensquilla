@@ -1,6 +1,6 @@
 """Per-session pending queue overflow policy tests.
 
-Covers PR-E2: configurable ``pending_overflow_policy`` with two
+Covers configurable ``pending_overflow_policy`` with two
 behaviours and per-channel override hook surfaced for noisy realtime
 adapters.
 

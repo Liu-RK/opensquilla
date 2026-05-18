@@ -76,6 +76,11 @@ if TYPE_CHECKING:
     from opensquilla.provider.protocol import LLMProvider
     from opensquilla.tools.types import ToolContext
 
+
+# ---------------------------------------------------------------------------
+# Input stage adapters
+# ---------------------------------------------------------------------------
+
 class _TurnRunnerExtraContextAdapter(ExtraContextResolver):
     """Bind ``TurnRunner``'s two static extra-context helpers as a Protocol.
 
@@ -97,6 +102,11 @@ class _TurnRunnerExtraContextAdapter(ExtraContextResolver):
         from opensquilla.engine.runtime import TurnRunner
 
         return TurnRunner._merge_extra_prompt_context(base, extra)
+
+
+# ---------------------------------------------------------------------------
+# Provider/tools stage adapters
+# ---------------------------------------------------------------------------
 
 class _TurnRunnerProviderResolverAdapter(ProviderResolverPort):
     """Bind ``TurnRunner._resolve_provider`` as a Protocol-shaped port."""
@@ -136,6 +146,11 @@ class _TurnRunnerToolBuilderAdapter(ToolBuilderPort):
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[Any], ToolHandler | None]:
         return self._runner._build_tools(ctx, metadata=metadata)
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembler stage adapters
+# ---------------------------------------------------------------------------
 
 class _TurnRunnerPromptAssemblerAdapter(PromptAssemblerPort):
     """Bind ``TurnRunner._assemble_prompt`` as a Protocol-shaped port."""
@@ -288,6 +303,11 @@ class _TurnRunnerMemoryFingerprintAdapter(MemoryFingerprintPort):
         except Exception:  # noqa: BLE001 - defensive
             return None
 
+
+# ---------------------------------------------------------------------------
+# Agent bootstrap stage adapters
+# ---------------------------------------------------------------------------
+
 class _TurnRunnerTimeoutBudgetAdapter(TimeoutBudgetPort):
     """Bind the five ``TurnRunner._resolve_agent_*`` helpers as a single port.
 
@@ -422,6 +442,9 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
             tool_result_store_session_id=session_id_for_log or session_key,
             flush_enabled=getattr(mem_cfg, "flush_enabled", True),
             flush_timeout_seconds=getattr(mem_cfg, "flush_timeout_seconds", 5.0),
+            flush_background_timeout_seconds=getattr(
+                mem_cfg, "flush_background_timeout_seconds", 60.0
+            ),
             flush_backoff_initial_seconds=getattr(
                 mem_cfg, "flush_backoff_initial_seconds", 30.0
             ),
@@ -579,6 +602,11 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
             session_flush_service=self._runner._session_flush_service,
         )
 
+
+# ---------------------------------------------------------------------------
+# Compaction/history stage adapters
+# ---------------------------------------------------------------------------
+
 class _TurnRunnerT3UpgradeCompactionAdapter(T3UpgradeCompactionPort):
     """Bind ``TurnRunner._maybe_compact_on_t3_upgrade`` as a Protocol port.
 
@@ -675,6 +703,11 @@ class _RequestContextPrependAdapter(RequestContextPrependPort):
 
         return _prepend_request_context_prompt(existing, prepended)
 
+
+# ---------------------------------------------------------------------------
+# Stream consumer stage adapters
+# ---------------------------------------------------------------------------
+
 class _TurnRunnerAgentRunAdapter(AgentRunPort):
     """Bind ``agent.run_turn(turn_input, extra_messages=..., **kwargs)``.
 
@@ -708,7 +741,7 @@ class _TurnRunnerAgentRunAdapter(AgentRunPort):
 class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
     """Bind ``SessionManager.persist_compaction_result`` + ``notify_compaction``.
 
-    Compaction seam: the adapter forwards the persist call verbatim and
+    Compaction refresh: the adapter forwards the persist call verbatim and
     follows it with ``notify_compaction(session_key)``. The
     log-and-continue try/except lives in the stage's
     ``_CompactionHandler``. The
@@ -768,7 +801,7 @@ class _TurnRunnerMemorySnapshotRefreshAdapter(MemorySnapshotRefreshPort):
 class _TurnRunnerSystemPromptRefreshAdapter(SystemPromptRefreshPort):
     """Rebuild + apply the cacheable system-prompt base after compaction.
 
-    Compaction seam: extracts the cacheable base from the
+    Compaction refresh: extracts the cacheable base from the
     ``(base, dynamic_suffix)`` tuple returned by ``_assemble_prompt``
     (when applicable) before invoking ``agent.refresh_system_prompt``.
     Feeding the tuple directly into ``ChatConfig.system`` would smuggle
@@ -816,6 +849,11 @@ class _TurnRunnerMemorySyncNotifyAdapter(MemorySyncNotifyPort):
         byte_count = len(runtime_message.encode("utf-8"))
         sync_manager.notify_message(byte_count)
 
+
+# ---------------------------------------------------------------------------
+# Attachment stage adapters
+# ---------------------------------------------------------------------------
+
 class _TurnRunnerAttachmentMessageBuilderAdapter(AttachmentMessageBuilderPort):
     """Bind ``TurnRunner._build_attachment_messages`` + media-root lookup.
 
@@ -843,6 +881,11 @@ class _TurnRunnerAttachmentMessageBuilderAdapter(AttachmentMessageBuilderPort):
             attachments,
             media_root=self._runner._attachment_media_root(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Turn finalizer stage adapters
+# ---------------------------------------------------------------------------
 
 class _TurnRunnerTranscriptAppendAdapter(TranscriptAppendPort):
     """Bind ``SessionManager.append_message`` for the assistant turn persist.

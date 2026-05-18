@@ -1,7 +1,7 @@
 """Stage object for the agent stream consumer loop.
 
-Owns the per-turn slice between the ``AttachmentStage`` seam
-and the post-stream transcript-persist seam: the
+Owns the per-turn slice between the attachment stage boundary
+and the post-stream transcript-persist boundary: the
 pre-loop accumulator declarations, the
 ``async for event in agent.run_turn(...)`` body, and the post-stream
 sync-manager notify call.
@@ -14,7 +14,7 @@ contract. Terminal state for the post-stream surface flows
 through the harness-owned ``_StreamState`` value object the stage
 mutates in place.
 
-Compaction seam preservation: the ``_CompactionHandler`` executes the
+Compaction refresh preservation: the ``_CompactionHandler`` executes the
 three-step ``persist -> snapshot refresh -> system-prompt refresh``
 sequence as a single transaction. The
 ``persist_compaction_result`` re-entrancy contract is preserved -- the
@@ -22,7 +22,7 @@ adapter forwards the call verbatim and the IN-TURN path remains the
 only call site after the previous extraction landed.
 
 No ``TurnHook`` is fired from inside the stream loop today.
-``CompactionHook`` integration for the IN-TURN seam is deferred.
+``CompactionHook`` integration for the in-turn refresh path is deferred.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class CompactionPersistPort(Protocol):
     exceptions other than ``CancelledError`` (log + continue); the
     stage applies that wrapping at the call site, not inside the port.
 
-    Compaction seam: This is the only remaining call site for
+    Compaction refresh: This is the only remaining call site for
     ``persist_compaction_result``. The compaction contract requires the
     call to remain re-entrant -- the Agent has already mutated its
     in-memory message list before the runner sees ``CompactionEvent``,
@@ -112,7 +112,7 @@ class MemorySnapshotRefreshPort(Protocol):
     dict-write sequence. The adapter respects ``private_memory_allowed``:
     when false, the dict is not written.
 
-    Compaction seam: the frozen system-prompt snapshot lives in this dict;
+    Compaction refresh: the frozen system-prompt snapshot lives in this dict;
     the design note "the in-turn path must keep emitting
     through CompactionEvent so TurnRunner can update the frozen
     system-prompt snapshot ... before the next turn" is satisfied by
@@ -134,7 +134,7 @@ class SystemPromptRefreshPort(Protocol):
     Wraps the ``_assemble_prompt(...)`` call + the tuple-vs-str extract
     + ``agent.refresh_system_prompt(refreshed_prompt)``.
 
-    Compaction seam: the post-compaction prompt rebuild MUST extract the
+    Compaction refresh: the post-compaction prompt rebuild MUST extract the
     cacheable base (not the full ``(base, dynamic_suffix)`` tuple) --
     feeding the tuple directly into ``agent.refresh_system_prompt``
     would smuggle volatile bytes into ``ChatConfig.system`` and raise
@@ -525,7 +525,7 @@ class _DoneHandler:
         return event, extra_yields
 
 class _CompactionHandler:
-    """compaction seam: persist + memory snapshot refresh + system prompt refresh.
+    """Persist compaction and refresh memory snapshot + system prompt.
 
     The order persist -> snapshot -> prompt is load-bearing per the
     compaction contract (the Agent has already mutated its
@@ -589,9 +589,9 @@ class StreamConsumerStage:
     1. ``AgentRunPort.run_turn`` -- one async iterator started; the
        stage owns the lifetime of the consumer loop.
     2. Per ``CompactionEvent``, conditionally:
-       a. ``CompactionPersistPort.persist_and_notify`` (compaction seam).
-       b. ``MemorySnapshotRefreshPort.refresh_snapshot`` (compaction seam).
-       c. ``SystemPromptRefreshPort.refresh_system_prompt`` (compaction seam).
+       a. ``CompactionPersistPort.persist_and_notify``.
+       b. ``MemorySnapshotRefreshPort.refresh_snapshot``.
+       c. ``SystemPromptRefreshPort.refresh_system_prompt``.
     3. Post-stream: ``MemorySyncNotifyPort.notify_message_bytes`` -- one
        call after the loop exits cleanly.
 

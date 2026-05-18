@@ -3,10 +3,8 @@ TurnRunner stack).
 
 Drives a 13-case corpus through ``CompactionAndHistoryStage.run`` with
 four recording fakes (one per port) plus a recording ``CompactionHook``.
-Per the coverage-gate-under-feature-flag-seam discipline, cases register
-raising fakes so the hook-isolation contract (engine hook seam) and the
-exception-propagation contract are exercised even without the runtime
-wrapper.
+Raising fakes exercise both the hook-isolation contract and the
+exception-propagation contract without the runtime wrapper.
 """
 
 from __future__ import annotations
@@ -308,7 +306,7 @@ async def test_compaction_hook_only_fires_t3_when_handled() -> None:
 
 @pytest.mark.asyncio
 async def test_raising_before_compact_hook_is_isolated() -> None:
-    """engine hook seam isolation contract: a hook that raises MUST NOT break the turn."""
+    """Hook isolation contract: a hook that raises MUST NOT break the turn."""
     hook = _RecordingCompactionHook(before_raises=RuntimeError)
     stage, t3, preflight, _, _ = _make_stage(
         t3=_RecordingT3(return_value="not_applicable"),
@@ -337,7 +335,7 @@ async def test_raising_after_compact_hook_is_isolated() -> None:
 
 @pytest.mark.asyncio
 async def test_history_loader_exception_propagates() -> None:
-    """HistoryLoader exceptions propagate (legacy slice has no try/except)."""
+    """HistoryLoader exceptions propagate; the stage does not catch them."""
     stage, _, _, _, _ = _make_stage(
         history=_RecordingHistoryLoader(raises=RuntimeError),
     )

@@ -2,10 +2,8 @@
 TurnRunner stack).
 
 Drives a 13-case corpus through ``PromptAssemblerStage.run`` with seven
-recording fakes (one per port). Per the
-coverage-gate-under-feature-flag-seam discipline, case #13 registers a
-raising fake so the propagation contract is exercised even without the
-runtime wrapper.
+recording fakes (one per port). Case #13 registers a raising fake so the
+propagation contract is exercised without the runtime wrapper.
 """
 
 from __future__ import annotations

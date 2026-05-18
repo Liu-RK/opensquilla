@@ -1,9 +1,9 @@
 """Snapshot harness for ``StreamConsumerStage`` through ``TurnRunner._run_turn``.
 
 Drives a 17-case corpus against ``TurnRunner._run_turn`` with the
-``StreamConsumerStage`` running unconditionally (: legacy arm
-deleted). The corpus exercises every event-type branch in the slice plus
-the compaction seam (``CompactionEvent`` -> persist -> snapshot refresh ->
+``StreamConsumerStage`` running through the runtime stage path. The corpus
+exercises every event-type branch in the slice plus
+the in-turn compaction refresh (``CompactionEvent`` -> persist -> snapshot refresh ->
 system-prompt refresh) plus raising-fake cases for both the agent stream
 and the compaction persist.
 """
@@ -546,7 +546,7 @@ async def test_stream_consumer_stage_snapshot(
     if case.expected_done_present:
         assert any(isinstance(e, DoneEvent) for e in yielded)
 
-    # compaction seam observation: persist call count + system-prompt refresh count.
+    # In-turn compaction observation: persist call count + system-prompt refresh count.
     sm = runner._session_manager
     assert isinstance(sm, _RecordingSessionManager)
     persist_calls = [c for c in sm.calls if c[0] == "persist"]

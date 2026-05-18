@@ -1,4 +1,4 @@
-"""Snapshot regression net for ``PromptAssemblerStage`` post-Phase-C.
+"""Snapshot regression net for ``PromptAssemblerStage`` through ``TurnRunner._run_turn``.
 
 The corpus enumerates every input shape the stage has been observed to
 handle and pins the output snapshot. The harness patches the seven
@@ -80,8 +80,8 @@ def _capture_locals_at_post_slice() -> dict[str, Any]:
 
     The probe is hooked onto ``_resolve_agent_runtime_timeout`` (the very
     next call site after the prompt-assembler slice). At entry, the
-    caller's frame contains every local both the legacy and new arms must
-    have populated identically.
+    caller's frame contains every local the prompt-assembler boundary must
+    populate.
     """
 
     frame = sys._getframe(2)  # skip probe + adapter frames

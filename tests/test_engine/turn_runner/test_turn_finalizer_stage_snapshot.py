@@ -1,8 +1,8 @@
 """Snapshot harness for ``TurnFinalizerStage`` through ``TurnRunner._run_turn``.
 
 Drives a 13-case corpus against ``TurnRunner._run_turn`` with the
-``TurnFinalizerStage`` running unconditionally (: legacy arm
-deleted). The corpus exercises every branch in the slice plus the
+``TurnFinalizerStage`` running through the runtime stage path. The corpus
+exercises every branch in the slice plus the
 heartbeat-empty edge, DeepSeek/non-DeepSeek reasoning, hallucination
 passthrough, no-session-manager edge, and raising-fake cases for memory
 capture and session totals (the two log-and-continue arms).
@@ -371,7 +371,7 @@ def _patch_capture_turn_memory(
 ) -> None:
     """Replace ``_capture_turn_memory`` with a recording stub.
 
-    The legacy slice calls ``self._capture_turn_memory`` directly; the
+    The runtime path calls ``self._capture_turn_memory`` directly; the
     new arm goes through the ``TurnMemoryCapturePort`` adapter which
     forwards to the same method. Patching once is bit-identical across
     both modes.

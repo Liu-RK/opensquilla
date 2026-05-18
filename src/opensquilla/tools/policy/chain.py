@@ -8,7 +8,7 @@ denied_tools, denied_tools before private_memory_scope, and so on. The
 
 :func:`run_chain_with_emit` adds a logger callback so the orchestrator does
 not need to inline its own copy of the loop just to emit log events. This is
-the single chain-execution site that engine hook seam's ``ToolHook.before_tool`` seam
+the single chain-execution site that the ``ToolHook.before_tool`` hook
 sits in front of.
 """
 

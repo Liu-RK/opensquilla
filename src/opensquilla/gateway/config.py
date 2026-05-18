@@ -631,6 +631,7 @@ class MemoryConfig(BaseSettings):
     # Flush (pre-compaction memory save)
     flush_enabled: bool = True
     flush_timeout_seconds: float = 5.0
+    flush_background_timeout_seconds: float = 60.0
     flush_backoff_initial_seconds: float = 30.0
     flush_backoff_max_seconds: float = 300.0
     flush_archive_max_bytes: int = 800_000

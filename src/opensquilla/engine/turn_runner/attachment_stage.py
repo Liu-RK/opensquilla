@@ -1,7 +1,7 @@
 """Stage object for the attachment-message build + ``turn_input`` rebind.
 
-Owns the per-turn slice between the ``CompactionAndHistoryStage`` seam
-and the ``StreamConsumerStage`` seam: the
+Owns the per-turn slice between the compaction/history stage boundary
+and the stream-consumer stage boundary: the
 ``_build_attachment_messages`` call and the immediately-following
 ``turn_input`` rebind. The harness invokes ``AttachmentStage.run`` once
 per turn, AFTER ``CompactionAndHistoryStage`` and BEFORE the

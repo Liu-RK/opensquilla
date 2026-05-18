@@ -1,7 +1,7 @@
 """Stage object for prompt assembly + pre-turn pipeline execution.
 
 Owns the source slice that previously lived inline at the top of
-``TurnRunner._run_turn`` between the ProviderAndToolsStage seam and the
+``TurnRunner._run_turn`` between the provider/tools stage boundary and the
 runtime-budget resolve. The harness invokes ``PromptAssemblerStage.run``
 once per turn, AFTER ProviderAndToolsStage and BEFORE AgentBootstrapStage.
 Side-effect contract: re-raises any exception from the prompt-assembly

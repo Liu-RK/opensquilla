@@ -63,9 +63,9 @@ class ToolBuilderPort(Protocol):
       ``_with_runtime_write_callbacks``.
     - ``build_tools`` mirrors ``_build_tools(ctx, metadata=...)``.
 
-    Tool-hook wiring is not active at this boundary yet; a future production
-    wiring pass can extend ``build_tools`` to forward ``tool_hooks=`` to
-    ``build_tool_handler``.
+    Tool hooks are supported by the lower-level dispatch factory but are not
+    registered by TurnRunner by default; callers that need them must supply a
+    ToolBuilderPort that forwards ``tool_hooks=`` to ``build_tool_handler``.
     """
 
     async def with_artifact_context(

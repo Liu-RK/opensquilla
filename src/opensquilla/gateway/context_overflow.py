@@ -11,7 +11,7 @@ synchronous where possible — it either:
 
 The three policies:
 
-* ``auto_summarize`` — require a qualified pre-compaction flush when
+* ``auto_summarize`` — run a best-effort pre-compaction flush when
   configured, compact once, then proceed only if post-compaction token
   evidence proves the next call fits.
 * ``hard_truncate`` — drop oldest transcript entries from the in-memory
@@ -23,6 +23,7 @@ The three policies:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,6 +111,138 @@ def _build_refusal_envelope(
             "reason": reason,
         },
     }
+
+
+def _memory_timeout_seconds(config: GatewayConfig, name: str, default: float) -> float:
+    memory_cfg = getattr(config, "memory", None)
+    raw_timeout = getattr(memory_cfg, name, default)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return default
+    return max(timeout, 0.0)
+
+
+def _log_auto_summarize_flush_receipt(
+    *,
+    session_key: str,
+    receipt: Any,
+    background: bool,
+) -> None:
+    log_payload = {
+        "session_key": session_key,
+        "background": background,
+        "mode": getattr(receipt, "mode", "unknown"),
+        "integrity_status": getattr(receipt, "integrity_status", None),
+        "indexed_chunk_count": getattr(receipt, "indexed_chunk_count", None),
+        "output_coverage_status": getattr(receipt, "output_coverage_status", None),
+        "invalid_candidate_count": getattr(receipt, "invalid_candidate_count", None),
+        "candidate_missing_ids": getattr(receipt, "candidate_missing_ids", None),
+        "obligation_status": getattr(receipt, "obligation_status", None),
+        "obligation_missing_ids": getattr(receipt, "obligation_missing_ids", None),
+    }
+    if flush_receipt_allows_destructive_compaction(receipt):
+        log.info("context_overflow.auto_summarize_flush_done", **log_payload)
+        return
+    log.warning(
+        "context_overflow.auto_summarize_flush_degraded",
+        error=getattr(receipt, "error", None) or "degraded_flush_receipt",
+        **log_payload,
+    )
+
+
+def _consume_auto_summarize_flush_task(session_key: str, task: asyncio.Task) -> None:
+    try:
+        receipt = task.result()
+    except asyncio.CancelledError:
+        log.debug(
+            "context_overflow.auto_summarize_flush_cancelled",
+            session_key=session_key,
+            background=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "context_overflow.auto_summarize_flush_failed",
+            session_key=session_key,
+            background=True,
+            error=str(exc),
+        )
+    else:
+        _log_auto_summarize_flush_receipt(
+            session_key=session_key,
+            receipt=receipt,
+            background=True,
+        )
+
+
+async def _await_auto_summarize_flush_grace(
+    *,
+    config: GatewayConfig,
+    transcript: list[Any],
+    session_key: str,
+    flush_service: Any | None,
+) -> Any | None:
+    if not pre_compaction_flush_enabled(config) or not transcript:
+        return None
+
+    if flush_service is None:
+        log.warning(
+            "context_overflow.auto_summarize_flush_unavailable",
+            session_key=session_key,
+            error="flush_service_unavailable",
+        )
+        return None
+
+    background_timeout = _memory_timeout_seconds(
+        config,
+        "flush_background_timeout_seconds",
+        60.0,
+    )
+    task = asyncio.create_task(
+        flush_service.execute(
+            transcript,
+            session_key,
+            agent_id=parse_agent_id(session_key),
+            timeout=background_timeout,
+            message_window=0,
+            segment_mode="auto",
+        )
+    )
+
+    grace_timeout = _memory_timeout_seconds(config, "flush_timeout_seconds", 5.0)
+    try:
+        receipt = await asyncio.wait_for(asyncio.shield(task), timeout=grace_timeout)
+    except TimeoutError:
+        task.add_done_callback(
+            lambda completed: _consume_auto_summarize_flush_task(session_key, completed)
+        )
+        log.warning(
+            "context_overflow.auto_summarize_flush_timed_out",
+            session_key=session_key,
+            timeout_seconds=grace_timeout,
+            background_timeout_seconds=background_timeout,
+        )
+        return None
+    except asyncio.CancelledError:
+        task.add_done_callback(
+            lambda completed: _consume_auto_summarize_flush_task(session_key, completed)
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "context_overflow.auto_summarize_flush_failed",
+            session_key=session_key,
+            background=False,
+            error=str(exc),
+        )
+        return None
+
+    _log_auto_summarize_flush_receipt(
+        session_key=session_key,
+        receipt=receipt,
+        background=False,
+    )
+    return receipt
 
 
 async def _estimate_session_payload_tokens(
@@ -253,80 +386,12 @@ async def apply_context_overflow_policy(
                 )
                 return outcome
 
-            flush_enabled = pre_compaction_flush_enabled(config)
-            if flush_enabled and transcript and flush_service is None:
-                outcome.reason = "compaction_flush_failed"
-                outcome.refusal = _build_refusal_envelope(
-                    estimated, budget, outcome.reason
-                )
-                outcome.lifecycle = CompactionLifecycleResult(
-                    compacted=False,
-                    refused=True,
-                    reason=outcome.reason,
-                    tokens_before=estimated,
-                )
-                log.warning(
-                    "context_overflow.auto_summarize_refused",
-                    session_key=session_key,
-                    reason=outcome.reason,
-                    error="flush_service_unavailable",
-                )
-                return outcome
-
-            if flush_enabled and transcript:
-                service = flush_service
-                if service is None:
-                    outcome.reason = "compaction_flush_failed"
-                    outcome.refusal = _build_refusal_envelope(
-                        estimated, budget, outcome.reason
-                    )
-                    return outcome
-                try:
-                    receipt = await service.execute(
-                        transcript,
-                        session_key,
-                        agent_id=parse_agent_id(session_key),
-                        timeout=30.0,
-                        message_window=0,
-                        segment_mode="auto",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    outcome.reason = "compaction_flush_failed"
-                    outcome.refusal = _build_refusal_envelope(
-                        estimated, budget, outcome.reason
-                    )
-                    outcome.lifecycle = CompactionLifecycleResult(
-                        compacted=False,
-                        refused=True,
-                        reason=outcome.reason,
-                        tokens_before=estimated,
-                    )
-                    log.warning(
-                        "context_overflow.auto_summarize_refused",
-                        session_key=session_key,
-                        reason=outcome.reason,
-                        error=str(exc),
-                    )
-                    return outcome
-                outcome.flush_receipt = receipt
-                if not flush_receipt_allows_destructive_compaction(receipt):
-                    outcome.reason = "compaction_flush_failed"
-                    outcome.refusal = _build_refusal_envelope(
-                        estimated, budget, outcome.reason
-                    )
-                    outcome.lifecycle = CompactionLifecycleResult(
-                        compacted=False,
-                        refused=True,
-                        reason=outcome.reason,
-                        tokens_before=estimated,
-                        flush_receipt=receipt,
-                    )
-                    log.warning(
-                        "context_overflow.auto_summarize_refused",
-                        session_key=session_key,
-                        reason=outcome.reason,
-                    )
-                    return outcome
+            outcome.flush_receipt = await _await_auto_summarize_flush_grace(
+                config=config,
+                transcript=transcript,
+                session_key=session_key,
+                flush_service=flush_service,
+            )
 
             compact_with_result = getattr(session_manager, "compact_with_result", None)
             if callable(compact_with_result):

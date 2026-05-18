@@ -1,8 +1,8 @@
 """Snapshot harness for ``AttachmentStage`` through ``TurnRunner._run_turn``.
 
 Drives an 8-case corpus against ``TurnRunner._run_turn`` with the
-``AttachmentStage`` running unconditionally (: legacy arm deleted).
-The harness reuses the patch helpers to stub all upstream stages
+``AttachmentStage`` running through the runtime stage path. The harness reuses
+the patch helpers to stub all upstream stages
 and patches the ``Agent`` constructor so the stub agent's ``run_turn``
 raises a sentinel ``BaseException`` carrying the post-slice locals
 snapshot.
@@ -350,12 +350,9 @@ def _setup_runner(monkeypatch: pytest.MonkeyPatch) -> TurnRunner:
     _patch_observability(runner)
     _patch_compaction_history(runner)
 
-    # Replace the Agent class with the stub so the post-slice probe fires
-    # when ``agent.run_turn`` is invoked. The legacy arm imports Agent at
-    # runtime.py module level; the new-arm bootstrap adapter does a lazy
-    # ``from opensquilla.engine.agent import Agent`` inside its build()
-    # method. Patch both import sites so the substitution covers every
-    # stacked-flag combination.
+    # Replace the Agent class with the stub so the post-slice probe fires when
+    # ``agent.run_turn`` is invoked. Patch both runtime and adapter import sites
+    # so construction uses the stub consistently.
     monkeypatch.setattr("opensquilla.engine.runtime.Agent", _StubAgent)
     monkeypatch.setattr("opensquilla.engine.agent.Agent", _StubAgent)
     return runner

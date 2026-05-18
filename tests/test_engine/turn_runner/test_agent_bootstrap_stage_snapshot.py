@@ -1,4 +1,4 @@
-"""Snapshot regression net for ``AgentBootstrapStage`` post-Phase-C.
+"""Snapshot regression net for ``AgentBootstrapStage`` through ``TurnRunner._run_turn``.
 
 The corpus enumerates every input shape the stage has been observed to
 handle and pins the output snapshot. The harness patches the
@@ -103,8 +103,8 @@ def _capture_locals_at_post_slice() -> dict[str, Any]:
 
     The probe is hooked onto ``_maybe_compact_on_t3_upgrade`` (the very
     next call site after the agent-bootstrap slice). At entry, the
-    caller's frame contains every local both the legacy and new arms must
-    have populated identically.
+    caller's frame contains every local the agent-bootstrap boundary must
+    populate.
     """
 
     frame = sys._getframe(2)
@@ -464,11 +464,9 @@ async def _drive(runner, case, monkeypatch):
     def _allows(session_key):  # noqa: ARG001
         return case["private_memory_allowed_value"]
 
-    # Two import sites: the runtime legacy arm (which imports
-    # ``allows_private_memory_prompt_injection`` from
-    # ``opensquilla.session.keys`` at module level) and the harness adapter
-    # (which lazy-imports inside the function body). Patch both for parity
-    # between modes.
+    # Two import sites: runtime imports ``allows_private_memory_prompt_injection``
+    # at module level, and the adapter lazy-imports inside the function body.
+    # Patch both so the runtime path and adapter path see the same value.
     monkeypatch.setattr(
         "opensquilla.engine.runtime.allows_private_memory_prompt_injection",
         _allows,

@@ -113,6 +113,25 @@ class ReasoningToolLoopCapturingProvider(ToolLoopCapturingProvider):
         yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
 
 
+class LargeArgumentToolLoopCapturingProvider(ToolLoopCapturingProvider):
+    def __init__(self, code: str) -> None:
+        super().__init__()
+        self.code = code
+
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if call_number == 1:
+            yield ProviderToolUseStart(tool_use_id="tool-1", tool_name="execute_code")
+            yield ProviderToolUseEnd(
+                tool_use_id="tool-1",
+                tool_name="execute_code",
+                arguments={"code": self.code, "timeout": 10},
+            )
+            yield ProviderDone(stop_reason="tool_use", input_tokens=3, output_tokens=1)
+            return
+        yield ProviderText(text="done")
+        yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
+
+
 class CapturingTurnLog:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
@@ -479,6 +498,47 @@ def test_agent_provider_backstop_preserves_sessions_yield_control_json() -> None
     assert payload["waited"] is False
 
 
+def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+    )
+    large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id="code-1",
+                    name="execute_code",
+                    input={"code": large_code, "timeout": 10},
+                )
+            ],
+        )
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    original_block = messages[0].content[0]
+    projected_block = projected[0].content[0]
+    assert isinstance(original_block, ContentBlockToolUse)
+    assert isinstance(projected_block, ContentBlockToolUse)
+    assert original_block.input["code"] == large_code
+    assert projected_block.input["code"] != large_code
+    assert "tool_use_argument_projection" in projected_block.input["code"]
+    assert "original_chars:" in projected_block.input["code"]
+    assert "sha256:" in projected_block.input["code"]
+    assert len(json.dumps(projected_block.input, ensure_ascii=False)) < 1200
+    assert agent.config.metadata["tool_argument_projection_applied"] is True
+    assert agent.config.metadata["tool_argument_projection_calls"] == 1
+
+
 @pytest.mark.asyncio
 async def test_agent_static_cost_source_is_explicitly_distinct_from_provider_billed() -> None:
     provider = StaticCostProvider()
@@ -762,6 +822,59 @@ async def test_agent_request_context_repeats_across_tool_loop_without_persisting
         for message in agent._history
         if isinstance(message.content, str)
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) -> None:
+    large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
+    provider = LargeArgumentToolLoopCapturingProvider(large_code)
+
+    async def tool_handler(call: Any) -> ToolResult:
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="tool ok",
+        )
+
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_iterations=2,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+        tool_handler=tool_handler,
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert any(event.kind == "done" for event in events)
+    replay_messages = provider.calls[1]["messages"]
+    assistant_replay = next(
+        message
+        for message in replay_messages
+        if message.role == "assistant"
+        and isinstance(message.content, list)
+        and any(getattr(block, "type", None) == "tool_use" for block in message.content)
+    )
+    replay_block = next(
+        block
+        for block in assistant_replay.content
+        if isinstance(block, ContentBlockToolUse)
+    )
+    assert replay_block.input["code"] != large_code
+    assert "tool_use_argument_projection" in replay_block.input["code"]
+    history_block = next(
+        block
+        for message in agent._history
+        if message.role == "assistant" and isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, ContentBlockToolUse)
+    )
+    assert history_block.input["code"] == large_code
 
 
 @pytest.mark.asyncio

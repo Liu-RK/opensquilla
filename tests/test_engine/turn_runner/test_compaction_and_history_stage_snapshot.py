@@ -1,4 +1,4 @@
-"""Snapshot regression net for ``CompactionAndHistoryStage`` post-Phase-C.
+"""Snapshot regression net for ``CompactionAndHistoryStage`` through ``TurnRunner._run_turn``.
 
 The corpus enumerates every input shape the stage has been observed to
 handle and pins the output snapshot. The harness patches the four
@@ -64,8 +64,8 @@ def _capture_locals_at_post_slice() -> dict[str, Any]:
 
     The probe is hooked onto ``_build_attachment_messages`` (the very
     next call site after the compaction-and-history slice). At entry,
-    the caller's frame contains every local both the legacy and new
-    arms must have populated identically.
+    the caller's frame contains every local the compaction/history boundary
+    must populate.
     """
 
     frame = sys._getframe(2)

@@ -23,6 +23,62 @@ def _payload_chars(payload: Any) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
+def _is_data_url(value: str) -> bool:
+    return value.startswith("data:") and ";base64," in value[:128]
+
+
+def _media_placeholder(kind: str, value: str) -> str:
+    return f"[provider_request_{kind}_omitted: {len(value)} chars]"
+
+
+def _budget_projection(payload: Any) -> tuple[Any, int, int]:
+    media_chars = 0
+    media_blocks = 0
+
+    def visit(value: Any) -> Any:
+        nonlocal media_chars, media_blocks
+        if isinstance(value, list):
+            return [visit(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        if value.get("type") == "image_url":
+            image_url = value.get("image_url")
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if isinstance(url, str) and _is_data_url(url):
+                    media_chars += len(url)
+                    media_blocks += 1
+                    replaced = dict(value)
+                    replaced["image_url"] = {
+                        **image_url,
+                        "url": _media_placeholder("image_url", url),
+                    }
+                    return replaced
+
+        source = value.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            data = source.get("data")
+            media_type = source.get("media_type")
+            if (
+                isinstance(data, str)
+                and isinstance(media_type, str)
+                and (media_type.startswith("image/") or media_type == "application/pdf")
+            ):
+                media_chars += len(data)
+                media_blocks += 1
+                replaced = dict(value)
+                replaced["source"] = {
+                    **source,
+                    "data": _media_placeholder("base64_media", data),
+                }
+                return replaced
+
+        return {key: visit(item) for key, item in value.items()}
+
+    return visit(payload), media_chars, media_blocks
+
+
 def _top_contributors(payload: Any, *, limit: int = 5) -> list[dict[str, Any]]:
     contributors: list[dict[str, Any]] = []
 
@@ -84,7 +140,8 @@ def prove_provider_payload(
     status_projection_mode: str = "native_or_none",
     fallback_reason: str | None = None,
 ) -> dict[str, Any]:
-    estimated_chars = _payload_chars(payload)
+    budget_payload, media_chars, media_blocks = _budget_projection(payload)
+    estimated_chars = _payload_chars(budget_payload)
     estimated_tokens = max(1, estimated_chars // 4)
     fits = proof_budget <= 0 or estimated_chars <= proof_budget
     proof: dict[str, Any] = {
@@ -100,9 +157,12 @@ def prove_provider_payload(
         "compaction_not_smaller": False,
         "provider_window_mismatch": False,
         "fallback_reason": fallback_reason,
-        "top_contributors": _top_contributors(payload),
+        "top_contributors": _top_contributors(budget_payload),
         "retry_count": 0,
     }
+    if media_blocks:
+        proof["media_chars_excluded"] = media_chars
+        proof["media_blocks_excluded"] = media_blocks
     if not fits:
         proof["fallback_reason"] = "provider_request_budget_exhausted"
         raise ProviderRequestBudgetExceededError(proof)

@@ -1109,17 +1109,15 @@ class TurnRunner:
         self._turn_capture_services = turn_capture_services
         self._session_flush_service = session_flush_service
         self._diagnostics_state = diagnostics_state
-        # engine hook seam hook surface. When OPENSQUILLA_HOOKS=new, the runtime fans
-        # turn events out through these hooks instead of calling the static
-        # ``_write_trace_event`` helper directly. The default registration
-        # reproduces inline behavior 1:1.
+        # TurnHook surface. The default trace hook reproduces the inline trace
+        # event behavior while keeping the event sink replaceable at construction.
         if turn_hooks is None:
             self._turn_hooks: tuple[TurnHook, ...] = (DefaultTraceEmitterHook(),)
         else:
             self._turn_hooks = tuple(turn_hooks)
-        # engine hook seam CompactionHook surface. CompactionAndHistoryStage fans
-        # before/after-compact events out through these hooks. Empty tuple
-        # by default = no fan-out.
+        # CompactionHook surface. CompactionAndHistoryStage fans
+        # before/after-compact events out through these hooks. Empty tuple by
+        # default means compaction runs with no hook fan-out.
         self._compaction_hooks: tuple[CompactionHook, ...] = (
             tuple(compaction_hooks) if compaction_hooks else ()
         )
@@ -1146,6 +1144,7 @@ class TurnRunner:
         self._bootstrap_snapshots: dict[tuple[str, str, str], BootstrapSnapshot] = {}
         self._compaction_failures: dict[str, _CompactionFailureState] = {}
         self._turn_compacted_sessions: set[str] = set()
+        self._active_pre_compaction_flush_tasks: dict[str, asyncio.Task] = {}
         # TurnRunner stage decomposition InputStage instance. Holds no per-turn state;
         # constructed once. Active unconditionally as of.
         self._input_stage = InputStage(extra_ctx=_TurnRunnerExtraContextAdapter())
@@ -3812,68 +3811,11 @@ class TurnRunner:
         )
 
         if self._pre_compaction_flush_enabled():
-            if self._session_flush_service is None:
-                log.warning(
-                    "t3_upgrade_compaction.flush_failed",
-                    session_key=session_key,
-                    error="flush_service_unavailable",
-                )
-                self._record_compaction_failure(session_key)
-                return _T3_FLUSH_FAILED
-
-            flush_t0 = time.monotonic()
-            try:
-                from opensquilla.session.keys import parse_agent_id
-
-                receipt = await self._session_flush_service.execute(
-                    transcript,
-                    session_key,
-                    agent_id=parse_agent_id(session_key),
-                    message_window=0,
-                    segment_mode="auto",
-                    timeout=self._pre_compaction_flush_timeout_seconds(),
-                )
-                if not self._flush_receipt_allows_destructive_compaction(receipt):
-                    log.warning(
-                        "t3_upgrade_compaction.flush_failed",
-                        session_key=session_key,
-                        error=getattr(receipt, "error", None) or "degraded_flush_receipt",
-                        mode=getattr(receipt, "mode", "unknown"),
-                        integrity_status=getattr(receipt, "integrity_status", None),
-                        indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
-                        output_coverage_status=getattr(
-                            receipt,
-                            "output_coverage_status",
-                            None,
-                        ),
-                        invalid_candidate_count=getattr(
-                            receipt,
-                            "invalid_candidate_count",
-                            None,
-                        ),
-                        candidate_missing_ids=getattr(receipt, "candidate_missing_ids", None),
-                        obligation_status=getattr(receipt, "obligation_status", None),
-                        obligation_missing_ids=getattr(receipt, "obligation_missing_ids", None),
-                    )
-                    self._record_compaction_failure(session_key)
-                    return _T3_FLUSH_FAILED
-                log.info(
-                    "t3_upgrade_compaction.flush_done",
-                    session_key=session_key,
-                    mode=getattr(receipt, "mode", "unknown"),
-                    message_count=getattr(receipt, "message_count", 0),
-                    duration_ms=int((time.monotonic() - flush_t0) * 1000),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "t3_upgrade_compaction.flush_failed",
-                    session_key=session_key,
-                    error=str(exc),
-                )
-                self._record_compaction_failure(session_key)
-                return _T3_FLUSH_FAILED
+            await self._await_pre_compaction_flush_grace(
+                transcript,
+                session_key,
+                event_prefix="t3_upgrade_compaction",
+            )
 
         try:
             compaction_config = None
@@ -3967,60 +3909,11 @@ class TurnRunner:
             ratio=ratio,
         )
         if self._pre_compaction_flush_enabled():
-            if self._session_flush_service is None:
-                log.warning(
-                    "preflight_compaction.flush_failed",
-                    session_key=session_key,
-                    error="flush_service_unavailable",
-                )
-                self._record_compaction_failure(session_key)
-                return
-
-            try:
-                from opensquilla.session.keys import parse_agent_id
-
-                receipt = await self._session_flush_service.execute(
-                    transcript,
-                    session_key,
-                    agent_id=parse_agent_id(session_key),
-                    message_window=0,
-                    segment_mode="auto",
-                    timeout=self._pre_compaction_flush_timeout_seconds(),
-                )
-                if not self._flush_receipt_allows_destructive_compaction(receipt):
-                    log.warning(
-                        "preflight_compaction.flush_failed",
-                        session_key=session_key,
-                        error=getattr(receipt, "error", None) or "degraded_flush_receipt",
-                        mode=getattr(receipt, "mode", "unknown"),
-                        integrity_status=getattr(receipt, "integrity_status", None),
-                        indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
-                        output_coverage_status=getattr(
-                            receipt,
-                            "output_coverage_status",
-                            None,
-                        ),
-                        invalid_candidate_count=getattr(
-                            receipt,
-                            "invalid_candidate_count",
-                            None,
-                        ),
-                        candidate_missing_ids=getattr(receipt, "candidate_missing_ids", None),
-                        obligation_status=getattr(receipt, "obligation_status", None),
-                        obligation_missing_ids=getattr(receipt, "obligation_missing_ids", None),
-                    )
-                    self._record_compaction_failure(session_key)
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "preflight_compaction.flush_failed",
-                    session_key=session_key,
-                    error=str(exc),
-                )
-                self._record_compaction_failure(session_key)
-                return
+            await self._await_pre_compaction_flush_grace(
+                transcript,
+                session_key,
+                event_prefix="preflight_compaction",
+            )
         compaction_config = None
         if compaction_provider is not None or compaction_model:
             from opensquilla.session.compaction import build_compaction_config_from_provider
@@ -4077,6 +3970,165 @@ class TurnRunner:
         except (TypeError, ValueError):
             return 5.0
         return max(timeout, 0.0)
+
+    def _pre_compaction_flush_background_timeout_seconds(self) -> float:
+        memory_cfg = getattr(self._config, "memory", None)
+        raw_timeout = getattr(memory_cfg, "flush_background_timeout_seconds", 60.0)
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return 60.0
+        return max(timeout, 0.0)
+
+    async def _await_pre_compaction_flush_grace(
+        self,
+        transcript: list[Any],
+        session_key: str,
+        *,
+        event_prefix: str,
+    ) -> None:
+        if self._session_flush_service is None:
+            log.warning(
+                f"{event_prefix}.flush_unavailable",
+                session_key=session_key,
+                error="flush_service_unavailable",
+            )
+            return
+
+        task = self._active_pre_compaction_flush_tasks.get(session_key)
+        if task is not None:
+            if task.done():
+                self._consume_pre_compaction_flush_task(session_key, task, event_prefix)
+            else:
+                log.debug(
+                    f"{event_prefix}.flush_skipped",
+                    session_key=session_key,
+                    reason="already_running",
+                )
+                return
+
+        from opensquilla.session.keys import parse_agent_id
+
+        background_timeout = self._pre_compaction_flush_background_timeout_seconds()
+        task = asyncio.create_task(
+            self._session_flush_service.execute(
+                transcript,
+                session_key,
+                agent_id=parse_agent_id(session_key),
+                message_window=0,
+                segment_mode="auto",
+                timeout=background_timeout,
+            )
+        )
+        self._active_pre_compaction_flush_tasks[session_key] = task
+        task.add_done_callback(
+            lambda completed: self._consume_pre_compaction_flush_task(
+                session_key,
+                completed,
+                event_prefix,
+                background=True,
+            )
+        )
+
+        grace_timeout = self._pre_compaction_flush_timeout_seconds()
+        flush_t0 = time.monotonic()
+        try:
+            receipt = await asyncio.wait_for(asyncio.shield(task), timeout=grace_timeout)
+        except TimeoutError:
+            log.warning(
+                f"{event_prefix}.flush_timed_out",
+                session_key=session_key,
+                timeout_seconds=grace_timeout,
+                background_timeout_seconds=background_timeout,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if self._active_pre_compaction_flush_tasks.get(session_key) is task:
+                self._active_pre_compaction_flush_tasks.pop(session_key, None)
+            log.warning(
+                f"{event_prefix}.flush_failed",
+                session_key=session_key,
+                error=str(exc),
+            )
+            return
+
+        if self._active_pre_compaction_flush_tasks.get(session_key) is task:
+            self._active_pre_compaction_flush_tasks.pop(session_key, None)
+        self._log_pre_compaction_flush_receipt(
+            event_prefix,
+            session_key,
+            receipt,
+            duration_ms=int((time.monotonic() - flush_t0) * 1000),
+            background=False,
+        )
+
+    def _consume_pre_compaction_flush_task(
+        self,
+        session_key: str,
+        task: asyncio.Task,
+        event_prefix: str,
+        *,
+        background: bool = False,
+    ) -> None:
+        if self._active_pre_compaction_flush_tasks.get(session_key) is not task:
+            return
+        self._active_pre_compaction_flush_tasks.pop(session_key, None)
+        try:
+            receipt = task.result()
+        except asyncio.CancelledError:
+            log.debug(f"{event_prefix}.flush_cancelled", session_key=session_key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                f"{event_prefix}.flush_failed",
+                session_key=session_key,
+                error=str(exc),
+                background=background,
+            )
+        else:
+            self._log_pre_compaction_flush_receipt(
+                event_prefix,
+                session_key,
+                receipt,
+                duration_ms=getattr(receipt, "duration_ms", 0),
+                background=background,
+            )
+
+    def _log_pre_compaction_flush_receipt(
+        self,
+        event_prefix: str,
+        session_key: str,
+        receipt: Any,
+        *,
+        duration_ms: int,
+        background: bool,
+    ) -> None:
+        if self._flush_receipt_allows_destructive_compaction(receipt):
+            log.info(
+                f"{event_prefix}.flush_done",
+                session_key=session_key,
+                mode=getattr(receipt, "mode", "unknown"),
+                message_count=getattr(receipt, "message_count", 0),
+                duration_ms=duration_ms,
+                background=background,
+            )
+            return
+
+        log.warning(
+            f"{event_prefix}.flush_degraded",
+            session_key=session_key,
+            error=getattr(receipt, "error", None) or "degraded_flush_receipt",
+            mode=getattr(receipt, "mode", "unknown"),
+            integrity_status=getattr(receipt, "integrity_status", None),
+            indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
+            output_coverage_status=getattr(receipt, "output_coverage_status", None),
+            invalid_candidate_count=getattr(receipt, "invalid_candidate_count", None),
+            candidate_missing_ids=getattr(receipt, "candidate_missing_ids", None),
+            obligation_status=getattr(receipt, "obligation_status", None),
+            obligation_missing_ids=getattr(receipt, "obligation_missing_ids", None),
+            background=background,
+        )
 
     @staticmethod
     def _receipt_value(receipt: Any, name: str, default: Any) -> Any:

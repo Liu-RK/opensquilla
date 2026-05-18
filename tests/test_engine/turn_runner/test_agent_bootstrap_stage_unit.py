@@ -2,10 +2,8 @@
 TurnRunner stack).
 
 Drives an 11-case corpus through ``AgentBootstrapStage.run`` with six
-recording fakes (one per port). Per the
-coverage-gate-under-feature-flag-seam discipline, two cases register
-raising fakes so the propagation contract is exercised even without the
-runtime wrapper.
+recording fakes (one per port). Two cases register raising fakes so the
+propagation contract is exercised without the runtime wrapper.
 """
 
 from __future__ import annotations
@@ -72,6 +70,7 @@ def _default_aux(
         tool_result_store_session_id="s1",
         flush_enabled=True,
         flush_timeout_seconds=5.0,
+        flush_background_timeout_seconds=60.0,
         flush_backoff_initial_seconds=30.0,
         flush_backoff_max_seconds=300.0,
         flush_archive_max_bytes=800_000,
@@ -415,9 +414,7 @@ async def test_case11_max_iterations_zero_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_snapshot_failure_propagates() -> None:
-    """Synthetic raising MemorySnapshotPort fake — coverage for the
-    ``warm_session`` failure path per coverage-gate discipline.
-    """
+    """Synthetic raising MemorySnapshotPort fake for the warm failure path."""
     snap = _RecordingMemorySnapshot(raises=RuntimeError)
     stage = _make_stage(snapshot=snap)
     inp = _make_input()

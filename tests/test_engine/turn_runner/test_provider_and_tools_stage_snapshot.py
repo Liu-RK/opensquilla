@@ -1,4 +1,4 @@
-"""Snapshot regression net for ``ProviderAndToolsStage`` post-Phase-C.
+"""Snapshot regression net for ``ProviderAndToolsStage`` through ``TurnRunner._run_turn``.
 
 The corpus enumerates every input shape the stage has been observed to
 handle and pins the output snapshot. The harness patches
@@ -51,7 +51,7 @@ def _make_assemble_prompt_probe():
         extra_context, prompt_metadata, bootstrap_context_mode,
     ):  # noqa: ARG001
         # Walk up the stack to find the ``_run_turn`` frame. Under the
-        # post-Phase-C runtime, ``_assemble_prompt`` is called from inside
+        # In the staged runtime, ``_assemble_prompt`` is called from inside
         # the ``PromptAssemblerStage`` adapter rather than directly from
         # ``_run_turn``, so frame 1 is the adapter; we have to climb to
         # the frame that carries the ``_run_turn`` locals of interest.

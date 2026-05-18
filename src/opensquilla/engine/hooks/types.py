@@ -138,16 +138,16 @@ class ToolHook(Protocol):
     def after_tool(self, call: ToolHookCall, outcome: ToolHookResult) -> None: ...
 
 # ---------------------------------------------------------------------------
-# Compaction lifecycle (engine hook seam reserves the surface; compaction wires defaults)
+# Compaction lifecycle. This hook is active only when supplied to TurnRunner.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CompactionState:
     """Snapshot of compaction inputs handed to ``CompactionHook.before_compact``.
 
-    ``engine hook seam`` reserves the protocol; full population happens in compaction when
-    incremental compaction lands. For now the runtime supplies only what is
-    cheaply available at the call site.
+    The runtime supplies the stable fields available at the pre-turn
+    compaction call site. Hooks that need richer compaction telemetry should
+    read it from ``extra`` when a specific producer documents that field.
     """
 
     session_key: str

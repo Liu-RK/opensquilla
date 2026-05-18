@@ -119,9 +119,9 @@ class DefaultTranscriptHook:
 
     the transcript persist branch stays inline because the code
     is deeply intertwined with done-event bookkeeping, error-event persistence,
-    and capture services. Wiring is exposed as a hook so TurnRunner stage decomposition can move the
-    body without changing the seam. The default behavior is a no-op so the original
-    inline persistence remains the source of truth.
+    and capture services. Wiring is exposed as a hook so TurnRunner stage
+    decomposition can move the body without changing the public contract. The
+    default behavior is a no-op so inline persistence remains the source of truth.
     """
 
     name = "default_transcript"
@@ -146,8 +146,8 @@ class DefaultMemoryFlushHook:
     """``TurnHook.after_turn`` implementation reserved for memory flush.
 
     The actual flush task lives in :mod:`opensquilla.engine.agent` and depends
-    on per-Agent compaction state. engine hook seam keeps the implementation inline and
-    reserves this hook as the seam for compaction.
+    on per-Agent compaction state. This hook is currently reserved; inline
+    memory-flush behavior remains the source of truth.
     """
 
     name = "default_memory_flush"

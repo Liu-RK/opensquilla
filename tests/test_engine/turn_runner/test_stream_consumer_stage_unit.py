@@ -5,9 +5,8 @@ Drives the stage through ``StreamConsumerStage.run`` with recording
 fakes for all five ports + the warning transformer, plus per-handler
 unit tests for the eight internal handler classes.
 
-Per the coverage-gate-under-feature-flag-seam discipline, raising-fake
-cases are included so the exception-propagation contracts are
-exercised even without the runtime wrapper.
+Raising-fake cases exercise the exception-propagation contracts without the
+runtime wrapper.
 """
 
 from __future__ import annotations
@@ -399,8 +398,7 @@ async def test_compaction_handler_skips_persist_when_session_manager_absent() ->
     inp = _make_input(session_manager_present=False)
     await handler.handle(CompactionEvent(summary="s", kept_entries=[]), inp)
     assert persist.calls == []
-    # Snapshot + prompt still fire (mirrors legacy: the persist guard is
-    # the only conditional; the refreshes always run).
+    # Snapshot + prompt still fire; the persist guard is the only conditional.
     assert len(snapshot.calls) == 1
     assert len(prompt.calls) == 1
 
@@ -450,7 +448,7 @@ async def test_outer_stage_yields_text_then_done_and_notifies_post_stream() -> N
 
 
 @pytest.mark.asyncio
-async def test_outer_stage_suppresses_compaction_event_and_fires_phase_d_seams() -> None:
+async def test_outer_stage_suppresses_compaction_event_and_refreshes_runtime_state() -> None:
     agent_run = _RecordingAgentRun(
         events=[
             TextDeltaEvent(text="hi"),
@@ -466,7 +464,7 @@ async def test_outer_stage_suppresses_compaction_event_and_fires_phase_d_seams()
     # CompactionEvent must NOT be yielded.
     assert "CompactionEvent" not in kinds
     assert kinds == ["TextDeltaEvent", "TextDeltaEvent", "DoneEvent"]
-    # compaction seams fired in order.
+    # In-turn compaction refreshes fired in order.
     assert len(recs["compaction_persist"].calls) == 1
     assert recs["compaction_persist"].calls[0]["kept_entries"] == [1, 2, 3]
     assert len(recs["memory_snapshot_refresh"].calls) == 1
@@ -484,7 +482,7 @@ async def test_outer_stage_suppresses_error_event_and_records_pending() -> None:
     stage, _ = _make_stage(agent_run=agent_run)
     inp = _make_input()
     yielded = await _drain(stage, inp)
-    # ErrorEvent is NOT yielded -- the legacy slice continues without yielding.
+    # ErrorEvent is NOT yielded; the stream continues without yielding it.
     kinds = [type(e).__name__ for e in yielded]
     assert kinds == ["TextDeltaEvent"]
     assert inp.state.pending_error_event is not None

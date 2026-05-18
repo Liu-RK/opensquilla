@@ -1,7 +1,7 @@
 """Stage object for before-turn compaction + transcript history load.
 
-Owns the per-turn slice between the AgentBootstrapStage seam (Agent
-construction) and the StreamConsumerStage seam (the
+Owns the per-turn slice between the agent-bootstrap stage boundary (Agent
+construction) and the stream-consumer stage boundary (the
 ``async for event in agent.run_turn(...)`` loop). The harness invokes
 ``CompactionAndHistoryStage.run`` once per turn, AFTER
 AgentBootstrapStage and BEFORE the attachment-message build +
@@ -22,21 +22,20 @@ Side-effect contract:
   ``agent.config.request_context_prompt = ...``.
 
 ``CompactionAndHistoryStage`` IS the first consumer of
-``CompactionHook.before_compact`` / ``CompactionHook.after_compact``
-(engine hook seam reserved the protocol; this is where it lights up). Hook
-invocations are isolated with ``except Exception: pass`` to satisfy the
-engine hook seam isolation contract.
+``CompactionHook.before_compact`` / ``CompactionHook.after_compact`` when hooks
+are supplied. Hook invocations are isolated with ``except Exception: pass`` so
+observer failures do not break the turn.
 
 NEVER terminates. Always returns ``StageOutcome.success(...)``. The
 ``StageOutcome`` shape is preserved for forward-compatibility with a
 future ``ErrorEvent`` early-yield branch.
 
-compaction forward-compat: the four ports
+Compaction forward-compat: the four ports
 (``T3UpgradeCompactionPort``, ``PreflightCompactionPort``,
 ``HistoryLoaderPort``, ``RequestContextPrependPort``) are shaped so
 compaction can drop in replacement implementations (e.g. an incremental
 cut-point compactor) without revising the stage interface. The IN-TURN
-compaction seam (``CompactionEvent`` → ``persist_compaction_result``)
+compaction refresh (``CompactionEvent`` -> ``persist_compaction_result``)
 lives in StreamConsumerStage, NOT here, preserving the
 cache-friendly system-prompt-rebuild contract.
 """
@@ -78,9 +77,9 @@ class T3UpgradeCompactionPort(Protocol):
     - All exception handling is internal; ``asyncio.CancelledError`` is
       re-raised, other exceptions are logged + swallowed.
 
-    The port preserves the BEFORE-turn DB-mutation seam: every successful
+    The port preserves the BEFORE-turn DB-mutation boundary: every successful
     compaction writes to DB via the SessionManager before this method
-    returns. compaction's eventual replacement implementation MUST also
+    returns. A replacement implementation MUST also
     write to DB before returning.
     """
 
@@ -339,7 +338,7 @@ class CompactionAndHistoryStage:
         for hook in self._compaction_hooks:
             try:
                 await hook.before_compact(state)
-            except Exception:  # noqa: BLE001 — engine hook seam hook isolation contract
+            except Exception:  # noqa: BLE001 — hook isolation contract
                 # A buggy hook MUST NOT break the turn. Swallow per
                 # protocol; observability is the runtime's concern.
                 pass
@@ -348,5 +347,5 @@ class CompactionAndHistoryStage:
         for hook in self._compaction_hooks:
             try:
                 await hook.after_compact(state, outcome)
-            except Exception:  # noqa: BLE001 — engine hook seam hook isolation contract
+            except Exception:  # noqa: BLE001 — hook isolation contract
                 pass

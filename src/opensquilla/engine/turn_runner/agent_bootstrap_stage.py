@@ -1,7 +1,7 @@
 """Stage object for runtime budget resolve + AgentConfig assembly + Agent construction.
 
 Owns the source slice that previously lived inline at the top of
-``TurnRunner._run_turn`` between the PromptAssemblerStage seam and the
+``TurnRunner._run_turn`` between the prompt-assembler stage boundary and the
 pre-flight compaction call. The harness invokes
 ``AgentBootstrapStage.run`` once per turn, AFTER PromptAssemblerStage
 and BEFORE PreflightCompactionStage.
@@ -72,6 +72,7 @@ class _AgentConfigAuxiliaries:
     # Memory-cfg-derived (defaults match the inline ``getattr`` defaults)
     flush_enabled: bool
     flush_timeout_seconds: float
+    flush_background_timeout_seconds: float
     flush_backoff_initial_seconds: float
     flush_backoff_max_seconds: float
     flush_archive_max_bytes: int
@@ -217,7 +218,7 @@ class MemorySnapshotPort(Protocol):
 class AgentFactoryPort(Protocol):
     """Wraps the typed ``Agent(...)`` constructor.
 
-    Mirrors the call shape with the typed Phase-B constructor params
+    Mirrors the call shape with the typed runtime constructor params
     (``memory_sync_manager``, ``session_flush_service``). The adapter at
     the harness side reads ``self._session_flush_service`` from the
     runner and forwards everything else from the call site.
@@ -409,6 +410,7 @@ class AgentBootstrapStage:
             context_window_tokens=catalog.context_window,
             flush_enabled=aux.flush_enabled,
             flush_timeout_seconds=aux.flush_timeout_seconds,
+            flush_background_timeout_seconds=aux.flush_background_timeout_seconds,
             flush_backoff_initial_seconds=aux.flush_backoff_initial_seconds,
             flush_backoff_max_seconds=aux.flush_backoff_max_seconds,
             flush_archive_max_bytes=aux.flush_archive_max_bytes,
@@ -458,7 +460,7 @@ class AgentBootstrapStage:
             session_key=inp.session_key,
         )
 
-        # 7. Construct the Agent (typed Phase-B params)
+        # 7. Construct the Agent from the typed runtime parameters.
         agent = self._agent_factory.build(
             provider=inp.provider,
             config=agent_config,

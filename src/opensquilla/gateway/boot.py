@@ -878,7 +878,7 @@ def build_flush_service(
     if memory_cfg is not None:
         service_kwargs["default_timeout"] = getattr(
             memory_cfg,
-            "flush_timeout_seconds",
+            "flush_background_timeout_seconds",
             30.0,
         )
 

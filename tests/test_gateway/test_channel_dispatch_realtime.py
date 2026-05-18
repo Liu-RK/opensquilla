@@ -1341,7 +1341,7 @@ async def test_runtime_reply_delivers_file_artifact_with_adapter_upload(tmp_path
     assert channel.files == [("c1", "report.pdf")]
 
 
-# ── PR-E3: stream relay coalescing + per-event fallback ─────────────────────
+# ── Stream relay coalescing + per-event fallback ────────────────────────────
 
 
 @pytest.mark.asyncio

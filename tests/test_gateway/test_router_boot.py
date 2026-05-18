@@ -400,15 +400,20 @@ def test_build_flush_service_respects_memory_flush_enabled_config() -> None:
     assert service is None
 
 
-def test_build_flush_service_uses_configured_memory_timeout() -> None:
+def test_build_flush_service_uses_configured_background_memory_timeout() -> None:
     service = build_flush_service(
         tool_registry=ToolRegistry(),
         provider_selector=SimpleNamespace(resolve=lambda: object()),
-        config=GatewayConfig(memory={"flush_timeout_seconds": 0.25}),
+        config=GatewayConfig(
+            memory={
+                "flush_timeout_seconds": 0.25,
+                "flush_background_timeout_seconds": 42.0,
+            }
+        ),
     )
 
     assert service is not None
-    assert service._default_timeout == 0.25
+    assert service._default_timeout == 42.0
 
 
 @pytest.mark.asyncio

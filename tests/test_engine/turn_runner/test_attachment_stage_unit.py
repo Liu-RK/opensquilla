@@ -2,10 +2,8 @@
 stack).
 
 Drives the stage through ``AttachmentStage.run`` with a recording
-``AttachmentMessageBuilderPort`` fake. Per the
-coverage-gate-under-feature-flag-seam discipline, a raising-fake case is
-included so the exception-propagation contract is exercised even without
-the runtime wrapper.
+``AttachmentMessageBuilderPort`` fake. A raising-fake case exercises the
+exception-propagation contract without the runtime wrapper.
 """
 
 from __future__ import annotations
@@ -55,7 +53,7 @@ async def test_no_attachments_returns_runtime_message_as_turn_input(
     """``attachments=None`` or ``[]`` -> builder returns ``None`` ->
     ``turn_input`` falls back to ``effective_runtime_message`` and
     ``extra_messages`` is ``None``. Stage normalizes ``None`` to ``[]``
-    before invoking the port (legacy semantics)."""
+    before invoking the port."""
 
     stage, builder = _make_stage(builder=_RecordingBuilder(return_value=None))
     inp = AttachmentStageInput(
@@ -126,7 +124,7 @@ async def test_builder_exception_propagates(
 ) -> None:
     """Both ``ValueError`` (legitimate validation failure) and arbitrary
     exceptions from the port propagate unchanged — the stage adds zero
-    try/except, matching the legacy slice."""
+    try/except."""
 
     stage, _ = _make_stage(builder=_RecordingBuilder(raises=exc_type))
     inp = AttachmentStageInput(

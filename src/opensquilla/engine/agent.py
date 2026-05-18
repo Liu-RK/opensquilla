@@ -470,14 +470,15 @@ class Agent:
         self._state: AgentState = AgentState.IDLE
         self._history: list[Message] = []
         self._context: ContextAssembly | None = None
-        # engine hook seam: typed dependency surface. Either constructor injection or
-        # legacy attribute assignment from the runtime is accepted; both reach
-        # the same internal slot.
+        # Typed dependency surface. Either constructor injection or legacy
+        # attribute assignment from the runtime is accepted; both reach the same
+        # internal slot.
         self._memory_sync_manager: Any | None = memory_sync_manager
 
         # Memory flush state (sub-agent based, re-entrant per compaction cycle)
         self._flush_done_this_cycle: bool = False
         self._active_flush_task: asyncio.Task | None = None
+        self._flush_wait_timed_out_task: asyncio.Task | None = None
         self._flush_backoff_until: float = 0.0
         self._flush_backoff_seconds: float = 0.0
         self._session_flush_service = session_flush_service
@@ -538,6 +539,19 @@ class Agent:
             payload_chars=session_payload_chars(messages),
             messages=messages,
             **payload,
+        )
+
+    def _store_tool_argument_snapshot(
+        self,
+        content: str,
+        *,
+        tool_use_id: str,
+        tool_name: str,
+    ) -> ToolResultRecord | None:
+        return self._store_tool_result_snapshot(
+            content,
+            tool_use_id=tool_use_id,
+            tool_name=f"{tool_name}:arguments",
         )
 
     def _switch_to_invalid_response_fallback(self, reason: str) -> bool:
@@ -893,6 +907,117 @@ class Agent:
             self.config.metadata.get("tool_absolute_compression_calls", 0) + 1
         )
         return compacted_messages
+
+    def _project_large_tool_use_arguments_for_provider(
+        self,
+        messages: list[Message],
+    ) -> list[Message]:
+        cap = int(
+            getattr(self.config, "tool_use_argument_provider_request_max_chars", 0)
+            or 0
+        )
+        if cap <= 0:
+            return messages
+
+        replacements: dict[tuple[int, int], ContentBlockToolUse] = {}
+        for message_index, message in enumerate(messages):
+            if not isinstance(message.content, list):
+                continue
+            for block_index, block in enumerate(message.content):
+                if not isinstance(block, ContentBlockToolUse):
+                    continue
+                input_chars = len(json.dumps(block.input, ensure_ascii=False))
+                if input_chars <= cap:
+                    continue
+                raw_input = json.dumps(
+                    block.input,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                digest = hashlib.sha256(raw_input.encode("utf-8")).hexdigest()
+                stored = self._store_tool_argument_snapshot(
+                    raw_input,
+                    tool_use_id=block.id,
+                    tool_name=block.name,
+                )
+                projected_input = dict(block.input)
+                for key, value in block.input.items():
+                    if not isinstance(value, str):
+                        continue
+                    if len(json.dumps({key: value}, ensure_ascii=False)) <= cap:
+                        continue
+                    head = value[:360]
+                    tail = value[-180:] if len(value) > 360 else ""
+                    omitted = max(0, len(value) - len(head) - len(tail))
+                    handle_line = (
+                        f"tool_argument_handle: {stored.handle}\n"
+                        if stored is not None
+                        else ""
+                    )
+                    projection = (
+                        "[tool_use_argument_projection]\n"
+                        f"tool: {block.name}\n"
+                        f"tool_use_id: {block.id}\n"
+                        f"field: {key}\n"
+                        f"original_chars: {len(value)}\n"
+                        f"original_input_chars: {input_chars}\n"
+                        f"sha256: {digest}\n"
+                        f"{handle_line}"
+                        f"omitted_chars: {omitted}\n"
+                        "reason: large tool argument compacted for provider context budget.\n"
+                        f"head:\n{head}"
+                    )
+                    if tail and tail != head:
+                        projection += f"\n...\ntail:\n{tail}"
+                    projected_input[key] = projection
+                if projected_input == block.input:
+                    continue
+                replacements[(message_index, block_index)] = ContentBlockToolUse(
+                    id=block.id,
+                    name=block.name,
+                    input=projected_input,
+                )
+
+        if not replacements:
+            return messages
+
+        projected_messages: list[Message] = []
+        for message_index, message in enumerate(messages):
+            if not isinstance(message.content, list):
+                projected_messages.append(message)
+                continue
+            next_content: list[Any] = []
+            changed = False
+            for block_index, block in enumerate(message.content):
+                replacement = replacements.get((message_index, block_index))
+                if replacement is None:
+                    next_content.append(block)
+                    continue
+                next_content.append(replacement)
+                changed = True
+            if not changed:
+                projected_messages.append(message)
+                continue
+            projected_messages.append(
+                Message(
+                    role=message.role,
+                    content=next_content,
+                    reasoning_content=getattr(message, "reasoning_content", None),
+                )
+            )
+
+        self.config.metadata["tool_argument_projection_applied"] = True
+        self.config.metadata["tool_argument_projection_calls"] = (
+            self.config.metadata.get("tool_argument_projection_calls", 0)
+            + len(replacements)
+        )
+        self._write_turn_call_log(
+            "tool_argument_projection",
+            projected_tool_uses=len(replacements),
+            max_chars=cap,
+        )
+        return projected_messages
 
     def _store_tool_result_snapshot(
         self,
@@ -1399,6 +1524,11 @@ class Agent:
                     )
                     request_source_messages = self._compact_aggregate_tool_results_for_provider(
                         request_source_messages
+                    )
+                    request_source_messages = (
+                        self._project_large_tool_use_arguments_for_provider(
+                            request_source_messages
+                        )
                     )
                     request_messages, request_sanitize_result = sanitize_session_messages(
                         request_source_messages
@@ -2728,7 +2858,7 @@ class Agent:
                 runtime_context_insert_index=runtime_context_insert_index,
             )
 
-        # --- Pre-compaction flush; qualified receipt required before removal. ---
+        # --- Pre-compaction flush; inline compaction can continue on degraded flush. ---
         flush_task: asyncio.Task | None = None
         self._consume_completed_flush_task()
 
@@ -2737,15 +2867,19 @@ class Agent:
             # Adds up to flush_timeout_seconds (default 5s) of latency, but without
             # this the flush is effectively dead code (always cancelled before finishing).
             if flush_task is not None and not flush_task.done():
+                if flush_task is self._flush_wait_timed_out_task:
+                    return None
                 try:
                     receipt = await asyncio.wait_for(
                         asyncio.shield(flush_task),
                         timeout=self.config.flush_timeout_seconds,
                     )
                     logger.info("memory_flush.completed_after_compaction")
+                    self._flush_wait_timed_out_task = None
                     self._mark_flush_task_completed(flush_task)
                     return receipt
                 except TimeoutError:
+                    self._flush_wait_timed_out_task = flush_task
                     next_retry_seconds = self._record_flush_timeout_backoff()
                     logger.warning(
                         "memory_flush.timed_out",
@@ -2759,10 +2893,12 @@ class Agent:
             if flush_task is not None and flush_task.done():
                 try:
                     receipt = flush_task.result()
+                    self._flush_wait_timed_out_task = None
                     self._mark_flush_task_completed(flush_task)
                     return receipt
                 except Exception as exc:
                     logger.warning("memory_flush.await_failed", error=str(exc))
+                    self._flush_wait_timed_out_task = None
                     self._mark_flush_task_completed(flush_task)
                     return None
             return None
@@ -2824,17 +2960,15 @@ class Agent:
                     retry_after_seconds=round(self._flush_backoff_until - time.monotonic(), 3),
                 )
                 self._flush_done_this_cycle = False
-                return None
             receipt = await _await_flush_task()
             if not flush_receipt_allows_destructive_compaction(receipt):
                 logger.warning(
-                    "memory_flush.receipt_required_before_compaction",
+                    "memory_flush.degraded_before_compaction",
                     mode=getattr(receipt, "mode", None),
                     integrity_status=getattr(receipt, "integrity_status", None),
                     indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
                 )
                 self._flush_done_this_cycle = False
-                return None
 
         # --- Compaction ---
         entries = [
@@ -2928,6 +3062,8 @@ class Agent:
         self._mark_flush_task_completed(task)
 
     def _mark_flush_task_completed(self, task: asyncio.Task) -> None:
+        if self._flush_wait_timed_out_task is task:
+            self._flush_wait_timed_out_task = None
         if self._active_flush_task is not task:
             return
         try:
@@ -3028,6 +3164,7 @@ class Agent:
                     messages,
                     session_key=sk,
                     agent_id=parse_agent_id(sk),
+                    timeout=self.config.flush_background_timeout_seconds,
                     message_window=0,
                     segment_mode="auto",
                 )
@@ -3159,6 +3296,9 @@ class Agent:
             ),
             tool_result_provider_request_max_chars=(
                 self.config.tool_result_provider_request_max_chars
+            ),
+            tool_use_argument_provider_request_max_chars=(
+                self.config.tool_use_argument_provider_request_max_chars
             ),
             tool_result_external_keep_recent=self.config.tool_result_external_keep_recent,
             tool_result_store_dir=self.config.tool_result_store_dir,

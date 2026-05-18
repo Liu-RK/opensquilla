@@ -1,7 +1,7 @@
-"""Dedicated compaction seam suite for ``StreamConsumerStage``.
+"""Dedicated in-turn compaction refresh suite for ``StreamConsumerStage``.
 
 The general snapshot harness exercises every event-type branch in
-the slice; this suite specifically pins the compaction seam contract --
+the slice; this suite specifically pins the compaction refresh contract --
 the in-turn ``CompactionEvent`` handling -- so future compaction refactors
 have an easily discoverable contract to honor.
 
@@ -45,7 +45,7 @@ def _baseline_case(
     private_memory_allowed: bool = True,
 ) -> _Case:
     return _Case(
-        case_id="phase_d_seam_drive",
+        case_id="compaction_refresh_drive",
         events=[
             TextDeltaEvent(text="pre"),
             CompactionEvent(summary="THE_SUMMARY", kept_entries=[10, 20, 30]),
@@ -59,7 +59,7 @@ def _baseline_case(
 
 
 # ---------------------------------------------------------------------------
-# Compaction seam test 1: persist arguments
+# In-turn compaction test 1: persist arguments
 # ---------------------------------------------------------------------------
 
 
@@ -85,7 +85,7 @@ async def test_persist_compaction_result_invoked_with_event_args(
 
 
 # ---------------------------------------------------------------------------
-# Compaction seam test 2: notify_compaction follows persist
+# In-turn compaction test 2: notify_compaction follows persist
 # ---------------------------------------------------------------------------
 
 
@@ -104,7 +104,7 @@ async def test_notify_compaction_fires_after_persist(
         "notify_compaction",
         lambda session_key: notify_calls.append(session_key),
     )
-    # The new-arm adapter imports notify_compaction lazily from
+    # The runtime adapter imports notify_compaction lazily from
     # cache_break_monitor; patch the source module too.
     import opensquilla.engine.cache_break_monitor as cbm
 
@@ -123,7 +123,7 @@ async def test_notify_compaction_fires_after_persist(
 
 
 # ---------------------------------------------------------------------------
-# Compaction seam test 3: memory snapshot refresh respects private_memory_allowed
+# In-turn compaction test 3: memory snapshot refresh respects private_memory_allowed
 # ---------------------------------------------------------------------------
 
 
@@ -161,7 +161,7 @@ async def test_memory_snapshot_refresh_respects_private_memory(
 
 
 # ---------------------------------------------------------------------------
-# Compaction seam test 4: system prompt refresh fires + tuple/str extract
+# In-turn compaction test 4: system prompt refresh fires + tuple/str extract
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +202,7 @@ async def test_system_prompt_refresh_extracts_cacheable_base(
 
 
 # ---------------------------------------------------------------------------
-# Compaction seam test 5: persist log-and-continue does NOT block snapshot/prompt
+# In-turn compaction test 5: persist log-and-continue does NOT block snapshot/prompt
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +214,7 @@ async def test_persist_raises_log_and_continue_preserves_refreshes(
     log-and-continue. The snapshot refresh + system prompt refresh
     still fire afterwards.
 
-    This is the most critical compaction seam contract: snapshot + prompt
+    This is the most critical compaction refresh contract: snapshot + prompt
     refresh ALWAYS fire, even on persist failure, so the next turn's
     cacheable prefix reflects the post-compaction state.
     """

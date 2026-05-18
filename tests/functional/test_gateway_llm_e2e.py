@@ -105,6 +105,7 @@ async def test_gateway_session_send_reaches_live_llm(tmp_path: Path) -> None:
 
             from opensquilla.gateway.boot import start_gateway_server
             from opensquilla.gateway.config import AuthConfig, GatewayConfig, LlmProviderConfig
+            from opensquilla.gateway.websocket import SubscriptionManager
 
             config = GatewayConfig(
                 host="127.0.0.1",
@@ -113,7 +114,7 @@ async def test_gateway_session_send_reaches_live_llm(tmp_path: Path) -> None:
                 state_dir=os.environ["OPENSQUILLA_STATE_DIR"],
                 llm=LlmProviderConfig(
                     provider="openrouter",
-                    model=os.environ.get("LLM_TEST_MODEL", "openai/gpt-4o-mini"),
+                    model=os.environ.get("LLM_TEST_MODEL", "deepseek/deepseek-v4-flash"),
                     api_key=os.environ["OPENROUTER_API_KEY"],
                     base_url=os.environ.get(
                         "OPENROUTER_BASE_URL",
@@ -123,7 +124,11 @@ async def test_gateway_session_send_reaches_live_llm(tmp_path: Path) -> None:
             )
 
             async def main():
-                await start_gateway_server(config=config, run=True)
+                await start_gateway_server(
+                    config=config,
+                    subscription_manager=SubscriptionManager(),
+                    run=True,
+                )
                 await asyncio.Event().wait()
 
             asyncio.run(main())

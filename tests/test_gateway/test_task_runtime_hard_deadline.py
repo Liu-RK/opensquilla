@@ -1,6 +1,6 @@
 """Hard-deadline breaker tests for TaskRuntime.
 
-Covers PR-E1: when a turn handler exceeds ``turn_hard_deadline_s``,
+Covers the behavior when a turn handler exceeds ``turn_hard_deadline_s``,
 the breaker fires, releases the OUTER per-session lock, marks the
 record TIMEOUT with ``terminal_reason="hard_deadline_exceeded"``,
 and lets the next message dispatch successfully.

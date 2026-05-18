@@ -6,10 +6,9 @@ fakes for all four ports, exercising each branch (transcript-yes /
 transcript-no, memory-yes / memory-raise, error-yes / error-no,
 rollup-yes / rollup-raise) and the heartbeat-empty edge.
 
-Per the coverage-gate-under-feature-flag-seam discipline, raising-fake
-cases for ``TurnMemoryCapturePort`` and ``SessionTotalsPort`` are
-included so the log-and-continue arms in the stage body are exercised
-even without the runtime wrapper.
+Raising-fake cases for ``TurnMemoryCapturePort`` and ``SessionTotalsPort`` are
+included so the log-and-continue arms in the stage body are exercised without
+the runtime wrapper.
 """
 
 from __future__ import annotations
@@ -448,8 +447,7 @@ async def test_transcript_raises_propagates() -> None:
         transcript_append=_RecordingTranscriptAppend(raises=RuntimeError),
     )
     inp = _make_input(final_text_parts=["hi"])
-    # NO try/except in the stage body around the transcript port -- the
-    # legacy slice has none either.
+    # No try/except in the stage body around the transcript port.
     with pytest.raises(RuntimeError):
         await stage.run(inp)
 
