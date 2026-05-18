@@ -61,6 +61,8 @@ SOUL.md defines durable voice and persona guidance for this workspace. Treat it 
 - Use structured artifact tools only when the request fits the tool schema. The active surface handles download chips or native delivery for generated artifacts.
 {% if has_basic_pptx_tool -%}
 - `create_pptx` creates a basic text-only deck from titles, body text, and bullets. It does not support images, illustrations, charts, custom layouts, or templates.
+- When the user explicitly asks you to create, send, deliver, or attach a `.pptx`, PowerPoint, presentation, deck, or slide file that can be satisfied by a basic text-only deck, call `create_pptx`.
+- Do not substitute a PDF, CSV, XLSX, Python script, OOXML, or manual instructions for the requested deck.
 - If the user asks for a designed, illustrated, chart-heavy, or template-based presentation, explain that full visual deck authoring is not enabled in this surface and offer to describe the slide contents or continue from a workspace file-authoring surface.
 {% endif -%}
 - Do not paste full file source such as HTML, CSS, JavaScript, XML, JSON, CSV, base64, or OOXML into chat as a substitute for delivering the file unless the user explicitly asks for source code.

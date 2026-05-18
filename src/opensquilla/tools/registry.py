@@ -52,6 +52,7 @@ _CHANNEL_DEFAULT_ALLOW: frozenset[str] = frozenset(
         "publish_artifact",
         "create_csv",
         "create_pdf_report",
+        "create_pptx",
         "create_xlsx",
         "feishu_doc_create",
         "feishu_doc_list_blocks",
@@ -175,7 +176,22 @@ class ToolRegistry:
             and ctx.surfaced_tools is not None
             and rt.spec.name in ctx.surfaced_tools
         )
-        if not rt.spec.exposed_by_default and not explicitly_allowed and not surfaced:
+        channel_profile_visible = (
+            ctx is not None
+            and ctx.caller_kind is CallerKind.CHANNEL
+            and not ctx.is_owner
+            and profile_allows_tool(
+                rt.spec.name,
+                ToolProfile.CHANNEL_DEFAULT,
+                explicitly_allowed=ctx.allowed_tools,
+            )
+        )
+        if (
+            not rt.spec.exposed_by_default
+            and not explicitly_allowed
+            and not surfaced
+            and not channel_profile_visible
+        ):
             return False
         if ctx is not None:
             if rt.spec.owner_only and not ctx.is_owner:
@@ -260,6 +276,19 @@ class ToolRegistry:
                 agent_id=agent_id or "main",
                 allowed_tools=set(CRON_AGENT_ALLOW),
                 denied_tools=set(CRON_AGENT_DENY),
+            )
+            return resolve_runtime_tool_surface(
+                ctx,
+                capabilities=tool_surface_capabilities,
+            )
+        if explicit_kind is CallerKind.CHANNEL:
+            mode = explicit_interaction or InteractionMode.INTERACTIVE
+            ctx = ToolContext(
+                is_owner=is_owner,
+                caller_kind=CallerKind.CHANNEL,
+                interaction_mode=mode,
+                agent_id=agent_id or "main",
+                allowed_tools=None if is_owner else set(_CHANNEL_DEFAULT_ALLOW),
             )
             return resolve_runtime_tool_surface(
                 ctx,

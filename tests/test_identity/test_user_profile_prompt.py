@@ -163,6 +163,9 @@ def test_system_prompt_describes_structured_artifact_fallback_limits() -> None:
     assert "## Structured Generated File Delivery" in prompt
     assert "only when the request fits the tool schema" in prompt
     assert "`create_pptx` creates a basic text-only deck" in prompt
+    assert "create, send, deliver, or attach" in prompt
+    assert "call `create_pptx`" in prompt
+    assert "Do not substitute a PDF, CSV, XLSX, Python script, OOXML" in prompt
     assert "full visual deck authoring is not enabled" in prompt
     assert "file creation is not enabled for this session" not in prompt
 

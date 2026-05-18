@@ -138,7 +138,7 @@ def test_channel_runtime_profile_exposes_publish_artifact() -> None:
     assert "publish_artifact" in names
 
 
-def test_channel_runtime_profile_exposes_safe_structured_file_tools_without_pptx_fallback() -> None:
+def test_channel_runtime_profile_exposes_safe_structured_file_tools() -> None:
     import opensquilla.tools.builtin  # noqa: F401
     from opensquilla.tools.registry import filter_by_profile, get_default_registry, resolve_profile
 
@@ -154,8 +154,7 @@ def test_channel_runtime_profile_exposes_safe_structured_file_tools_without_pptx
         )
     }
 
-    assert {"create_csv", "create_xlsx", "create_pdf_report"} <= names
-    assert "create_pptx" not in names
+    assert {"create_csv", "create_xlsx", "create_pdf_report", "create_pptx"} <= names
     assert "write_file" not in names
     assert "execute_code" not in names
 
@@ -209,8 +208,23 @@ def test_channel_runtime_profile_exposes_explicit_category_tools_not_host_mutati
     names = {tool.name for tool in filter_by_profile(tools, resolve_profile(ctx), ctx)}
 
     assert "feishu_drive_upload_artifact" in names
-    assert "create_pptx" not in names
+    assert "create_pptx" in names
     assert "write_file" not in names
+
+
+def test_channel_hidden_tool_visibility_stays_on_channel_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_TOOL_PROFILE", "owner_full")
+    registry = ToolRegistry()
+    registry.register(_spec("create_pptx", exposed_by_default=False), _handler)
+    registry.register(_spec("hidden_authoring", exposed_by_default=False), _handler)
+    channel_ctx = ToolContext(is_owner=False, caller_kind=CallerKind.CHANNEL)
+
+    names = {tool.name for tool in registry.to_tool_definitions(channel_ctx)}
+
+    assert "create_pptx" in names
+    assert "hidden_authoring" not in names
 
 
 def test_shared_channel_context_hides_private_memory_read_tools_even_when_allowed() -> None:
