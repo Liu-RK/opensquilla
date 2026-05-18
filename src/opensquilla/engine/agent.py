@@ -85,7 +85,7 @@ from opensquilla.session.compaction import (
 from opensquilla.session.compaction_lifecycle import (
     flush_receipt_allows_destructive_compaction,
 )
-from opensquilla.session.terminal_reply import sanitize_agent_error
+from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
 from opensquilla.tool_boundary import AgentToolHandler as ToolHandler
 
 from .context import ContextAssembly
@@ -112,6 +112,21 @@ from .types import (
 
 logger = structlog.get_logger("opensquilla.engine.agent")
 
+_PROVIDER_OUTPUT_TRUNCATED_REPLY = build_terminal_reply(
+    {
+        "status": "failed",
+        "terminal_reason": "output_truncated",
+        "error_class": "provider_output_truncated",
+        "error_message": "Provider output limit reached before completion",
+    }
+)
+_PROVIDER_OUTPUT_CONTINUE_PROMPT = (
+    "The previous provider response reached its output limit before the task finished. "
+    "Continue from the exact point where it stopped. Do not repeat text that has already "
+    "been written. If a tool call was interrupted or incomplete, regenerate a complete "
+    "tool call from scratch."
+)
+
 
 def _is_deepseek_model_id(model_id: str | None) -> bool:
     normalized = (model_id or "").strip().lower()
@@ -134,6 +149,7 @@ _LARGE_JSON_TOOL_FIELD_CHARS = 20_000
 _TOOL_ARGUMENT_PROJECTION_PREFIX = "[tool_use_argument_projection]\n"
 _INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX = "[invalid_provider_context_projection:"
 _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
+_TOOL_ARGUMENT_HEARTBEAT_CHARS = 4096
 _PROVIDER_CONTEXT_PROJECTION_REUSED_REASON = "provider_context_projection_reused"
 _PROVIDER_CONTEXT_PROJECTION_REUSED_USER_MESSAGE = (
     "I could not execute the tool call because it reused provider-only compacted "
@@ -304,6 +320,24 @@ def _message_has_tool_result(message: Message | None) -> bool:
     return any(getattr(block, "type", None) == "tool_result" for block in message.content)
 
 
+def _append_length_capped_continuation(
+    turn_messages: list[Message],
+    *,
+    response_text: str,
+    tool_calls: list[ToolCall],
+) -> str:
+    visible_text = strip_synthetic_tool_call_suffix(
+        response_text,
+        [tc.tool_name for tc in tool_calls if tc.synthetic_from_text],
+    )
+    if visible_text:
+        turn_messages.append(
+            Message(role="assistant", content=[ContentBlockText(text=visible_text)])
+        )
+    turn_messages.append(Message(role="user", content=_PROVIDER_OUTPUT_CONTINUE_PROMPT))
+    return visible_text
+
+
 class _ProviderAttemptKind(StrEnum):
     OK = "ok"
     REASONING_ONLY = "reasoning_only"
@@ -338,6 +372,7 @@ class _ProviderRetryPolicy:
                 _ProviderAttemptKind.REASONING_ONLY: 1,
                 _ProviderAttemptKind.MALFORMED_EMPTY: 1,
                 _ProviderAttemptKind.STREAM_INCOMPLETE: 1,
+                _ProviderAttemptKind.LENGTH_CAPPED: 1,
             },
             provider_failure_budgets={ProviderFailureKind.EMPTY_RESPONSE: 1},
         )
@@ -478,6 +513,7 @@ class _StreamAccumulator:
     tool_name: str
     synthetic_from_text: bool = False
     json_buf: list[str] = field(default_factory=list)
+    json_chars: int = 0
 
     def finish(self) -> dict[str, Any]:
         raw = "".join(self.json_buf)
@@ -540,6 +576,9 @@ class Agent:
         self._session_flush_service = session_flush_service
         self._last_compaction_refusal_reason: str | None = None
         self._tool_failure_loop_counts: dict[tuple[str, str], int] = {}
+        self._tool_argument_snapshot_cache: dict[
+            tuple[str, str, str], ToolResultRecord
+        ] = {}
 
     def _context_overflow_error(self) -> ErrorEvent:
         reason = self._last_compaction_refusal_reason
@@ -792,11 +831,20 @@ class Agent:
                 tool_name=tool_name,
             )
             return None
-        return self._store_tool_result_snapshot(
+        snapshot_tool_name = f"{tool_name}:arguments"
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        cache_key = (tool_use_id, snapshot_tool_name, digest)
+        cached = self._tool_argument_snapshot_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        stored = self._store_tool_result_snapshot(
             content,
             tool_use_id=tool_use_id,
-            tool_name=f"{tool_name}:arguments",
+            tool_name=snapshot_tool_name,
         )
+        if stored is not None:
+            self._tool_argument_snapshot_cache[cache_key] = stored
+        return stored
 
     def _switch_to_invalid_response_fallback(self, reason: str) -> bool:
         fallback = getattr(self.provider, "fallback_after_invalid_response", None)
@@ -1798,7 +1846,8 @@ class Agent:
             max_backoff_ms=self.config.retry_max_backoff_ms,
         )
 
-        # Deadline-based timeouts: optional total turn budget + per-iteration budget
+        # Timeout budgets: optional total turn budget, idle LLM stream budget,
+        # and per-tool execution budget.
         _loop = asyncio.get_running_loop()
         _total_deadline = _loop.time() + self.config.timeout if self.config.timeout > 0 else None
         tools_supported = True
@@ -1828,7 +1877,6 @@ class Agent:
                     raise TimeoutError(f"Agent total timeout after {self.config.timeout}s")
 
                 iterations += 1
-                _iter_deadline = _loop.time() + self.config.iteration_timeout
 
                 # ------ THINKING → STREAMING ------
                 yield self._transition(AgentState.STREAMING)
@@ -1837,6 +1885,7 @@ class Agent:
                 assistant_text_parts: list[str] = []
                 tool_calls: list[ToolCall] = []
                 pending_tools: dict[str, _StreamAccumulator] = {}
+                tool_argument_heartbeat_chars: dict[str, int] = {}
                 iter_input_tokens = 0
                 iter_output_tokens = 0
                 iter_reasoning_tokens = 0
@@ -1856,6 +1905,7 @@ class Agent:
                     assistant_text_parts = []
                     tool_calls = []
                     pending_tools = {}
+                    tool_argument_heartbeat_chars = {}
                     iter_input_tokens = 0
                     iter_output_tokens = 0
                     iter_reasoning_tokens = 0
@@ -1927,7 +1977,6 @@ class Agent:
                         async for raw_ev in self._stream_provider_events_with_deadline(
                             raw_stream,
                             loop=_loop,
-                            iter_deadline=_iter_deadline,
                             total_deadline=_total_deadline,
                         ):
                             if isinstance(raw_ev, ProviderTextDelta):
@@ -1944,6 +1993,7 @@ class Agent:
                                     tool_name=raw_ev.tool_name,
                                     synthetic_from_text=raw_ev.synthetic_from_text,
                                 )
+                                tool_argument_heartbeat_chars[raw_ev.tool_use_id] = 0
                                 attempt_user_visible_emitted = True
                                 yield ToolUseStartEvent(
                                     tool_use_id=raw_ev.tool_use_id,
@@ -1956,12 +2006,37 @@ class Agent:
                                     continue
                                 acc = pending_tools.get(raw_ev.tool_use_id)  # type: ignore[union-attr]
                                 if acc:
-                                    acc.json_buf.append(raw_ev.json_fragment)  # type: ignore[union-attr]
+                                    json_fragment = raw_ev.json_fragment  # type: ignore[union-attr]
+                                    acc.json_buf.append(json_fragment)
+                                    acc.json_chars += len(json_fragment)
+                                    last_heartbeat_chars = tool_argument_heartbeat_chars.get(
+                                        raw_ev.tool_use_id, 0
+                                    )
+                                    if (
+                                        acc.json_chars - last_heartbeat_chars
+                                        >= _TOOL_ARGUMENT_HEARTBEAT_CHARS
+                                    ):
+                                        tool_argument_heartbeat_chars[
+                                            raw_ev.tool_use_id
+                                        ] = acc.json_chars
+                                        yield RunHeartbeatEvent(
+                                            phase="llm_tool_arguments",
+                                            elapsed_ms=int(
+                                                (time.monotonic() - call_started_at) * 1000
+                                            ),
+                                            idle_ms=0,
+                                            message=(
+                                                f"Receiving {acc.tool_name} arguments"
+                                            ),
+                                        )
 
                             elif isinstance(raw_ev, ToolUseEndEvent):
                                 if not tools_supported:
                                     continue
                                 acc = pending_tools.pop(raw_ev.tool_use_id, None)
+                                tool_argument_heartbeat_chars.pop(
+                                    raw_ev.tool_use_id, None
+                                )
                                 if acc and acc.json_buf:
                                     arguments = acc.finish()
                                 else:
@@ -2203,6 +2278,43 @@ class Agent:
                             continue
 
                         if (
+                            attempt_classification.kind == _ProviderAttemptKind.LENGTH_CAPPED
+                            and _retry_policy.can_retry_attempt(
+                                _ProviderAttemptKind.LENGTH_CAPPED,
+                                _attempt_retries_used,
+                            )
+                        ):
+                            _attempt_retries_used[_ProviderAttemptKind.LENGTH_CAPPED] += 1
+                            visible_text = _append_length_capped_continuation(
+                                turn_messages,
+                                response_text=response_text,
+                                tool_calls=tool_calls,
+                            )
+                            if visible_text:
+                                final_text_parts.append(visible_text)
+                            window_input_tokens += iter_input_tokens
+                            window_output_tokens += iter_output_tokens
+                            logger.warning(
+                                "provider.output_truncated_continue",
+                                session_key=self._session_key,
+                                model=last_actual_model or self.config.model_id or "",
+                                provider=type(self.provider).__name__,
+                                iteration=iterations,
+                                call_attempt=_call_attempt,
+                                tool_calls=len(tool_calls),
+                                visible_chars=len(visible_text),
+                            )
+                            yield WarningEvent(
+                                code="provider_output_continue",
+                                message=(
+                                    "The provider reached its output limit; continuing "
+                                    "the response automatically."
+                                ),
+                            )
+                            _call_attempt += 1
+                            continue
+
+                        if (
                             attempt_classification.kind
                             in {
                                 _ProviderAttemptKind.REASONING_ONLY,
@@ -2247,7 +2359,7 @@ class Agent:
                                 ),
                             )
                             terminal_error = ErrorEvent(
-                                message="Provider output limit reached before completion",
+                                message=_PROVIDER_OUTPUT_TRUNCATED_REPLY,
                                 code="provider_output_truncated",
                             )
                             yield terminal_error
@@ -2528,7 +2640,7 @@ class Agent:
                         break
                     if final_classification.kind == _ProviderAttemptKind.LENGTH_CAPPED:
                         terminal_error = ErrorEvent(
-                            message="Provider output limit reached before completion",
+                            message=_PROVIDER_OUTPUT_TRUNCATED_REPLY,
                             code="provider_output_truncated",
                         )
                         yield terminal_error
@@ -2545,19 +2657,6 @@ class Agent:
 
                 window_input_tokens += iter_input_tokens
                 window_output_tokens += iter_output_tokens
-
-                # Per-iteration deadline check after LLM streaming
-                if _loop.time() > _iter_deadline:
-                    yield self._transition(AgentState.ERROR)
-                    terminal_error = ErrorEvent(
-                        message=(
-                            f"Iteration {iterations} exceeded iteration_timeout"
-                            f" ({self.config.iteration_timeout}s) during LLM streaming"
-                        ),
-                        code="iteration_timeout",
-                    )
-                    yield terminal_error
-                    break
 
                 # Check overflow against the current post-compaction window,
                 # not lifetime usage for the whole turn.
@@ -2705,18 +2804,7 @@ class Agent:
                 if not tool_calls:
                     break
 
-                # Per-iteration deadline check before tool execution
-                if _loop.time() > _iter_deadline:
-                    yield self._transition(AgentState.ERROR)
-                    terminal_error = ErrorEvent(
-                        message=(
-                            f"Iteration {iterations} exceeded iteration_timeout"
-                            f" ({self.config.iteration_timeout}s) before tool execution"
-                        ),
-                        code="iteration_timeout",
-                    )
-                    yield terminal_error
-                    break
+                tool_deadline = _loop.time() + self.config.iteration_timeout
 
                 # ------ STREAMING → TOOL_CALLING ------
                 yield self._transition(AgentState.TOOL_CALLING)
@@ -2737,7 +2825,7 @@ class Agent:
                 results_by_id: dict[str, ToolResult] = {}
 
                 def _cap_timeout_by_deadlines(timeout: float) -> float:
-                    remaining = min(timeout, max(0.0, _iter_deadline - _loop.time()))
+                    remaining = min(timeout, max(0.0, tool_deadline - _loop.time()))
                     if _total_deadline is not None:
                         remaining = min(remaining, max(0.0, _total_deadline - _loop.time()))
                     return max(0.001, remaining)
@@ -2798,7 +2886,7 @@ class Agent:
                     last_event_at = started
                     try:
                         while pending:
-                            remaining = max(0.0, _iter_deadline - _loop.time())
+                            remaining = max(0.0, tool_deadline - _loop.time())
                             if _total_deadline is not None:
                                 remaining = min(
                                     remaining,
@@ -2830,7 +2918,7 @@ class Agent:
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                             if not done:
-                                if _loop.time() >= _iter_deadline or (
+                                if _loop.time() >= tool_deadline or (
                                     _total_deadline is not None
                                     and _loop.time() >= _total_deadline
                                 ):
@@ -3044,7 +3132,7 @@ class Agent:
                     break
 
                 # Per-iteration deadline check after tool execution
-                if _loop.time() > _iter_deadline:
+                if _loop.time() > tool_deadline:
                     yield self._transition(AgentState.ERROR)
                     terminal_error = ErrorEvent(
                         message=(
@@ -3166,17 +3254,11 @@ class Agent:
         stream: AsyncIterator[Any],
         *,
         loop: asyncio.AbstractEventLoop,
-        iter_deadline: float,
         total_deadline: float | None,
     ) -> AsyncIterator[Any]:
         stream_iter = stream.__aiter__()
         while True:
-            remaining_iter = iter_deadline - loop.time()
-            if remaining_iter <= 0:
-                await self._close_provider_stream(stream_iter)
-                raise _IterationStreamTimeoutError
-
-            wait_budget = remaining_iter
+            wait_budget = max(0.001, self.config.iteration_timeout)
             if total_deadline is not None:
                 remaining_total = total_deadline - loop.time()
                 if remaining_total <= 0:

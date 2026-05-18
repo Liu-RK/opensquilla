@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from opensquilla.session.terminal_reply import build_terminal_reply
+from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
 
 
 class GatewayRPCError(Exception):
@@ -584,13 +584,18 @@ def _normalize_session_error_payload(payload: dict) -> dict[str, Any]:
         "error_message": raw_text,
         **payload,
     }
+    _, safe_error_message = sanitize_agent_error(
+        terminal_payload,
+        fallback_error_class=str(code) if code else None,
+        fallback_error_message=raw_text,
+    )
     terminal_message = build_terminal_reply(terminal_payload)
     return {
         **payload,
         "message": terminal_message,
         "terminal_message": terminal_message,
         "terminal_reason": terminal_payload["terminal_reason"],
-        "error_message": raw_text,
+        "error_message": safe_error_message,
     }
 
 

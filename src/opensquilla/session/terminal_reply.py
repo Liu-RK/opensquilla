@@ -42,7 +42,9 @@ def build_terminal_reply(
     if (
         status == AgentTaskStatus.TIMEOUT.value
         or reason == "timeout"
+        or error_class == "iteration_timeout"
         or "timeouterror" in error_class
+        or "iteration_timeout" in error_message
         or "stream idle" in error_message
     ):
         return "The task timed out before it could finish."
@@ -76,6 +78,43 @@ def sanitize_agent_error(
 ) -> tuple[str | None, str]:
     if is_context_payload_too_large(record_or_payload):
         return CONTEXT_PAYLOAD_TOO_LARGE_CODE, build_terminal_reply(record_or_payload)
+    if _is_provider_output_truncated(record_or_payload):
+        return "provider_output_truncated", build_terminal_reply(
+            {
+                "status": "failed",
+                "terminal_reason": "output_truncated",
+                "error_class": "provider_output_truncated",
+                "error_message": (
+                    record_or_payload
+                    if isinstance(record_or_payload, str)
+                    else _read_value(record_or_payload, "error_message")
+                ),
+            }
+        )
+    if _is_timeout_error(record_or_payload):
+        raw_timeout_class = (
+            None
+            if isinstance(record_or_payload, str)
+            else _read_value(record_or_payload, "error_class")
+        )
+        timeout_error_class = (
+            raw_timeout_class.strip()
+            if isinstance(raw_timeout_class, str) and raw_timeout_class.strip()
+            else fallback_error_class or "iteration_timeout"
+        )
+        return timeout_error_class, build_terminal_reply(
+            {
+                "status": "timeout",
+                "terminal_reason": "timeout",
+                "error_class": timeout_error_class,
+                "error_message": (
+                    record_or_payload
+                    if isinstance(record_or_payload, str)
+                    else _read_value(record_or_payload, "error_message")
+                    or _read_value(record_or_payload, "message")
+                ),
+            }
+        )
 
     raw_message = (
         record_or_payload
@@ -116,6 +155,47 @@ def is_context_payload_too_large(record_or_payload: Any) -> bool:
     terminal_message = _normalize(_read_value(record_or_payload, "terminal_message"))
     combined = f"{reason} {error_class} {error_message} {terminal_message}"
     return _contains_context_payload_marker(combined)
+
+
+def _is_provider_output_truncated(record_or_payload: Any) -> bool:
+    if isinstance(record_or_payload, str):
+        return "provider output limit reached before completion" in _normalize(
+            record_or_payload
+        )
+    reason = _normalize(_read_value(record_or_payload, "terminal_reason"))
+    error_class = _normalize(_read_value(record_or_payload, "error_class"))
+    message = _normalize(_read_value(record_or_payload, "error_message"))
+    terminal_message = _normalize(_read_value(record_or_payload, "terminal_message"))
+    combined = f"{reason} {error_class} {message} {terminal_message}"
+    return (
+        reason == "output_truncated"
+        or error_class == "provider_output_truncated"
+        or "provider output limit reached before completion" in combined
+    )
+
+
+def _is_timeout_error(record_or_payload: Any) -> bool:
+    if isinstance(record_or_payload, str):
+        normalized = _normalize(record_or_payload)
+        return (
+            "iteration_timeout" in normalized
+            or "timeouterror" in normalized
+            or "stream idle" in normalized
+        )
+    status = _normalize(_read_value(record_or_payload, "status"))
+    reason = _normalize(_read_value(record_or_payload, "terminal_reason"))
+    error_class = _normalize(_read_value(record_or_payload, "error_class"))
+    message = _normalize(_read_value(record_or_payload, "error_message"))
+    event_message = _normalize(_read_value(record_or_payload, "message"))
+    combined = f"{reason} {error_class} {message} {event_message}"
+    return (
+        status == AgentTaskStatus.TIMEOUT.value
+        or reason == "timeout"
+        or error_class == "iteration_timeout"
+        or "timeouterror" in error_class
+        or "iteration_timeout" in combined
+        or "stream idle" in combined
+    )
 
 
 def _contains_context_payload_marker(value: str) -> bool:

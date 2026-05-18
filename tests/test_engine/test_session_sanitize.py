@@ -872,6 +872,66 @@ def test_agent_provider_view_keeps_successful_file_write_as_metadata(tmp_path) -
     assert history_block.input["content"] == large_html
 
 
+def test_agent_provider_view_reuses_successful_file_write_argument_snapshot(tmp_path) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=8000,
+        ),
+    )
+    large_html = "<html>\n" + ("<p>word</p>\n" * 900) + "</html>\n"
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id="write-1",
+                    name="write_file",
+                    input={"path": "index.html", "content": large_html},
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ContentBlockToolResult(
+                    tool_use_id="write-1",
+                    content='{"status":"ok","path":"index.html"}',
+                    is_error=False,
+                )
+            ],
+        ),
+    ]
+
+    first = agent._project_large_tool_use_arguments_for_provider(messages)
+    second = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    first_block = next(
+        block for block in first[0].content if isinstance(block, ContentBlockToolUse)
+    )
+    second_block = next(
+        block for block in second[0].content if isinstance(block, ContentBlockToolUse)
+    )
+    first_handle = next(
+        line.split(":", 1)[1].strip()
+        for line in first_block.input["content"].splitlines()
+        if line.startswith("tool_argument_handle:")
+    )
+    second_handle = next(
+        line.split(":", 1)[1].strip()
+        for line in second_block.input["content"].splitlines()
+        if line.startswith("tool_argument_handle:")
+    )
+
+    assert second_handle == first_handle
+    assert agent.config.metadata["tool_result_store_writes"] == 1
+    assert len(list((tmp_path / "tool-results" / "s" / "session-1").glob("**/meta.json"))) == 1
+
+
 @pytest.mark.asyncio
 async def test_agent_static_cost_source_is_explicitly_distinct_from_provider_billed() -> None:
     provider = StaticCostProvider()

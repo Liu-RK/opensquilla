@@ -2244,7 +2244,7 @@ const ChatView = (() => {
     // Text delta: accumulate into streaming bubble
     _unsubs.push(_rpc.on('session.event.text_delta', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _resetStreamIdleTimer();
       _appendDelta(payload.text || '');
     }));
@@ -2253,7 +2253,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.tool_use_start', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _resetStreamIdleTimer();
       _appendToolCall(payload);
     }));
@@ -2262,7 +2262,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.tool_result', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _resetStreamIdleTimer();
       _appendToolResult(payload);
     }));
@@ -2270,7 +2270,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.artifact', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _resetStreamIdleTimer();
       _appendArtifact(payload);
     }));
@@ -2278,7 +2278,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.subagent_completion', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _appendSubagentCompletion(payload);
     }));
 
@@ -2286,7 +2286,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.state_change', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (!payload || _aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _resetStreamIdleTimer();
       const to = payload.to_state || payload.toState || '';
       // Only use state_change to SHOW thinking indicator (on thinking/tool_calling
@@ -2302,7 +2302,7 @@ const ChatView = (() => {
     _unsubs.push(_rpc.on('session.event.run_heartbeat', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       if (!_isStreaming) _startStreaming();
       _resetStreamIdleTimer();
       if (!_streamBubble) _showThinkingIndicator();
@@ -2310,7 +2310,7 @@ const ChatView = (() => {
 
     _unsubs.push(_rpc.on('session.event.cron_result', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       const msg = payload?.message || payload || {};
       const targetSession = payload?.sessionKey || '';
       if (targetSession && _sessionKey && targetSession !== _sessionKey) return;
@@ -2330,7 +2330,7 @@ const ChatView = (() => {
 
     _unsubs.push(_rpc.on('session.event.compaction', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _showCompactionToast(payload || {});
     }));
 
@@ -2386,25 +2386,25 @@ const ChatView = (() => {
 
     _unsubs.push(_rpc.on('session.event.task_group.waiting', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupActive(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.synthesizing', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupActive(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.done', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupTerminal(payload, 'succeeded');
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.failed', (payload) => {
       if (_isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupTerminal(payload, 'failed');
     }));
 
@@ -2436,7 +2436,7 @@ const ChatView = (() => {
       if (typeof event !== 'string') return;
       // Discard done/error frames that pre-date the current epoch.
       if (event.startsWith('session.event.') && _isStaleEpoch(payload)) return;
-      _noteStreamSeq(payload);
+      if (!_acceptStreamSeq(payload)) return;
       if (event.startsWith('session.event.task_group.')) return;
 
       if (event === 'sessions.changed' && payload?.reason === 'turn_complete' && (!payload?.key || payload.key === _sessionKey)) {
@@ -3144,11 +3144,12 @@ const ChatView = (() => {
     return 'Agent error';
   }
 
-  function _noteStreamSeq(payload) {
+  function _acceptStreamSeq(payload) {
     const seq = payload && payload.stream_seq;
-    if (typeof seq === 'number' && Number.isFinite(seq) && seq > _lastStreamSeq) {
-      _lastStreamSeq = seq;
-    }
+    if (typeof seq !== 'number' || !Number.isFinite(seq)) return true;
+    if (seq <= _lastStreamSeq) return false;
+    _lastStreamSeq = seq;
+    return true;
   }
 
   // Returns true when a session event payload carries an epoch that

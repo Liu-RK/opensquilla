@@ -45,8 +45,8 @@ log = structlog.get_logger(__name__)
 # ``_LOSSY_EVENTS`` is intentionally narrow: the lossy event MUST NOT be
 # routed through ``SessionStreamRegistry.record()`` upstream, otherwise a
 # silent drop here would create a ``stream_seq`` gap that the frontend
-# cannot detect (see ``chat.js:_noteStreamSeq`` which only tracks the
-# maximum). The only event that satisfies that constraint today is the
+# would be filtered by ``chat.js:_acceptStreamSeq`` on reconnect. The
+# only event that satisfies that constraint today is the
 # liveness ``tick`` emitted from ``_tick_loop`` — its name is not prefixed
 # ``session.event.`` so ``EventBridge.emit`` skips ``record()`` for it.
 # Any future addition to this set MUST be verified against the same

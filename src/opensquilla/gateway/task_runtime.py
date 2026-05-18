@@ -1029,7 +1029,7 @@ class TaskRuntime:
         await self._storage.update_agent_task(
             task.task_id,
             status=AgentTaskStatus.RUNNING,
-            started_at=_loop_time_ms(),
+            started_at=_epoch_time_ms(),
         )
         await self._emit(task.envelope.session_key, "task.running", {"task_id": task.task_id})
         await self._notify_task_lifecycle(
@@ -1093,7 +1093,15 @@ class TaskRuntime:
             "error_class": error_class,
             "error_message": error_message,
         }
-        if is_context_payload_too_large(terminal_payload):
+        if (
+            status == AgentTaskStatus.TIMEOUT
+            or terminal_reason in {"timeout", "hard_deadline_exceeded"}
+            or is_context_payload_too_large(terminal_payload)
+            or (
+                terminal_reason == "output_truncated"
+                or error_class == "provider_output_truncated"
+            )
+        ):
             error_class, error_message = sanitize_agent_error(
                 terminal_payload,
                 fallback_error_class=error_class,
@@ -1104,7 +1112,7 @@ class TaskRuntime:
         await self._storage.update_agent_task(
             task.task_id,
             status=status,
-            finished_at=_loop_time_ms(),
+            finished_at=_epoch_time_ms(),
             terminal_reason=terminal_reason,
             error_class=error_class,
             error_message=error_message,
@@ -1238,5 +1246,5 @@ def _subagent_group_outcome_from_provenance(
     return dict(outcome)
 
 
-def _loop_time_ms() -> int:
-    return int(asyncio.get_running_loop().time() * 1000)
+def _epoch_time_ms() -> int:
+    return int(time.time() * 1000)

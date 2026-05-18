@@ -52,3 +52,56 @@ async def test_provider_request_too_large_error_persistence_does_not_compact_tra
             "or a larger-context model.",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_output_truncation_error_persistence_uses_terminal_reply() -> None:
+    manager = _RecordingSessionManager()
+    runner = TurnRunner(
+        provider_selector=None,
+        session_manager=manager,
+        config=SimpleNamespace(context_window_tokens=100_000),
+    )
+
+    await runner._persist_turn_error(
+        "agent:main:webchat:test",
+        ErrorEvent(
+            message="Provider output limit reached before completion",
+            code="provider_output_truncated",
+        ),
+    )
+
+    assert manager.compact_calls == []
+    assert manager.messages == [
+        (
+            "agent:main:webchat:test",
+            "system",
+            "The provider stopped because the output limit was reached before the task finished.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_output_truncation_error_persistence_uses_message_fallback() -> None:
+    manager = _RecordingSessionManager()
+    runner = TurnRunner(
+        provider_selector=None,
+        session_manager=manager,
+        config=SimpleNamespace(context_window_tokens=100_000),
+    )
+
+    await runner._persist_turn_error(
+        "agent:main:webchat:test",
+        ErrorEvent(
+            message="Provider output limit reached before completion",
+            code="agent_error",
+        ),
+    )
+
+    assert manager.messages == [
+        (
+            "agent:main:webchat:test",
+            "system",
+            "The provider stopped because the output limit was reached before the task finished.",
+        )
+    ]

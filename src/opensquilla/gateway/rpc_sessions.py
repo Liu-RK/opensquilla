@@ -402,13 +402,18 @@ def _normalize_terminal_event_payload(event_name: str, payload: dict[str, Any]) 
         "error_message": raw_text,
         **payload,
     }
+    _, safe_error_message = sanitize_agent_error(
+        terminal_payload,
+        fallback_error_class=str(code) if code else None,
+        fallback_error_message=raw_text,
+    )
     terminal_message = build_terminal_reply(terminal_payload)
     return {
         **payload,
         "message": terminal_message,
         "terminal_message": terminal_message,
         "terminal_reason": terminal_payload["terminal_reason"],
-        "error_message": raw_text,
+        "error_message": safe_error_message,
     }
 
 
@@ -1071,8 +1076,16 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 pass
         except TimeoutError:
             log.warning("sessions.send.stream_idle_timeout", session_key=key)
+            timeout_message = build_terminal_reply(
+                {
+                    "status": "timeout",
+                    "terminal_reason": "timeout",
+                    "error_class": _STREAM_IDLE_TIMEOUT_CODE,
+                    "error_message": _STREAM_IDLE_TIMEOUT_MESSAGE,
+                }
+            )
             await ctx.session_manager.append_message(
-                key, role="system", content=f"Error: {_STREAM_IDLE_TIMEOUT_MESSAGE}"
+                key, role="system", content=timeout_message
             )
             await _emit_terminal_once(
                 "session.event.error",

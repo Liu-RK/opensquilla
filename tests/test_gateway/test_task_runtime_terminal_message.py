@@ -99,7 +99,7 @@ async def test_mark_terminal_emits_additive_terminal_message_for_timeout_payload
     assert "Stream idle for more than" not in payload["terminal_message"]
     assert record.terminal_reason == "timeout"
     assert record.error_class == "TimeoutError"
-    assert record.error_message == "Gateway task timeout: Stream idle for more than 60s"
+    assert record.error_message == "The task timed out before it could finish."
 
 
 @pytest.mark.asyncio
@@ -226,7 +226,7 @@ def test_subagent_completion_payload_keeps_success_payload_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_runtime_stream_error_emits_terminal_message_and_preserves_raw_detail() -> None:
+async def test_task_runtime_stream_error_emits_sanitized_terminal_message() -> None:
     emitted: list[tuple[str, str, dict[str, Any]]] = []
 
     async def _stream():
@@ -238,7 +238,7 @@ async def test_task_runtime_stream_error_emits_terminal_message_and_preserves_ra
     async def _emitter(session_key: str, event_name: str, payload: dict[str, Any]) -> None:
         emitted.append((session_key, event_name, payload))
 
-    with pytest.raises(RuntimeError, match="Iteration 1 exceeded iteration_timeout"):
+    with pytest.raises(RuntimeError, match="The task timed out before it could finish"):
         await _emit_task_runtime_stream_events(
             _stream(),
             "agent:main:test",
@@ -257,7 +257,7 @@ async def test_task_runtime_stream_error_emits_terminal_message_and_preserves_ra
                 "code": "iteration_timeout",
                 "terminal_message": "The task timed out before it could finish.",
                 "terminal_reason": "timeout",
-                "error_message": "Iteration 1 exceeded iteration_timeout",
+                "error_message": "The task timed out before it could finish.",
             },
         )
     ]
@@ -292,7 +292,10 @@ async def test_task_runtime_stream_output_truncation_is_terminal_state() -> None
     assert payload["code"] == "provider_output_truncated"
     assert payload["terminal_reason"] == "output_truncated"
     assert "output limit" in payload["terminal_message"].lower()
-    assert payload["error_message"] == "Provider output limit reached before completion"
+    assert payload["error_message"] == (
+        "The provider stopped because the output limit was reached before the task finished."
+    )
+    assert "Provider output limit reached before completion" not in payload["error_message"]
 
 
 @pytest.mark.asyncio
@@ -312,7 +315,10 @@ async def test_task_runtime_records_output_truncation_as_failed_not_succeeded() 
     assert record.status == AgentTaskStatus.FAILED
     assert record.terminal_reason == "output_truncated"
     assert record.error_class == "provider_output_truncated"
-    assert record.error_message == "Provider output limit reached before completion"
+    assert record.error_message == (
+        "The provider stopped because the output limit was reached before the task finished."
+    )
+    assert "Provider output limit reached before completion" not in record.error_message
 
 
 @pytest.mark.asyncio
@@ -332,7 +338,7 @@ async def test_task_runtime_records_stream_timeout_reason_as_timeout() -> None:
     assert record.status == AgentTaskStatus.TIMEOUT
     assert record.terminal_reason == "timeout"
     assert record.error_class == "iteration_timeout"
-    assert record.error_message == "Iteration 1 exceeded iteration_timeout"
+    assert record.error_message == "The task timed out before it could finish."
 
 
 @pytest.mark.asyncio

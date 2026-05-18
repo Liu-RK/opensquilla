@@ -683,7 +683,7 @@ class TestSessionsSend:
         assert payload["message"] == "The task timed out before it could finish."
         assert payload["terminal_message"] == "The task timed out before it could finish."
         assert payload["terminal_reason"] == "timeout"
-        assert payload["error_message"] == "Session event stream idle before terminal event"
+        assert payload["error_message"] == "The task timed out before it could finish."
 
     @pytest.mark.asyncio
     async def test_send_reset_same_key_intent_applies_before_append(

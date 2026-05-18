@@ -507,18 +507,23 @@ async def test_no_done_after_text_does_not_retry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_length_capped_visible_text_is_terminal_not_success() -> None:
+async def test_length_capped_visible_text_continues_once_before_terminal() -> None:
     provider = _SequenceProvider(
         [
             [
                 ProviderText(text="partial answer"),
                 ProviderDone(stop_reason="length", input_tokens=7, output_tokens=9),
-            ]
+            ],
+            [
+                ProviderText(text=" finished"),
+                ProviderDone(stop_reason="stop", input_tokens=8, output_tokens=1),
+            ],
         ]
     )
     agent = Agent(
         provider=provider,
         config=AgentConfig(
+            max_provider_retries=1,
             retry_base_backoff_ms=0,
             retry_max_backoff_ms=0,
         ),
@@ -526,20 +531,18 @@ async def test_length_capped_visible_text_is_terminal_not_success() -> None:
 
     events = [event async for event in agent.run_turn("hello")]
 
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert any(event.kind == "text_delta" and event.text == "partial answer" for event in events)
+    assert any(event.kind == "text_delta" and event.text == " finished" for event in events)
     assert any(
-        event.kind == "warning" and event.code == "provider_output_truncated"
+        event.kind == "warning" and event.code == "provider_output_continue"
         for event in events
     )
-    assert any(
-        event.kind == "error" and event.code == "provider_output_truncated"
-        for event in events
-    )
+    assert not any(event.kind == "error" for event in events)
     done = next(event for event in events if event.kind == "done")
-    assert done.input_tokens == 7
-    assert done.output_tokens == 9
-    assert agent._history == []
+    assert done.text == "partial answer finished"
+    assert done.input_tokens == 15
+    assert done.output_tokens == 10
 
 
 @pytest.mark.asyncio

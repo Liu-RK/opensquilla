@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -255,3 +256,41 @@ async def test_task_running_reactivates_terminal_session_before_next_turn() -> N
     assert manager.update_calls[0][1]["status"] == SessionStatus.RUNNING
     assert manager.update_calls[0][1]["started_at"] > 0
     assert manager.update_calls[-1][1]["status"] == SessionStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_task_runtime_persists_agent_task_timestamps_as_epoch_ms() -> None:
+    session = _make_session()
+    manager = _SessionManager(session)
+    events: list[tuple[str, str, dict[str, Any]]] = []
+    storage = _make_task_storage()
+
+    async def _success_handler(_run: Any) -> None:
+        return None
+
+    async def _emit(session_key: str, event_name: str, payload: dict[str, Any]) -> None:
+        events.append((session_key, event_name, payload))
+
+    runtime = TaskRuntime(
+        storage=storage,
+        turn_handler=_success_handler,
+        event_emitter=_emit,
+        lifecycle_listener=_make_task_session_lifecycle_listener(
+            session_manager=manager,
+            event_emitter=_emit,
+        ),
+    )
+
+    before_ms = int(time.time() * 1000) - 1000
+    handle = await runtime.enqueue(_make_envelope(), "hello")
+    await runtime.wait(handle.task_id, timeout=2.0)
+    after_ms = int(time.time() * 1000) + 1000
+
+    record = await storage.get_agent_task(handle.task_id)
+
+    assert record is not None
+    assert record.started_at is not None
+    assert record.finished_at is not None
+    assert before_ms <= record.started_at <= after_ms
+    assert before_ms <= record.finished_at <= after_ms
+    assert record.finished_at >= record.started_at

@@ -32,6 +32,7 @@ from opensquilla.provider import (
 from opensquilla.provider import DoneEvent as ProviderDone
 from opensquilla.provider import ErrorEvent as ProviderError
 from opensquilla.provider import TextDeltaEvent as ProviderText
+from opensquilla.provider import ToolUseDeltaEvent as ProviderToolUseDelta
 from opensquilla.provider import ToolUseEndEvent as ProviderToolUseEnd
 from opensquilla.provider import ToolUseStartEvent as ProviderToolUseStart
 from opensquilla.provider.request_proof import (
@@ -68,6 +69,54 @@ class _StallingProvider:
             yield ProviderText(text="late")
         finally:
             self.stream_closed = True
+
+    async def list_models(self) -> list[Any]:
+        return []
+
+
+class _ActiveLongToolArgumentProvider:
+    provider_name = "fake"
+
+    def __init__(
+        self,
+        *,
+        fragment_delay: float = 0.02,
+        content: str = "alpha\\nbeta\\ngamma\\n",
+    ) -> None:
+        self.fragment_delay = fragment_delay
+        self.content = content
+        self.calls: list[list[Message]] = []
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        config: ChatConfig | None = None,
+    ) -> AsyncIterator[Any]:
+        self.calls.append(messages)
+        return self._stream(len(self.calls))
+
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if call_number > 1:
+            yield ProviderText(text="done")
+            yield ProviderDone(stop_reason="stop", input_tokens=1, output_tokens=1)
+            return
+        tool_use_id = "tool-1"
+        yield ProviderToolUseStart(tool_use_id=tool_use_id, tool_name="write_file")
+        fragments = [
+            '{"path":"deck.py","content":"',
+            self.content,
+            '"}',
+        ]
+        for fragment in fragments:
+            await asyncio.sleep(self.fragment_delay)
+            yield ProviderToolUseDelta(tool_use_id=tool_use_id, json_fragment=fragment)
+        yield ProviderToolUseEnd(
+            tool_use_id=tool_use_id,
+            tool_name="write_file",
+            arguments={},
+        )
+        yield ProviderDone(stop_reason="tool_calls", input_tokens=1, output_tokens=100)
 
     async def list_models(self) -> list[Any]:
         return []
@@ -580,6 +629,81 @@ async def test_iteration_timeout_interrupts_stalled_provider_stream() -> None:
     assert len(provider.calls) == 1
     assert provider.stream_closed is True
     assert not any(isinstance(event, DoneEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_iteration_timeout_does_not_interrupt_active_tool_argument_stream() -> None:
+    async def write_file_tool(call: object) -> ToolResult:
+        return ToolResult(
+            tool_use_id=getattr(call, "tool_use_id"),
+            tool_name=getattr(call, "tool_name"),
+            content="written",
+        )
+
+    provider = _ActiveLongToolArgumentProvider(fragment_delay=0.02)
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            iteration_timeout=0.03,
+            timeout=1.0,
+            max_provider_retries=0,
+        ),
+        tool_definitions=[
+            ToolDefinition(
+                name="write_file",
+                description="Write a file.",
+                input_schema=ToolInputSchema(),
+            )
+        ],
+        tool_handler=write_file_tool,
+    )
+
+    events = await asyncio.wait_for(_collect_events(agent.run_turn("hello")), timeout=1.0)
+
+    assert len(provider.calls) == 2
+    assert any(isinstance(event, DoneEvent) for event in events)
+    assert not any(
+        isinstance(event, ErrorEvent) and event.code == "iteration_timeout"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_large_tool_argument_stream_emits_progress_heartbeat() -> None:
+    async def write_file_tool(call: object) -> ToolResult:
+        return ToolResult(
+            tool_use_id=getattr(call, "tool_use_id"),
+            tool_name=getattr(call, "tool_name"),
+            content="written",
+        )
+
+    provider = _ActiveLongToolArgumentProvider(
+        fragment_delay=0.0,
+        content="x" * 5000,
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(iteration_timeout=1.0, timeout=2.0, max_provider_retries=0),
+        tool_definitions=[
+            ToolDefinition(
+                name="write_file",
+                description="Write a file.",
+                input_schema=ToolInputSchema(),
+            )
+        ],
+        tool_handler=write_file_tool,
+    )
+
+    events = await asyncio.wait_for(_collect_events(agent.run_turn("hello")), timeout=1.0)
+
+    heartbeat_index = _event_index(
+        events,
+        lambda event: isinstance(event, RunHeartbeatEvent)
+        and event.phase == "llm_tool_arguments"
+        and "write_file" in (event.message or ""),
+    )
+    done_index = _event_index(events, lambda event: isinstance(event, DoneEvent))
+    assert heartbeat_index < done_index
 
 
 @pytest.mark.asyncio

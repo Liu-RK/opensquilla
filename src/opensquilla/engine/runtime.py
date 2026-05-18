@@ -136,7 +136,7 @@ from opensquilla.session.keys import (
     is_subagent_key,
     normalize_agent_id,
 )
-from opensquilla.session.terminal_reply import sanitize_agent_error
+from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
 from opensquilla.tools.types import CallerKind, ToolContext
 
 # Stable user-facing envelope for LLM timeouts.
@@ -2154,7 +2154,10 @@ class TurnRunner:
                 fallback_error_message=str(exc) or "Agent error",
             )
             event_code = (
-                error_code if error_code == "provider_request_too_large" else "agent_error"
+                error_code
+                if error_code
+                in {"provider_request_too_large", "provider_output_truncated"}
+                else "agent_error"
             )
             log.error(
                 "turn_runner.failed",
@@ -2163,8 +2166,19 @@ class TurnRunner:
                 exc_info=True,
             )
             if self._session_manager is not None:
+                if event_code == "provider_output_truncated":
+                    transcript_message = build_terminal_reply(
+                        {
+                            "status": "failed",
+                            "terminal_reason": "output_truncated",
+                            "error_class": event_code,
+                            "error_message": error_message,
+                        }
+                    )
+                else:
+                    transcript_message = f"Error: {error_message}"
                 await self._session_manager.append_message(
-                    session_key, role="system", content=f"Error: {error_message}"
+                    session_key, role="system", content=transcript_message
                 )
             if turn_call_logger is not None:
                 turn_call_logger.write(
@@ -2364,8 +2378,22 @@ class TurnRunner:
             fallback_error_message=event.message or "Unknown error",
         )
         event_code = (
-            error_code if error_code == "provider_request_too_large" else event.code
+            error_code
+            if error_code
+            in {"provider_request_too_large", "provider_output_truncated"}
+            else event.code
         )
+        if event_code == "provider_output_truncated":
+            transcript_message = build_terminal_reply(
+                {
+                    "status": "failed",
+                    "terminal_reason": "output_truncated",
+                    "error_class": event_code,
+                    "error_message": message,
+                }
+            )
+        else:
+            transcript_message = f"Error: {message}"
         try:
             if event_code == "current_turn_context_exhausted":
                 compact = getattr(self._session_manager, "compact", None)
@@ -2389,7 +2417,7 @@ class TurnRunner:
             await self._session_manager.append_message(
                 session_key,
                 role="system",
-                content=f"Error: {message}",
+                content=transcript_message,
             )
         except Exception as exc:  # noqa: BLE001 - persistence must not mask the original error
             log.warning(

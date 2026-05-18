@@ -361,8 +361,19 @@ def test_chat_subscribe_uses_stream_replay_cursor() -> None:
     assert "let _lastStreamSeq = 0;" in source
     assert "params.since_stream_seq = _lastStreamSeq;" in source
     assert "if (_lastStreamSeq > 0) params.since_stream_seq = _lastStreamSeq;" not in body
-    assert "function _noteStreamSeq(payload)" in source
+    assert "function _acceptStreamSeq(payload)" in source
     assert "Session stream gap detected; reloading transcript." in source
+
+
+def test_chat_stream_handlers_drop_replayed_duplicate_frames() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _subscribeRpcEvents() {")
+    end = source.index("  /* ── Chat History", start)
+    body = source[start:end]
+
+    assert "function _acceptStreamSeq(payload)" in source
+    assert "if (!_acceptStreamSeq(payload)) return;" in body
+    assert "_noteStreamSeq(payload);" not in body
 
 
 def test_chat_surfaces_persisted_run_state_in_header_and_session_picker() -> None:
