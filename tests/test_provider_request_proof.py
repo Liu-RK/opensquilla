@@ -301,6 +301,171 @@ def test_provider_request_proof_compacts_aggregate_current_turn_tool_arguments()
     assert payload["messages"][1]["tool_calls"][0]["function"]["arguments"] == original_arguments[0]
 
 
+def test_provider_request_proof_compacts_leaked_tool_argument_projections() -> None:
+    projection = (
+        "[tool_use_argument_projection]\n"
+        "tool: write_file\n"
+        "tool_use_id: call_original\n"
+        "field: content\n"
+        "path: generated/app.css\n"
+        "original_chars: 20000\n"
+        "original_input_chars: 20500\n"
+        "sha256: 1234567890abcdef\n"
+        "tool_argument_handle: tr-1234567890abcdef\n"
+        "omitted_chars: 20000\n"
+        "reason: large tool argument compacted for provider context budget.\n"
+        "head:\n"
+        + ("x" * 700)
+        + "\n...\ntail:\n"
+        + ("y" * 200)
+    )
+    original_arguments = json.dumps(
+        {
+            "path": "generated/app.css",
+            "content": projection,
+        },
+        separators=(",", ":"),
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "continue the app"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_projected",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": original_arguments,
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_projected", "content": "error"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    compacted_arguments = compacted["messages"][1]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    assert "_invalid_provider_context_arguments" in compacted_arguments
+    assert "_opensquilla_compacted_tool_arguments" not in compacted_arguments
+    assert "[tool_use_argument_projection]" not in compacted_arguments
+    assert "tool_argument_handle: tr-1234567890abcdef" not in compacted_arguments
+    assert "head:" not in compacted_arguments
+    assert payload["messages"][1]["tool_calls"][0]["function"]["arguments"] == original_arguments
+
+
+def test_provider_request_proof_compacts_leaked_provider_compacted_tool_arguments() -> None:
+    original_arguments = json.dumps(
+        {
+            "_opensquilla_compacted_tool_arguments": True,
+            "original_chars": 549,
+            "sha256": "0" * 64,
+            "argument_keys": ["command", "timeout"],
+        },
+        separators=(",", ":"),
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "open in chrome"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_compacted",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": original_arguments,
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_compacted", "content": "error"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    compacted_arguments = compacted["messages"][1]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    assert "_opensquilla_compacted_tool_arguments" not in compacted_arguments
+    assert "command" not in compacted_arguments
+    assert payload["messages"][1]["tool_calls"][0]["function"]["arguments"] == original_arguments
+
+
+def test_provider_request_proof_compacts_leaked_tool_input_projections() -> None:
+    projection = (
+        "[tool_use_argument_projection]\n"
+        "tool: write_file\n"
+        "tool_use_id: call_input\n"
+        "field: content\n"
+        "path: generated/app.html\n"
+        "original_chars: 25000\n"
+        "sha256: abcdef1234567890\n"
+        "tool_argument_handle: tr-abcdef1234567890\n"
+        "reason: large tool argument compacted for provider context budget.\n"
+        "head:\n"
+        + ("h" * 800)
+        + "\n...\ntail:\n"
+        + ("t" * 200)
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "continue the app"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_input",
+                        "name": "write_file",
+                        "input": {
+                            "path": "generated/app.html",
+                            "content": projection,
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "finish"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="anthropic",
+        proof_budget=2200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    compacted_input = compacted["messages"][1]["content"][0]["input"]
+    compacted_dump = json.dumps(compacted_input)
+    assert "_invalid_provider_context_arguments" in compacted_dump
+    assert "_opensquilla_compacted_tool_input" not in compacted_dump
+    assert "[tool_use_argument_projection]" not in compacted_dump
+    assert "tool_argument_handle: tr-abcdef1234567890" not in compacted_dump
+    assert "head:" not in compacted_dump
+    assert payload["messages"][1]["content"][0]["input"]["content"] == projection
+
+
 def test_provider_request_proof_compacts_assistant_reasoning_content() -> None:
     payload = {
         "messages": [
@@ -405,3 +570,198 @@ def test_provider_request_proof_emergency_compacts_many_current_turn_tool_result
     assert proof["emergency_current_turn_compacted"] is True
     assert proof["recent_tail_too_large"] is False
     assert compacted["messages"][2]["content"] != payload["messages"][2]["content"]
+
+
+def test_provider_request_proof_hard_caps_many_tool_results_after_emergency_compaction() -> None:
+    payload = {
+        "messages": [
+            {"role": "system", "content": "system prompt\n" + ("s" * 8_000)},
+            {"role": "user", "content": "research several current agent papers"},
+            {
+                "role": "assistant",
+                "content": "I will search and fetch sources.",
+                "tool_calls": [
+                    {
+                        "id": f"call_{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "web_fetch",
+                            "arguments": json.dumps(
+                                {
+                                    "url": f"https://example.com/paper-{index}",
+                                    "note": "x" * 700,
+                                },
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for index in range(306)
+                ],
+            },
+            *[
+                {
+                    "role": "tool",
+                    "tool_call_id": f"call_{index}",
+                    "content": "paper result\n" + ("long source excerpt\n" * 320),
+                }
+                for index in range(306)
+            ],
+            {"role": "user", "content": "write the brief"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=96_000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    assert proof["recent_tail_too_large"] is False
+    assert compacted["messages"][-1]["content"] == "write the brief"
+    assert compacted["messages"][3]["content"] != payload["messages"][3]["content"]
+
+
+def test_provider_request_proof_hard_cap_compacts_leaked_tool_arguments() -> None:
+    projection = (
+        "[tool_use_argument_projection]\n"
+        "tool: write_file\n"
+        "tool_use_id: call_projected\n"
+        "field: content\n"
+        "path: generated/app.js\n"
+        "original_chars: 30000\n"
+        "sha256: fedcba0987654321\n"
+        "tool_argument_handle: tr-fedcba0987654321\n"
+        "head:\n"
+        + ("j" * 700)
+        + "\n...\ntail:\n"
+        + ("k" * 200)
+    )
+    projected_arguments = json.dumps(
+        {"path": "generated/app.js", "content": projection},
+        separators=(",", ":"),
+    )
+    payload = {
+        "messages": [
+            {"role": "system", "content": "system prompt\n" + ("s" * 8_000)},
+            {"role": "user", "content": "build the app"},
+            {
+                "role": "assistant",
+                "content": "writing files",
+                "tool_calls": [
+                    {
+                        "id": "call_projected",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": projected_arguments,
+                        },
+                    },
+                    *[
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "web_fetch",
+                                "arguments": json.dumps(
+                                    {
+                                        "url": f"https://example.com/{index}",
+                                        "note": "x" * 700,
+                                    },
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                        for index in range(306)
+                    ],
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_projected", "content": "error"},
+            *[
+                {
+                    "role": "tool",
+                    "tool_call_id": f"call_{index}",
+                    "content": "paper result\n" + ("long source excerpt\n" * 320),
+                }
+                for index in range(306)
+            ],
+            {"role": "user", "content": "continue"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=96_000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    compacted_arguments = compacted["messages"][2]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    assert "[tool_use_argument_projection]" not in compacted_arguments
+    assert "tool_argument_handle: tr-fedcba0987654321" not in compacted_arguments
+    assert "head:" not in compacted_arguments
+    assert "_invalid_provider_context_arguments" in compacted_arguments
+    assert "_opensquilla_compacted_tool_arguments" not in compacted_arguments
+
+
+def test_provider_request_proof_emergency_compacts_oversized_request_context() -> None:
+    request_context = (
+        "[Request context for this turn]\n"
+        "This request-scoped context is not a user request and is not transcript history.\n"
+        + ("workspace context\n" * 5000)
+    )
+    payload = {
+        "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": request_context},
+            {"role": "user", "content": "hi"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "noop", "description": "x"}}],
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=12_000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["emergency_current_turn_compacted"] is True
+    assert proof["recent_tail_too_large"] is False
+    assert compacted["messages"][1]["content"] != request_context
+    assert compacted["messages"][2]["content"] == "hi"
+
+
+def test_provider_request_proof_emergency_compacts_old_user_tail_but_keeps_latest_user() -> None:
+    old_user_message = "old channel transcript\n" + ("previous user request\n" * 4000)
+    payload = {
+        "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": old_user_message},
+            {"role": "assistant", "content": "previous answer"},
+            {"role": "user", "content": "hi"},
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=12_000,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["emergency_current_turn_compacted"] is True
+    assert compacted["messages"][1]["content"] != old_user_message
+    assert compacted["messages"][3]["content"] == "hi"

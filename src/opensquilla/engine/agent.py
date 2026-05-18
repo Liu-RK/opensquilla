@@ -84,6 +84,7 @@ from opensquilla.session.compaction import (
 from opensquilla.session.compaction_lifecycle import (
     flush_receipt_allows_destructive_compaction,
 )
+from opensquilla.session.terminal_reply import sanitize_agent_error
 from opensquilla.tool_boundary import AgentToolHandler as ToolHandler
 
 from .context import ContextAssembly
@@ -130,6 +131,15 @@ _TOOL_RESULT_SUMMARY_SYSTEM = (
 _LARGE_JSON_TOOL_FIELD_KEYS: frozenset[str] = frozenset({"body", "body_base64"})
 _LARGE_JSON_TOOL_FIELD_CHARS = 20_000
 _TOOL_ARGUMENT_PROJECTION_PREFIX = "[tool_use_argument_projection]\n"
+_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX = "[invalid_provider_context_projection:"
+_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
+_PROVIDER_CONTEXT_PROJECTION_REUSED_REASON = "provider_context_projection_reused"
+_COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
+    {
+        "_opensquilla_compacted_tool_arguments",
+        "_opensquilla_compacted_tool_input",
+    }
+)
 
 
 def _large_json_field_replacement(value: str) -> dict[str, object]:
@@ -558,15 +568,22 @@ class Agent:
         if reason == "provider_recent_tail_too_large":
             return ErrorEvent(
                 message=(
-                    "Context overflow is in the current turn's recent tool calls or "
-                    "reasoning tail; history compaction cannot reduce it."
+                    "The request is too large for the provider context window after "
+                    "automatic context compaction and payload reduction. OpenSquilla "
+                    "preserved the recoverable state; retry with a narrower request "
+                    "or a larger-context model."
                 ),
-                code="current_turn_context_exhausted",
+                code="provider_request_too_large",
             )
         if reason == "provider_request_budget_exhausted":
             return ErrorEvent(
-                message="Provider request budget remains exhausted after compaction.",
-                code="provider_request_budget_exhausted",
+                message=(
+                    "The request is too large for the provider context window after "
+                    "automatic context compaction and payload reduction. OpenSquilla "
+                    "preserved the recoverable state; retry with a narrower request "
+                    "or a larger-context model."
+                ),
+                code="provider_request_too_large",
             )
         return ErrorEvent(
             message="Context overflow persists after compaction",
@@ -723,6 +740,17 @@ class Agent:
         tool_use_id: str,
         tool_name: str,
     ) -> ToolResultRecord | None:
+        if (
+            _TOOL_ARGUMENT_PROJECTION_PREFIX in content
+            or _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY in content
+            or any(marker in content for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
+        ):
+            self._write_turn_call_log(
+                "tool_argument_projection_snapshot_rejected",
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+            )
+            return None
         return self._store_tool_result_snapshot(
             content,
             tool_use_id=tool_use_id,
@@ -1172,6 +1200,35 @@ class Agent:
                     block.name in {"write_file", "edit_file", "apply_patch"}
                     and block.id in successful_tool_result_ids
                 )
+                if self._has_provider_context_argument_marker(block.input):
+                    replacements[(message_index, block_index)] = ContentBlockToolUse(
+                        id=block.id,
+                        name=block.name,
+                        input=self._provider_compacted_arguments_placeholder(
+                            block.name,
+                            block.input,
+                        ),
+                    )
+                    continue
+                legacy_projected_input = dict(block.input)
+                legacy_projection_scrubbed = False
+                for key, value in block.input.items():
+                    if not isinstance(value, str) or not value.startswith(
+                        _TOOL_ARGUMENT_PROJECTION_PREFIX
+                    ):
+                        continue
+                    legacy_projected_input[key] = self._provider_projection_placeholder(
+                        block.name,
+                        key,
+                    )
+                    legacy_projection_scrubbed = True
+                if legacy_projection_scrubbed:
+                    replacements[(message_index, block_index)] = ContentBlockToolUse(
+                        id=block.id,
+                        name=block.name,
+                        input=legacy_projected_input,
+                    )
+                    continue
                 if input_chars <= cap and not aggregate_projection and not file_write_success:
                     continue
                 raw_input = json.dumps(
@@ -1189,6 +1246,14 @@ class Agent:
                 projected_input = dict(block.input)
                 for key, value in block.input.items():
                     if not isinstance(value, str):
+                        continue
+                    if value.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX):
+                        projected_input[key] = self._provider_projection_placeholder(
+                            block.name,
+                            key,
+                        )
+                        continue
+                    if value.startswith(_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX):
                         continue
                     key_chars = len(json.dumps({key: value}, ensure_ascii=False))
                     project_for_success = (
@@ -1377,7 +1442,10 @@ class Agent:
                     model = event.model
         except Exception as exc:  # noqa: BLE001 - compression is best-effort
             model_label = model or self.config.tool_result_compression_summary_model or "default"
-            message = str(exc)
+            _, message = sanitize_agent_error(
+                str(exc),
+                fallback_error_message=str(exc) or "tool result summary failed",
+            )
             logger.warning(
                 "tool_result_summary_failed",
                 tool=result.tool_name,
@@ -1781,6 +1849,11 @@ class Agent:
                         request_context_insert_index,
                         runtime_context_message,
                         runtime_context_insert_index,
+                    )
+                    request_source_messages = (
+                        self._strip_provider_context_marker_replay_for_provider(
+                            request_source_messages
+                        )
                     )
                     request_source_messages = self._compact_aggregate_tool_results_for_provider(
                         request_source_messages
@@ -2546,12 +2619,17 @@ class Agent:
                     final_text_parts.append(visible_text)
 
                 preflight_tool_results: dict[str, ToolResult] = {}
+                terminal_projection_preflight_error = False
                 resolved_tool_calls: list[ToolCall] = []
                 for tc in tool_calls:
                     resolved = self._rehydrate_projected_tool_arguments(tc)
                     if isinstance(resolved, ToolResult):
                         preflight_tool_results[tc.tool_use_id] = resolved
-                        resolved_tool_calls.append(tc)
+                        if self._is_provider_context_projection_reuse_result(resolved):
+                            terminal_projection_preflight_error = True
+                        resolved_tool_calls.append(
+                            self._sanitize_projected_tool_call_arguments(tc)
+                        )
                         continue
                     resolved_tool_calls.append(resolved)
                 tool_calls = resolved_tool_calls
@@ -2963,6 +3041,13 @@ class Agent:
                 turn_messages.append(
                     Message(role="user", content=tool_result_blocks)  # type: ignore[arg-type]
                 )
+                if terminal_projection_preflight_error:
+                    self._write_turn_call_log(
+                        "tool_argument_projection_rehydrate_terminal",
+                        iteration=iterations,
+                        tool_use_ids=sorted(preflight_tool_results),
+                    )
+                    break
                 if turn_yielded:
                     break
 
@@ -3617,6 +3702,92 @@ class Agent:
         return None
 
     @staticmethod
+    def _has_provider_context_replay_marker(arguments: dict[str, Any]) -> bool:
+        if Agent._has_provider_context_argument_marker(arguments):
+            return True
+        return any(
+            isinstance(value, str)
+            and value.startswith(_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX)
+            for value in arguments.values()
+        )
+
+    @staticmethod
+    def _is_provider_context_projection_reuse_result(result: ToolResult) -> bool:
+        status = result.execution_status or {}
+        return bool(
+            result.is_error
+            and isinstance(status, dict)
+            and status.get("reason") == _PROVIDER_CONTEXT_PROJECTION_REUSED_REASON
+        )
+
+    def _strip_provider_context_marker_replay_for_provider(
+        self,
+        messages: list[Message],
+    ) -> list[Message]:
+        blocked_tool_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message.content, list):
+                continue
+            for block in message.content:
+                if (
+                    isinstance(block, ContentBlockToolUse)
+                    and isinstance(block.id, str)
+                    and self._has_provider_context_replay_marker(block.input)
+                ):
+                    blocked_tool_ids.add(block.id)
+
+        if not blocked_tool_ids:
+            return messages
+
+        stripped_messages: list[Message] = []
+        stripped_blocks = 0
+        for message in messages:
+            if not isinstance(message.content, list):
+                stripped_messages.append(message)
+                continue
+            next_content: list[Any] = []
+            changed = False
+            for block in message.content:
+                if (
+                    isinstance(block, ContentBlockToolUse)
+                    and block.id in blocked_tool_ids
+                ):
+                    stripped_blocks += 1
+                    changed = True
+                    continue
+                if (
+                    isinstance(block, ContentBlockToolResult)
+                    and block.tool_use_id in blocked_tool_ids
+                ):
+                    stripped_blocks += 1
+                    changed = True
+                    continue
+                next_content.append(block)
+            if not changed:
+                stripped_messages.append(message)
+                continue
+            if not next_content:
+                continue
+            stripped_messages.append(
+                Message(
+                    role=message.role,
+                    content=next_content,
+                    reasoning_content=getattr(message, "reasoning_content", None),
+                )
+            )
+
+        self.config.metadata["tool_argument_projection_replay_stripped"] = (
+            self.config.metadata.get("tool_argument_projection_replay_stripped", 0)
+            + stripped_blocks
+        )
+        self._write_turn_call_log(
+            "tool_argument_projection_replay_stripped",
+            tool_use_ids=sorted(blocked_tool_ids),
+            stripped_blocks=stripped_blocks,
+        )
+        return stripped_messages
+
+    @staticmethod
     def _parse_tool_argument_projection(value: str) -> dict[str, str] | None:
         if not value.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX):
             return None
@@ -3629,6 +3800,66 @@ class Agent:
                 continue
             metadata[key.strip()] = raw_value.strip()
         return metadata
+
+    @staticmethod
+    def _provider_projection_placeholder(tool_name: str, field: str) -> str:
+        return (
+            f"[invalid_provider_context_projection:{tool_name}.{field}] "
+            "provider-only compacted tool argument omitted; regenerate the real "
+            "argument instead of copying provider context."
+        )
+
+    @staticmethod
+    def _has_provider_context_argument_marker(arguments: dict[str, Any]) -> bool:
+        return (
+            arguments.get(_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY) is True
+            or any(arguments.get(marker) is True for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
+        )
+
+    @staticmethod
+    def _provider_compacted_arguments_placeholder(
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY: True,
+            "tool": tool_name,
+            "reason": "provider_context_omitted",
+        }
+
+    def _sanitize_projected_tool_call_arguments(self, tc: ToolCall) -> ToolCall:
+        if self._has_provider_context_argument_marker(tc.arguments):
+            return ToolCall(
+                tool_use_id=tc.tool_use_id,
+                tool_name=tc.tool_name,
+                arguments=self._provider_compacted_arguments_placeholder(
+                    tc.tool_name,
+                    tc.arguments,
+                ),
+                synthetic_from_text=tc.synthetic_from_text,
+                origin_trace=tc.origin_trace,
+            )
+        sanitized = dict(tc.arguments)
+        changed = False
+        for argument_name, value in tc.arguments.items():
+            if not isinstance(value, str) or not value.startswith(
+                _TOOL_ARGUMENT_PROJECTION_PREFIX
+            ):
+                continue
+            sanitized[argument_name] = self._provider_projection_placeholder(
+                tc.tool_name,
+                argument_name,
+            )
+            changed = True
+        if not changed:
+            return tc
+        return ToolCall(
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            arguments=sanitized,
+            synthetic_from_text=tc.synthetic_from_text,
+            origin_trace=tc.origin_trace,
+        )
 
     def _projection_rehydrate_error(
         self,
@@ -3655,13 +3886,48 @@ class Agent:
             tool_use_id=tc.tool_use_id,
             tool_name=tc.tool_name,
             content=(
-                f"Projected tool argument for '{tc.tool_name}.{field}' could not be "
-                "restored; refusing to execute provider-context projection."
+                f"The {tc.tool_name}.{field} input reused a provider-only compacted "
+                "tool argument. OpenSquilla did not execute it; regenerate the real "
+                "argument instead of copying provider context."
             ),
             is_error=True,
             execution_status=runtime_execution_status(
                 "error",
-                reason="runtime_error",
+                reason=_PROVIDER_CONTEXT_PROJECTION_REUSED_REASON,
+            ),
+        )
+
+    def _provider_compacted_arguments_error(
+        self,
+        tc: ToolCall,
+        *,
+        reason: str,
+    ) -> ToolResult:
+        self.config.metadata["tool_argument_projection_rehydrate_failures"] = (
+            self.config.metadata.get(
+                "tool_argument_projection_rehydrate_failures",
+                0,
+            )
+            + 1
+        )
+        self._write_turn_call_log(
+            "tool_argument_projection_rehydrate_failed",
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            reason=reason,
+        )
+        return ToolResult(
+            tool_use_id=tc.tool_use_id,
+            tool_name=tc.tool_name,
+            content=(
+                f"The {tc.tool_name} arguments reused provider-only compacted tool "
+                "arguments. OpenSquilla did not execute them; regenerate the real "
+                "arguments instead of copying provider context."
+            ),
+            is_error=True,
+            execution_status=runtime_execution_status(
+                "error",
+                reason=_PROVIDER_CONTEXT_PROJECTION_REUSED_REASON,
             ),
         )
 
@@ -3669,122 +3935,22 @@ class Agent:
         self,
         tc: ToolCall,
     ) -> ToolCall | ToolResult:
-        restored_arguments: dict[str, Any] | None = None
-        rehydrated_fields: list[str] = []
-
+        if self._has_provider_context_argument_marker(tc.arguments):
+            return self._provider_compacted_arguments_error(
+                tc,
+                reason="provider_compacted_arguments_reused",
+            )
         for argument_name, value in tc.arguments.items():
             if not isinstance(value, str) or not value.startswith(
                 _TOOL_ARGUMENT_PROJECTION_PREFIX
             ):
                 continue
-            metadata = self._parse_tool_argument_projection(value)
-            if metadata is None:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="invalid_projection",
-                )
-            if metadata.get("tool") != tc.tool_name:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="tool_mismatch",
-                )
-            if metadata.get("field") != argument_name:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="field_mismatch",
-                )
-            handle = metadata.get("tool_argument_handle")
-            expected_sha = metadata.get("sha256")
-            session_id = self.config.tool_result_store_session_id or self._session_key
-            if not self.config.tool_result_store_dir or not session_id:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="missing_store",
-                )
-            if not handle or not expected_sha:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="missing_projection_metadata",
-                )
-            try:
-                record = ToolResultStore(self.config.tool_result_store_dir).read(
-                    handle,
-                    session_id=session_id,
-                )
-            except Exception as exc:  # noqa: BLE001 - invalid projections must not dispatch
-                logger.warning(
-                    "tool_argument_projection.rehydrate_read_failed",
-                    tool_use_id=tc.tool_use_id,
-                    tool_name=tc.tool_name,
-                    field=argument_name,
-                    error=str(exc),
-                )
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="store_read_failed",
-                )
-            if record.tool_name != f"{tc.tool_name}:arguments":
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="stored_tool_mismatch",
-                )
-            if record.sha256 != expected_sha:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="stored_hash_mismatch",
-                )
-            try:
-                raw_input = json.loads(record.content)
-            except json.JSONDecodeError:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="stored_input_invalid_json",
-                )
-            if not isinstance(raw_input, dict) or argument_name not in raw_input:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="stored_field_missing",
-                )
-            if restored_arguments is None:
-                restored_arguments = dict(raw_input)
-            elif raw_input != restored_arguments:
-                return self._projection_rehydrate_error(
-                    tc,
-                    field=argument_name,
-                    reason="stored_input_mismatch",
-                )
-            rehydrated_fields.append(argument_name)
-
-        if restored_arguments is None:
-            return tc
-        self.config.metadata["tool_argument_projection_rehydrated"] = True
-        self.config.metadata["tool_argument_projection_rehydrated_fields"] = (
-            self.config.metadata.get("tool_argument_projection_rehydrated_fields", 0)
-            + len(rehydrated_fields)
-        )
-        self._write_turn_call_log(
-            "tool_argument_projection_rehydrated",
-            tool_use_id=tc.tool_use_id,
-            tool_name=tc.tool_name,
-            fields=rehydrated_fields,
-        )
-        return ToolCall(
-            tool_use_id=tc.tool_use_id,
-            tool_name=tc.tool_name,
-            arguments=restored_arguments,
-            synthetic_from_text=tc.synthetic_from_text,
-            origin_trace=tc.origin_trace,
-        )
+            return self._projection_rehydrate_error(
+                tc,
+                field=argument_name,
+                reason="provider_projection_reused",
+            )
+        return tc
 
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Dispatch a tool call to the registered handler."""
@@ -3807,9 +3973,9 @@ class Agent:
                 tool_use_id=tc.tool_use_id,
                 tool_name=tc.tool_name,
                 content=(
-                    "tool_failure_loop_exhausted: repeated identical tool failure "
-                    f"for {tc.tool_name}; execution blocked to prevent unbounded "
-                    "repair-loop context growth."
+                    f"The exact same {tc.tool_name} call has already failed repeatedly. "
+                    "Do not retry this exact call unchanged. Use a different approach, "
+                    "change the arguments, or explain the blocker to the user."
                 ),
                 is_error=True,
                 execution_status=runtime_execution_status(

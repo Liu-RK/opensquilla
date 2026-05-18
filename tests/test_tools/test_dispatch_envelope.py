@@ -405,6 +405,98 @@ async def test_dispatch_bounds_unknown_huge_tool_result_without_artifact_side_ef
 
 
 @pytest.mark.asyncio
+async def test_dispatch_preserves_error_preview_after_turn_budget_is_exhausted() -> None:
+    registry = ToolRegistry()
+
+    async def huge() -> str:
+        return "x" * 1000
+
+    async def missing_capability() -> str:
+        return json.dumps(
+            {
+                "status": "blocked",
+                "message": "Skill not found: nano-banana",
+            }
+        )
+
+    registry.register(ToolSpec(name="huge", description="huge", parameters={}), huge)
+    registry.register(
+        ToolSpec(name="missing_capability", description="missing", parameters={}),
+        missing_capability,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_result_budget_policy=ToolResultBudgetPolicy(
+                max_single_tool_result_chars=1000,
+                max_tool_result_chars_per_turn=5,
+            )
+        ),
+    )
+
+    await handler(ToolCall(tool_use_id="tc-huge", tool_name="huge", arguments={}))
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-missing",
+            tool_name="missing_capability",
+            arguments={},
+        )
+    )
+
+    payload = json.loads(result.content)
+    assert result.is_error is True
+    assert payload["status"] == "blocked"
+    assert payload["message"] == "Skill not found: nano-banana"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_preserves_control_status_after_turn_budget_is_exhausted() -> None:
+    registry = ToolRegistry()
+
+    async def huge() -> str:
+        return "x" * 1000
+
+    async def control_error() -> str:
+        return json.dumps(
+            {
+                "status": "error",
+                "user_message": "Missing required path.",
+                "retry_allowed": False,
+            }
+        )
+
+    registry.register(ToolSpec(name="huge", description="huge", parameters={}), huge)
+    registry.register(
+        ToolSpec(
+            name="control_error",
+            description="control",
+            parameters={},
+            result_budget_class="control",
+        ),
+        control_error,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_result_budget_policy=ToolResultBudgetPolicy(
+                max_single_tool_result_chars=1000,
+                max_tool_result_chars_per_turn=5,
+            )
+        ),
+    )
+
+    await handler(ToolCall(tool_use_id="tc-huge", tool_name="huge", arguments={}))
+    result = await handler(
+        ToolCall(tool_use_id="tc-control", tool_name="control_error", arguments={})
+    )
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "error"
+    assert payload["user_message"] == "Missing required path."
+    assert payload["retry_allowed"] is False
+
+
+@pytest.mark.asyncio
 async def test_dispatch_clamps_web_fetch_max_chars_before_handler() -> None:
     registry = ToolRegistry()
     seen: dict[str, object] = {}

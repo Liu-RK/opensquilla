@@ -16,6 +16,14 @@ _COMPACTED_ARGUMENT_TAIL_CHARS = 120
 _PROOF_BUDGET_HEADROOM_RATIO = 0.10
 _PROOF_BUDGET_HEADROOM_MAX_CHARS = 16_384
 _PROOF_BUDGET_HEADROOM_MIN_CHARS = 512
+_TOOL_ARGUMENT_PROJECTION_PREFIX = "[tool_use_argument_projection]\n"
+_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
+_COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
+    {
+        "_opensquilla_compacted_tool_arguments",
+        "_opensquilla_compacted_tool_input",
+    }
+)
 
 
 class ProviderRequestBudgetExceededError(RuntimeError):
@@ -157,6 +165,13 @@ def _emergency_compact_string(value: str, *, label: str) -> str:
     )
 
 
+def _hard_compact_string(value: str, *, label: str) -> str:
+    if len(value) <= 96:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"[opensquilla_compacted:{label}:{len(value)}:{digest}]"
+
+
 def _compact_tool_arguments(value: str, *, preview: bool = True) -> str:
     if preview and len(value) <= _COMPACTED_TAIL_STRING_MAX_CHARS:
         return value
@@ -179,10 +194,55 @@ def _compact_tool_arguments(value: str, *, preview: bool = True) -> str:
     return json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
 
 
+def _invalid_provider_context_arguments(value: str | dict[str, Any]) -> dict[str, Any]:
+    return {
+        _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY: True,
+        "reason": "provider_context_omitted",
+    }
+
+
+def _has_provider_context_argument_marker(value: dict[str, Any]) -> bool:
+    return (
+        value.get(_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY) is True
+        or any(value.get(marker) is True for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
+    )
+
+
+def _parsed_tool_arguments(arguments: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _tool_arguments_are_invalid_provider_context(arguments: str) -> bool:
+    parsed = _parsed_tool_arguments(arguments)
+    return (
+        isinstance(parsed, dict)
+        and parsed.get(_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY) is True
+    )
+
+
+def _tool_arguments_have_compacted_marker(arguments: str) -> bool:
+    parsed = _parsed_tool_arguments(arguments)
+    return (
+        isinstance(parsed, dict)
+        and any(parsed.get(marker) is True for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
+    )
+
+
 def _compact_tool_input(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
+    if _has_provider_context_argument_marker(value):
+        return _invalid_provider_context_arguments(value)
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if any(
+        isinstance(item, str) and item.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX)
+        for item in value.values()
+    ):
+        return _invalid_provider_context_arguments(value)
     if len(raw) <= _COMPACTED_TAIL_STRING_MAX_CHARS:
         return value
     compacted = dict(value)
@@ -205,6 +265,81 @@ def _compact_tool_input(value: Any) -> Any:
     }
 
 
+def _tool_arguments_contain_projection(arguments: str) -> bool:
+    parsed = _parsed_tool_arguments(arguments)
+    if parsed is None:
+        return arguments.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX)
+    return any(
+        isinstance(value, str) and value.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX)
+        for value in parsed.values()
+    )
+
+
+def _provider_context_arguments_json(
+    arguments: str,
+    *,
+    include_compacted_markers: bool = False,
+) -> str | None:
+    if (
+        not _tool_arguments_are_invalid_provider_context(arguments)
+        and not _tool_arguments_contain_projection(arguments)
+        and not (
+            include_compacted_markers
+            and _tool_arguments_have_compacted_marker(arguments)
+        )
+    ):
+        return None
+    return json.dumps(
+        _invalid_provider_context_arguments(arguments),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _scrub_leaked_tool_argument_projections_once(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    compacted = deepcopy(payload)
+    changed = False
+    for message in compacted.get("messages", []):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                arguments = function.get("arguments")
+                normalized = (
+                    _provider_context_arguments_json(
+                        arguments,
+                        include_compacted_markers=True,
+                    )
+                    if isinstance(arguments, str)
+                    else None
+                )
+                if normalized is not None:
+                    function["arguments"] = normalized
+                    changed = True
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            tool_input = block.get("input")
+            if not isinstance(tool_input, dict):
+                continue
+            compacted_input = _compact_tool_input(tool_input)
+            if compacted_input != tool_input:
+                block["input"] = compacted_input
+                changed = True
+    return (compacted, changed) if changed else (payload, False)
+
+
 def _compact_text_block(block: dict[str, Any], *, emergency: bool = False) -> None:
     text = block.get("text")
     if not isinstance(text, str):
@@ -213,6 +348,56 @@ def _compact_text_block(block: dict[str, Any], *, emergency: bool = False) -> No
         block["text"] = _emergency_compact_string(text, label="text_block")
     else:
         block["text"] = _compact_tail_string(text, label="text_block")
+
+
+def _compact_user_content_for_provider(content: Any) -> Any:
+    if isinstance(content, str):
+        return _emergency_compact_string(content, label="user_context")
+    if not isinstance(content, list):
+        return content
+    compacted: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            compacted.append(block)
+            continue
+        next_block = dict(block)
+        if next_block.get("type") == "text" and isinstance(next_block.get("text"), str):
+            next_block["text"] = _emergency_compact_string(
+                next_block["text"],
+                label="user_text",
+            )
+        compacted.append(next_block)
+    return compacted
+
+
+def _hard_compact_content_for_provider(content: Any, *, label: str) -> Any:
+    if isinstance(content, str):
+        return _hard_compact_string(content, label=label)
+    if not isinstance(content, list):
+        return content
+    compacted: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            compacted.append(block)
+            continue
+        next_block = dict(block)
+        if isinstance(next_block.get("text"), str):
+            next_block["text"] = _hard_compact_string(
+                next_block["text"],
+                label=f"{label}_text",
+            )
+        if isinstance(next_block.get("content"), str):
+            next_block["content"] = _hard_compact_string(
+                next_block["content"],
+                label=f"{label}_content",
+            )
+        if isinstance(next_block.get("thinking"), str):
+            next_block["thinking"] = _hard_compact_string(
+                next_block["thinking"],
+                label=f"{label}_thinking",
+            )
+        compacted.append(next_block)
+    return compacted
 
 
 def _compact_tool_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
@@ -285,9 +470,14 @@ def _compact_recent_tail_payload_once(
                         continue
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
-                        function["arguments"] = _compact_tool_arguments(
-                            arguments,
-                            preview=not aggregate_tool_arguments,
+                        normalized = _provider_context_arguments_json(arguments)
+                        function["arguments"] = (
+                            normalized
+                            if normalized is not None
+                            else _compact_tool_arguments(
+                                arguments,
+                                preview=not aggregate_tool_arguments,
+                            )
                         )
         content = message.get("content")
         if not isinstance(content, list):
@@ -309,11 +499,20 @@ def _compact_recent_tail_payload_once(
 
 def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
     compacted = deepcopy(payload)
-    for message in compacted.get("messages", []):
+    messages = compacted.get("messages", [])
+    last_user_index = None
+    if isinstance(messages, list):
+        for index, message in enumerate(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                last_user_index = index
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
         role = message.get("role")
         content = message.get("content")
+        if role == "user" and index != last_user_index:
+            message["content"] = _compact_user_content_for_provider(content)
+            content = message.get("content")
         if isinstance(content, str) and role in {"assistant", "tool"}:
             message["content"] = _emergency_compact_string(
                 content,
@@ -336,9 +535,14 @@ def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dic
                         continue
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
-                        function["arguments"] = _emergency_compact_string(
-                            arguments,
-                            label="tool_arguments",
+                        normalized = _provider_context_arguments_json(arguments)
+                        function["arguments"] = (
+                            normalized
+                            if normalized is not None
+                            else _emergency_compact_string(
+                                arguments,
+                                label="tool_arguments",
+                            )
                         )
         if not isinstance(content, list):
             continue
@@ -366,6 +570,67 @@ def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dic
                 )
             elif role == "assistant" and block.get("type") == "text":
                 _compact_text_block(block, emergency=True)
+    return compacted
+
+
+def _final_hard_cap_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
+    compacted = deepcopy(payload)
+    messages = compacted.get("messages", [])
+    latest_user_index = None
+    if isinstance(messages, list):
+        for index, message in enumerate(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                latest_user_index = index
+    for index, message in enumerate(messages if isinstance(messages, list) else []):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role == "user":
+            if index != latest_user_index:
+                message["content"] = _hard_compact_content_for_provider(
+                    content,
+                    label="user_context",
+                )
+            continue
+        if role == "tool":
+            message["content"] = _hard_compact_content_for_provider(
+                content,
+                label="tool_result",
+            )
+            continue
+        if role != "assistant":
+            continue
+        message["content"] = _hard_compact_content_for_provider(
+            content,
+            label="assistant_content",
+        )
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            message["reasoning_content"] = _hard_compact_string(
+                reasoning_content,
+                label="reasoning_content",
+            )
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                normalized = _provider_context_arguments_json(arguments)
+                function["arguments"] = (
+                    normalized
+                    if normalized is not None
+                    else _hard_compact_string(
+                        arguments,
+                        label="tool_arguments",
+                    )
+                )
     return compacted
 
 
@@ -466,8 +731,9 @@ def prove_or_compact_provider_payload(
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if proof_budget <= 0:
         return payload, None
+    payload, scrubbed_projection = _scrub_leaked_tool_argument_projections_once(payload)
     try:
-        return payload, prove_provider_payload(
+        proof = prove_provider_payload(
             payload,
             projection_adapter=projection_adapter,
             proof_budget=proof_budget,
@@ -476,6 +742,11 @@ def prove_or_compact_provider_payload(
         )
     except ProviderRequestBudgetExceededError as first_error:
         first_chars = int(first_error.proof["estimated_chars"])
+    else:
+        if scrubbed_projection:
+            proof["compact_needed"] = True
+            proof["tool_argument_projection_scrubbed"] = True
+        return payload, proof
 
     tool_compacted = _compact_tool_payload_once(payload)
     tool_compacted_chars = _payload_chars(tool_compacted)
@@ -518,6 +789,39 @@ def prove_or_compact_provider_payload(
                 fallback_reason=fallback_reason,
             )
         except ProviderRequestBudgetExceededError as exc:
+            hard_compacted = _final_hard_cap_payload_once(emergency_compacted)
+            hard_compacted_chars = _payload_chars(hard_compacted)
+            try:
+                proof = prove_provider_payload(
+                    hard_compacted,
+                    projection_adapter=projection_adapter,
+                    proof_budget=proof_budget,
+                    status_projection_mode=status_projection_mode,
+                    fallback_reason=fallback_reason,
+                )
+            except ProviderRequestBudgetExceededError:
+                pass
+            else:
+                proof["retry_count"] = 4
+                proof["compact_needed"] = True
+                proof["tool_payload_compaction_not_smaller"] = (
+                    tool_compacted_chars >= first_chars
+                )
+                proof["tail_compaction_not_smaller"] = (
+                    tail_compacted_chars >= tool_compacted_chars
+                )
+                proof["emergency_current_turn_compacted"] = True
+                proof["emergency_compaction_not_smaller"] = (
+                    emergency_compacted_chars >= tail_compacted_chars
+                )
+                proof["final_hard_cap_compacted"] = True
+                proof["final_hard_cap_not_smaller"] = (
+                    hard_compacted_chars >= emergency_compacted_chars
+                )
+                proof["compaction_not_smaller"] = hard_compacted_chars >= first_chars
+                proof["recent_tail_too_large"] = False
+                proof.update(tail_metadata)
+                return hard_compacted, proof
             exc.proof["retry_count"] = 2
             exc.proof["compact_needed"] = True
             exc.proof["tool_payload_compaction_not_smaller"] = (
@@ -529,6 +833,10 @@ def prove_or_compact_provider_payload(
             exc.proof["emergency_current_turn_compacted"] = True
             exc.proof["emergency_compaction_not_smaller"] = (
                 emergency_compacted_chars >= tail_compacted_chars
+            )
+            exc.proof["final_hard_cap_compacted"] = True
+            exc.proof["final_hard_cap_not_smaller"] = (
+                hard_compacted_chars >= emergency_compacted_chars
             )
             exc.proof["compaction_not_smaller"] = emergency_compacted_chars >= first_chars
             exc.proof["recent_tail_too_large"] = bool(tail_error.proof.get("top_contributors"))

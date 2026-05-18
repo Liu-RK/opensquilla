@@ -169,14 +169,38 @@ const ChatView = (() => {
   let _searchProvider = '';
   const _PROVIDER_LOGOS = { brave: '\uD83E\uDD81', duckduckgo: '\uD83E\uDD86' }; // 🦁 🦆
 
+  function _normalizeProvider(provider) {
+    return String(provider || '').trim();
+  }
+
   function _injectProviderBadge(summary, provider) {
+    provider = _normalizeProvider(provider);
     if (!summary || !provider) return;
-    if (summary.querySelector('.chat-tool-provider')) return;
-    const badge = document.createElement('span');
-    badge.className = 'chat-tool-provider';
+    let badge = summary.querySelector('.chat-tool-provider');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'chat-tool-provider';
+      summary.appendChild(badge);
+    }
     badge.textContent = (_PROVIDER_LOGOS[provider] || '') + ' ' + provider;
     badge.title = 'Search provider: ' + provider;
-    summary.appendChild(badge);
+  }
+
+  function _refreshRunningSearchProviderBadges(provider) {
+    provider = _normalizeProvider(provider);
+    if (!_el || !provider) return;
+    _el
+      .querySelectorAll('.chat-tools-collapse--running[data-tool-name="web_search"] .chat-tools-summary')
+      .forEach(summary => _injectProviderBadge(summary, provider));
+  }
+
+  function _setSearchProvider(provider, options = {}) {
+    provider = _normalizeProvider(provider);
+    if (!provider) return;
+    _searchProvider = provider;
+    if (options.refreshRunning !== false) {
+      _refreshRunningSearchProviderBadges(provider);
+    }
   }
 
   function _toolResultProvider(payloadOrSegment, content) {
@@ -809,7 +833,7 @@ const ChatView = (() => {
     // Fetch active search provider on every render so config changes take effect immediately
     if (_rpc) {
       _rpc.call('tools.search_provider', {}).then(res => {
-        if (res && res.provider) _searchProvider = res.provider;
+        if (res && res.provider) _setSearchProvider(res.provider);
       }).catch(() => { /* ignore; badge will fill in from result JSON */ });
     }
 
@@ -3602,7 +3626,7 @@ const ChatView = (() => {
         if (toolName === 'web_search') {
           const provider = _toolResultProvider(payload, content);
           if (provider) {
-            if (!_searchProvider) _searchProvider = provider;
+            _setSearchProvider(provider, { refreshRunning: false });
             _injectProviderBadge(details.querySelector('.chat-tools-summary'), provider);
           }
         }
@@ -3787,7 +3811,7 @@ const ChatView = (() => {
               if (_toolNameById[toolId] === 'web_search' && content) {
                 const provider = _toolResultProvider(seg, content);
                 if (provider) {
-                  if (!_searchProvider) _searchProvider = provider;
+                  _setSearchProvider(provider, { refreshRunning: false });
                   _injectProviderBadge(details.querySelector('.chat-tools-summary'), provider);
                 }
               }

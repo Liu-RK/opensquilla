@@ -48,6 +48,8 @@ class ToolResultBudgetPolicy:
     max_single_external_result_chars: int = 12_000
     max_tool_result_chars_per_turn: int = 96_000
     max_external_tool_result_chars_per_turn: int = 48_000
+    min_error_result_chars: int = 512
+    min_control_result_chars: int = 512
     max_web_fetch_chars: int = 12_000
     max_web_search_results: int = 10
 
@@ -116,6 +118,13 @@ class ToolResultBudgetTracker:
                 else remaining_total
             )
             allowed = max(0, min(single_limit, remaining_total, remaining_external))
+            if budget_class is ToolResultBudgetClass.ERROR:
+                allowed = max(allowed, min(single_limit, self.policy.min_error_result_chars))
+            elif budget_class is ToolResultBudgetClass.CONTROL:
+                allowed = max(
+                    allowed,
+                    min(single_limit, self.policy.min_control_result_chars),
+                )
             if original_chars <= allowed:
                 self._tool_chars_used += original_chars
                 if budget_class is ToolResultBudgetClass.EXTERNAL:

@@ -19,6 +19,7 @@ from opensquilla.gateway.attachment_ingest import (
 )
 from opensquilla.gateway.channel_dispatch import (
     _artifact_fallback_lines,
+    _build_reply_message,
     _deliver_artifacts_as_channel_files,
     _deliver_runtime_channel_reply,
     _dispatch_combined_message_after_debounce,
@@ -60,6 +61,18 @@ def _tool_ctx(agent_id: str = "main") -> SimpleNamespace:
 def _exact_pdf(size: int) -> bytes:
     header = b"%PDF-1.4\n"
     return header + b"a" * (size - len(header))
+
+
+def test_channel_reply_sanitizes_provider_compaction_markers() -> None:
+    reply = _build_reply_message(
+        _FakeChannel(),
+        "Reply to user:\n[opensquilla_compacted:assistant_content:165:82bb251511c20cec]\n?",
+        _message(),
+    )
+
+    assert "opensquilla_compacted" not in reply.content
+    assert "assistant_content" not in reply.content
+    assert reply.content == "Reply to user:\n?"
 
 
 def test_channel_stream_policy_prefers_adapter_stream_updates() -> None:
@@ -958,6 +971,45 @@ async def test_direct_streaming_fallback_sanitizes_queued_directive_tags() -> No
     fallback = channel.sent[-1].content
     assert "[[reply_to_current]]" not in fallback
     assert "hidden" in fallback
+
+
+@pytest.mark.asyncio
+async def test_direct_streaming_sanitizes_split_provider_compaction_marker() -> None:
+    class StreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivered_chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.delivered_chunks.append(chunk)
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="Visible\n[opensquilla_")
+            yield TextDeltaEvent(text="compacted:assistant_content:165:abc]\nDone")
+            yield DoneEvent()
+
+    channel = StreamingChannel()
+    config = SimpleNamespace(
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:stream-marker",
+        _FakeEventBridge(),
+        None,
+        config,
+    )
+
+    delivered = "".join(channel.delivered_chunks)
+    assert "opensquilla_compacted" not in delivered
+    assert "assistant_content" not in delivered
+    assert delivered == "Visible\nDone"
 
 
 @pytest.mark.asyncio

@@ -153,6 +153,20 @@ def test_chat_live_tool_result_provider_badge_is_web_search_only() -> None:
     assert "_injectProviderBadge" in guarded_block
 
 
+def test_chat_search_provider_badge_updates_running_web_search_cards() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    assert "let badge = summary.querySelector('.chat-tool-provider');" in source
+    assert "badge = document.createElement('span');" in source
+    assert "function _refreshRunningSearchProviderBadges(provider)" in source
+    assert (
+        '.chat-tools-collapse--running[data-tool-name="web_search"] .chat-tools-summary'
+        in source
+    )
+    assert "_setSearchProvider(res.provider)" in source
+    assert "_setSearchProvider(provider, { refreshRunning: false })" in source
+
+
 def test_chat_url_agent_query_resolves_default_webchat_session() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

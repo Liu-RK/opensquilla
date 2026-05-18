@@ -197,6 +197,18 @@ def _compute_channel_cap(config: Any) -> int:
 _DIRECTIVE_TAG_RE = re.compile(
     r"\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\]\s*"
 )
+_INTERNAL_COMPACTION_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*\["
+    r"(?:opensquilla_compacted:[^\]\r\n]*|"
+    r"provider_request_[^\]\r\n]*compacted:[^\]\r\n]*)"
+    r"\][ \t]*(?:\r?\n)?"
+    r"|\[(?:opensquilla_compacted:[^\]\r\n]*|"
+    r"provider_request_[^\]\r\n]*compacted:[^\]\r\n]*)\]"
+)
+_INTERNAL_COMPACTION_MARKER_PREFIXES = (
+    "[opensquilla_compacted:",
+    "[provider_request_",
+)
 _DIRECTIVE_TAG_BUFFER_LIMIT = 256
 _DEFAULT_STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
@@ -206,8 +218,31 @@ def _strip_inline_directive_tags(content: str) -> str:
     return _DIRECTIVE_TAG_RE.sub("", content)
 
 
+def _strip_internal_compaction_markers(content: str) -> str:
+    return _INTERNAL_COMPACTION_MARKER_RE.sub("", content)
+
+
+def _split_pending_internal_compaction_marker(content: str) -> tuple[str, str]:
+    start = content.rfind("[")
+    if start == -1:
+        return content, ""
+    suffix = content[start:]
+    if "\n" in suffix or "\r" in suffix or "]" in suffix:
+        return content, ""
+    if len(suffix) > _DIRECTIVE_TAG_BUFFER_LIMIT:
+        return content, ""
+    if any(
+        prefix.startswith(suffix) or suffix.startswith(prefix)
+        for prefix in _INTERNAL_COMPACTION_MARKER_PREFIXES
+    ):
+        return content[:start], suffix
+    return content, ""
+
+
 def _sanitize_outgoing_message(message: OutgoingMessage) -> OutgoingMessage:
-    cleaned = _strip_inline_directive_tags(message.content)
+    cleaned = _strip_internal_compaction_markers(
+        _strip_inline_directive_tags(message.content)
+    )
     if cleaned == message.content:
         return message
     return message.model_copy(update={"content": cleaned})
@@ -222,9 +257,16 @@ class _DirectiveTagStreamSanitizer:
     def clean(self, chunk: str) -> str:
         text = self._pending + chunk
         self._pending = ""
-        cleaned = _strip_inline_directive_tags(text)
+        cleaned = _strip_internal_compaction_markers(
+            _strip_inline_directive_tags(text)
+        )
         start = cleaned.rfind("[[")
         if start == -1:
+            cleaned, pending_marker = _split_pending_internal_compaction_marker(
+                cleaned
+            )
+            if pending_marker:
+                self._pending = pending_marker
             return cleaned
         suffix = cleaned[start:]
         if (
@@ -234,12 +276,16 @@ class _DirectiveTagStreamSanitizer:
         ):
             self._pending = suffix
             return cleaned[:start]
+        cleaned, pending_marker = _split_pending_internal_compaction_marker(cleaned)
+        if pending_marker:
+            self._pending = pending_marker
+            return cleaned
         return cleaned
 
     def flush(self) -> str:
         pending = self._pending
         self._pending = ""
-        return _strip_inline_directive_tags(pending)
+        return _strip_internal_compaction_markers(_strip_inline_directive_tags(pending))
 
 
 def _accepts_keyword_arg(callable_obj: Any, name: str) -> bool:

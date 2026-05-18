@@ -167,6 +167,26 @@ class CopiedProjectionToolLoopCapturingProvider(LargeArgumentToolLoopCapturingPr
         raise AssertionError("provider request did not contain a projected code argument")
 
 
+class CompactedToolArgumentsProvider(ToolLoopCapturingProvider):
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if call_number == 1:
+            yield ProviderToolUseStart(tool_use_id="tool-compact", tool_name="exec_command")
+            yield ProviderToolUseEnd(
+                tool_use_id="tool-compact",
+                tool_name="exec_command",
+                arguments={
+                    "_opensquilla_compacted_tool_arguments": True,
+                    "original_chars": 549,
+                    "sha256": "0" * 64,
+                    "argument_keys": ["command", "timeout"],
+                },
+            )
+            yield ProviderDone(stop_reason="tool_use", input_tokens=3, output_tokens=1)
+            return
+        yield ProviderText(text="done")
+        yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
+
+
 class CapturingTurnLog:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
@@ -572,6 +592,50 @@ def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None
     assert len(json.dumps(projected_block.input, ensure_ascii=False)) < 1200
     assert agent.config.metadata["tool_argument_projection_applied"] is True
     assert agent.config.metadata["tool_argument_projection_calls"] == 1
+
+
+def test_agent_provider_view_scrubs_legacy_projected_tool_argument(tmp_path) -> None:
+    projection = (
+        "[tool_use_argument_projection]\n"
+        "tool: execute_code\n"
+        "tool_use_id: tool-legacy\n"
+        "field: code\n"
+        "sha256: missing\n"
+        "tool_argument_handle: tr-missing\n"
+        "head:\nprint('legacy')"
+    )
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+    )
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id="tool-legacy",
+                    name="execute_code",
+                    input={"code": projection, "timeout": 99},
+                )
+            ],
+        )
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    block = projected[0].content[0]
+    assert isinstance(block, ContentBlockToolUse)
+    assert "tool_use_argument_projection" not in block.input["code"]
+    assert "invalid_provider_context_projection:execute_code.code" in block.input["code"]
+    stored_contents = [
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "tool-results").rglob("content.txt")
+    ]
+    assert all("tool_use_argument_projection" not in content for content in stored_contents)
 
 
 def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> None:
@@ -1113,7 +1177,7 @@ async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_agent_rehydrates_copied_tool_argument_projection_before_dispatch(
+async def test_agent_refuses_copied_tool_argument_projection_without_dispatch(
     tmp_path,
 ) -> None:
     large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
@@ -1146,11 +1210,9 @@ async def test_agent_rehydrates_copied_tool_argument_projection_before_dispatch(
     events = [event async for event in agent.run_turn("hello")]
 
     assert any(event.kind == "done" for event in events)
-    assert dispatched_code_arguments == [large_code, large_code]
-    assert dispatched_arguments == [
-        {"code": large_code, "timeout": 10},
-        {"code": large_code, "timeout": 10},
-    ]
+    assert len(provider.calls) == 2
+    assert dispatched_code_arguments == [large_code]
+    assert dispatched_arguments == [{"code": large_code, "timeout": 10}]
     assert all(
         not value.startswith("[tool_use_argument_projection]\n")
         for value in dispatched_code_arguments
@@ -1160,8 +1222,13 @@ async def test_agent_rehydrates_copied_tool_argument_projection_before_dispatch(
         for event in events
         if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-2"
     )
-    assert result_event.arguments["code"] == large_code
-    assert result_event.arguments["timeout"] == 10
+    assert result_event.is_error is True
+    assert "provider-only compacted tool argument" in result_event.result
+    assert "Projected tool argument" not in result_event.result
+    assert result_event.arguments["code"] != large_code
+    assert not result_event.arguments["code"].startswith("[tool_use_argument_projection]\n")
+    assert "tool_use_argument_projection" not in result_event.arguments["code"]
+    assert result_event.arguments["timeout"] == 99
     history_block = next(
         block
         for message in agent._history
@@ -1169,8 +1236,19 @@ async def test_agent_rehydrates_copied_tool_argument_projection_before_dispatch(
         for block in message.content
         if isinstance(block, ContentBlockToolUse) and block.id == "tool-2"
     )
-    assert history_block.input["code"] == large_code
-    assert history_block.input["timeout"] == 10
+    assert history_block.input["code"] == result_event.arguments["code"]
+    assert not history_block.input["code"].startswith("[tool_use_argument_projection]\n")
+    assert "tool_use_argument_projection" not in history_block.input["code"]
+    assert history_block.input["timeout"] == 99
+
+    follow_up_events = [event async for event in agent.run_turn("continue")]
+    assert any(event.kind == "done" for event in follow_up_events)
+    replay_payload = json.dumps(
+        [message.model_dump(mode="json") for message in provider.calls[-1]["messages"]],
+        ensure_ascii=False,
+    )
+    assert "tool-2" not in replay_payload
+    assert "invalid_provider_context_projection" not in replay_payload
 
 
 @pytest.mark.asyncio
@@ -1222,7 +1300,98 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
     )
     assert dispatched_tool_ids == ["tool-1"]
     assert result_event.is_error is True
-    assert "refusing to execute provider-context projection" in result_event.result
+    assert "provider-only compacted tool argument" in result_event.result
+    assert "Projected tool argument" not in result_event.result
+    assert not result_event.arguments["code"].startswith("[tool_use_argument_projection]\n")
+    assert "tool_use_argument_projection" not in result_event.arguments["code"]
+
+    history_block = next(
+        block
+        for message in agent._history
+        if message.role == "assistant" and isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, ContentBlockToolUse) and block.id == "tool-2"
+    )
+    assert history_block.input["code"] == result_event.arguments["code"]
+    assert not history_block.input["code"].startswith("[tool_use_argument_projection]\n")
+    assert "tool_use_argument_projection" not in history_block.input["code"]
+
+    second_events = [event async for event in agent.run_turn("hi")]
+
+    assert any(event.kind == "done" for event in second_events)
+    replay_payload = json.dumps(
+        [message.model_dump(mode="json") for message in provider.calls[-1]["messages"]],
+        ensure_ascii=False,
+    )
+    assert "tool_use_id: tool-2" not in replay_payload
+    stored_contents = [
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "tool-results").rglob("content.txt")
+    ]
+    assert stored_contents
+    assert all("tool_use_argument_projection" not in content for content in stored_contents)
+
+
+@pytest.mark.asyncio
+async def test_agent_refuses_copied_provider_compacted_tool_arguments(tmp_path) -> None:
+    provider = CompactedToolArgumentsProvider()
+    dispatched: list[dict[str, Any]] = []
+
+    async def tool_handler(call: Any) -> ToolResult:
+        dispatched.append(call.arguments)
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="tool ok",
+        )
+
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_iterations=2,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+        ),
+        tool_handler=tool_handler,
+    )
+
+    events = [event async for event in agent.run_turn("open in chrome")]
+
+    assert any(event.kind == "done" for event in events)
+    assert len(provider.calls) == 1
+    assert dispatched == []
+    result_event = next(
+        event
+        for event in events
+        if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-compact"
+    )
+    assert result_event.is_error is True
+    assert "provider-only compacted tool arguments" in result_event.result
+    assert "ProjectedToolArgumentsError" not in result_event.result
+    assert "_opensquilla_compacted_tool_arguments" not in result_event.arguments
+
+    history_block = next(
+        block
+        for message in agent._history
+        if message.role == "assistant" and isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, ContentBlockToolUse) and block.id == "tool-compact"
+    )
+    assert history_block.input == result_event.arguments
+    assert "_opensquilla_compacted_tool_arguments" not in history_block.input
+
+    follow_up_events = [event async for event in agent.run_turn("continue")]
+    assert any(event.kind == "done" for event in follow_up_events)
+    replay_payload = json.dumps(
+        [message.model_dump(mode="json") for message in provider.calls[-1]["messages"]],
+        ensure_ascii=False,
+    )
+    assert "_opensquilla_compacted_tool_arguments" not in replay_payload
+    assert "_invalid_provider_context_arguments" not in replay_payload
+    assert "provider_context_omitted" not in replay_payload
+    assert "tool-compact" not in replay_payload
 
 
 @pytest.mark.asyncio
