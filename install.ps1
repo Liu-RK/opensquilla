@@ -54,7 +54,6 @@ $validExtras = @(
     'dingtalk',
     'wecom',
     'qq',
-    'msteams',
     'matrix',
     'matrix-e2e',
     'document-extras'

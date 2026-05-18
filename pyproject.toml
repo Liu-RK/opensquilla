@@ -85,6 +85,7 @@ telegram = []
 dingtalk = []
 wecom = []
 qq = []
+matrix = ["matrix-nio>=0.25,<0.26", "markdown>=3.0"]
 matrix-e2e = ["matrix-nio[e2e]>=0.25,<0.26", "markdown>=3.0"]
 document-extras = [
     "weasyprint>=60.0",

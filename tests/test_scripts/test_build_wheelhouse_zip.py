@@ -442,7 +442,7 @@ def test_render_readme_is_platform_specific_for_windows_portable() -> None:
     assert "bash start.sh" not in readme
     assert "Python is bundled in this zip." in readme
     assert "Complete onboarding." in readme
-    assert "The recommended portable package includes Feishu websocket support." in readme
+    assert "Feishu" not in readme
     assert "Advanced portable usage" in readme
     assert "OPENROUTER_API_KEY" in readme
     assert "writes an OpenRouter env-reference config" in readme
@@ -476,7 +476,7 @@ def test_render_readme_is_platform_specific_for_macos_portable() -> None:
     assert ".\\start.ps1" not in readme
     assert "Python is bundled in this zip." in readme
     assert "Complete onboarding." in readme
-    assert "The recommended portable package includes Feishu websocket support." in readme
+    assert "Feishu" not in readme
     assert "later starts let you review or change the config" in readme
     assert "skip setup when it is complete" not in readme
     assert "does not install a global `opensquilla` command" not in readme

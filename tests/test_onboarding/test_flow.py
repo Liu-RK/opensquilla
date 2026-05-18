@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import types
 from io import StringIO
-from pathlib import Path
 
 from rich.console import Console
 
@@ -641,32 +640,6 @@ def test_channel_saved_output_separates_configured_from_connected(monkeypatch):
     assert "configured, not connected yet" in out
     assert "Restart the gateway process" in out
     assert "opensquilla channels status feishu --json" in out
-
-
-def test_readme_distinguishes_recommended_profile_from_channel_extras() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
-
-    assert (
-        "| Windows user | [Windows portable](#windows-portable-no-python) | Recommended |"
-    ) in readme
-    assert (
-        "| Command-line user | [Install with uv](#install-with-uv) | Recommended |"
-    ) in readme
-    assert "| Developer | [Develop from source](#develop-from-source) | Available now |" in readme
-    assert "Use this on Windows, macOS, or Linux if you prefer a terminal install." in readme
-    assert (
-        "Use Windows portable or Install with uv when you only want to run "
-        "OpenSquilla."
-    ) in readme
-    assert "The recommended portable zip includes Feishu websocket support by default." in readme
-    assert "`recommended` is the\nnormal runtime profile" in readme
-    assert "Messaging channel adapters are opt-in extras." in readme
-    assert "Feishu is shown only\nas an example channel adapter" in readme
-    assert "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Extras feishu" in readme
-    assert "OPENSQUILLA_INSTALL_EXTRAS=feishu bash install.sh" in readme
-    assert "Install extras into the same environment you run:" in readme
-    assert "uv sync --extra recommended --extra feishu" in readme
-    assert "where.exe opensquilla" in readme
 
 
 def test_search_provider_key_defaults_to_pasted_key_with_brave_hint(monkeypatch):

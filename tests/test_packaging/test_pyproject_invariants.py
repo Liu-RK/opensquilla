@@ -51,11 +51,17 @@ def test_channel_sdks_in_base(project_table: dict) -> None:
 
 
 def test_no_dead_extras(project_table: dict) -> None:
-    """msteams / matrix extras have no real code consumer and must be removed."""
+    """msteams extra is intentionally absent; matrix extra installs matrix-nio."""
 
     extras = project_table.get("optional-dependencies", {})
-    assert "msteams" not in extras, "msteams extra is dead — its declared SDK is never imported"
-    assert "matrix" not in extras, "matrix extra is dead — code uses httpx, not matrix-nio"
+    assert "msteams" not in extras, (
+        "msteams extra stays absent: the adapter is text-only and not advertised"
+    )
+    assert "matrix" in extras, "matrix extra must exist and pull matrix-nio"
+    matrix_specs = extras["matrix"]
+    assert any("matrix-nio" in spec for spec in matrix_specs), (
+        "matrix extra must declare matrix-nio (without [e2e]); use matrix-e2e for E2EE"
+    )
 
 
 def test_legacy_extras_are_empty(project_table: dict) -> None:

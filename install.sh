@@ -69,7 +69,7 @@ fi
 dry_run="${OPENSQUILLA_INSTALL_DRY_RUN:-0}"
 profile="${cli_profile:-${OPENSQUILLA_INSTALL_PROFILE:-recommended}}"
 
-valid_extras=" feishu telegram dingtalk wecom qq msteams matrix matrix-e2e document-extras "
+valid_extras=" feishu telegram dingtalk wecom qq matrix matrix-e2e document-extras "
 extras_csv="${OPENSQUILLA_INSTALL_EXTRAS:-}"
 if [[ -n "${cli_extras}" ]]; then
     extras_csv="${extras_csv}${extras_csv:+,}${cli_extras}"

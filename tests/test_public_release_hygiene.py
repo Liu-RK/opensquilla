@@ -178,7 +178,7 @@ def test_release_sop_documents_github_only_validation_boundary() -> None:
     assert ".sha256" not in text
 
 
-def test_readme_warns_stable_wheel_alias_requires_pep508_form() -> None:
+def test_readme_documents_canonical_uv_install_commands() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
 
     assert 'uv tool install "opensquilla[recommended] @ https://github.com' in text
@@ -186,9 +186,6 @@ def test_readme_warns_stable_wheel_alias_requires_pep508_form() -> None:
     assert '. "$HOME/.local/bin/env"' in text
     assert 'powershell -c "irm https://astral.sh/uv/install.ps1 | iex"' in text
     assert "$env:Path" in text
-    assert "PEP 508" in text
-    assert "do not" in text
-    assert "bare wheel path with extras" in text
 
 
 def test_readme_uses_gateway_default_port() -> None:

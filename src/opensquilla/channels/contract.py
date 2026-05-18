@@ -29,7 +29,6 @@ PUBLIC_VENDOR_ADAPTERS: tuple[str, ...] = (
     "dingtalk",
     "wecom",
     "qq",
-    "msteams",
     "matrix",
     "telegram",
 )

@@ -1160,7 +1160,6 @@ def render_readme(
         windows_command = ".\\start.ps1"
         python_note = "Python is bundled in this zip."
         setup_note = (
-            "The recommended portable package includes Feishu websocket support. "
             "Config, workspace, logs, memory, and runtime state use the normal "
             "user-level OpenSquilla directory."
         )

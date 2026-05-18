@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from dataclasses import dataclass
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, FuzzyCompleter, WordCompleter
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.formatted_text import HTML, AnyFormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.styles import Style
 
 from opensquilla.cli.repl.commands import slash_words
-from opensquilla.cli.ui import console
+from opensquilla.cli.ui import (
+    ACCENT,
+    ACCENT_DEEP,
+    ACCENT_INK,
+    ACCENT_SOFT,
+    console,
+)
 from opensquilla.engine.commands import DEFAULT_REGISTRY, Surface, parse_surface
 from opensquilla.paths import state_dir
 
@@ -79,22 +87,58 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_PROMPT_STYLE = Style.from_dict({
+    "completion-menu.completion": f"bg:{ACCENT_INK} {ACCENT_SOFT}",
+    "completion-menu.completion.current": f"bg:{ACCENT} {ACCENT_INK} bold",
+    "completion-menu.meta.completion": f"bg:{ACCENT_INK} {ACCENT_DEEP} italic",
+    "completion-menu.meta.completion.current": f"bg:{ACCENT} {ACCENT_INK} italic",
+    "completion-menu.multi-column-meta": f"bg:{ACCENT_INK} {ACCENT_DEEP}",
+    "scrollbar.background": f"bg:{ACCENT_INK}",
+    "scrollbar.button": f"bg:{ACCENT_DEEP}",
+})
+
+
+_PREFIX_RE = re.compile(r"^\[(?P<model>.+?) (?P<mode>\w+)\] (?P<role>\w+) > $")
+
+
 def _bottom_toolbar() -> HTML:
     if _toolbar_context.get("suppress"):
         return HTML("")
-    model = _toolbar_context.get("model")
-    session_id = _toolbar_context.get("session_id")
+    model = _toolbar_context.get("model") or ""
+    session_id = _toolbar_context.get("session_id") or ""
 
-    parts: list[str] = []
-    if model:
-        parts.append(_html_escape(model))
-    if session_id:
-        parts.append(f"session {_html_escape(session_id)}")
-    parts.append("⏎ send")
-    parts.append("/help")
+    model_short = model.rsplit("/", 1)[-1] if model else ""
+    session_short = session_id.rsplit(":", 1)[-1] if session_id else session_id
 
-    middle = " · ".join(parts)
-    return HTML(f"<style fg='ansibrightblack'>── {middle} ────</style>")
+    blocks: list[str] = []
+    if model_short:
+        blocks.append(
+            f"<b><style bg='{ACCENT}' fg='{ACCENT_INK}'> {_html_escape(model_short)} </style></b>"
+        )
+    if session_short:
+        blocks.append(
+            f"<style bg='{ACCENT_INK}' fg='{ACCENT_SOFT}'> {_html_escape(session_short)} </style>"
+        )
+    blocks.append(f"<style bg='{ACCENT_INK}' fg='{ACCENT}'> ⏎ send </style>")
+    blocks.append(f"<b><style bg='{ACCENT_SOFT}' fg='{ACCENT_INK}'> /help </style></b>")
+    return HTML("".join(blocks))
+
+
+def _format_prefix(prefix: str) -> AnyFormattedText:
+    match = _PREFIX_RE.match(prefix)
+    if not match:
+        return prefix
+    model_alias = _html_escape(match["model"])
+    mode = _html_escape(match["mode"])
+    role = _html_escape(match["role"])
+    return HTML(
+        f"<style fg='{ACCENT_DEEP}'>[</style>"
+        f"<b><style fg='{ACCENT}'>{model_alias}</style></b>"
+        f"<style fg='{ACCENT_SOFT}'> {mode}</style>"
+        f"<style fg='{ACCENT_DEEP}'>]</style> "
+        f"<b><style fg='{ACCENT}'>{role}</style></b>"
+        f"<style fg='{ACCENT_DEEP}'> &gt; </style>"
+    )
 
 
 def _chrome_top(label: str = "you") -> None:
@@ -119,6 +163,7 @@ def _prompt_session(surface: Surface | str = Surface.CLI_GATEWAY) -> PromptSessi
             enable_history_search=True,
             key_bindings=_key_bindings(),
             bottom_toolbar=_bottom_toolbar,
+            style=_PROMPT_STYLE,
         )
     if parsed == Surface.CLI_GATEWAY:
         _session = _sessions[parsed]
@@ -164,7 +209,7 @@ async def prompt_user(
 
     try:
         with patch_stdout():
-            return await _prompt_session(surface).prompt_async(prefix)
+            return await _prompt_session(surface).prompt_async(_format_prefix(prefix))
     except EOFError:
         return None
     finally:

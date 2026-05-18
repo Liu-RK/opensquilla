@@ -51,7 +51,6 @@ BUNDLED_CHANNELS: tuple[str, ...] = (
     "discord",
     "feishu",
     "matrix",
-    "msteams",
     "qq",
     "slack",
     "telegram",
