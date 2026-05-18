@@ -88,8 +88,8 @@ class _FakeScheduler:
         job = CronJob(
             id=f"job-{len(self.jobs) + 1}",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],
             session_target=kwargs["session_target"],
@@ -231,7 +231,7 @@ async def test_channel_user_can_add_reminder(fake_scheduler) -> None:
     with _with_ctx(_channel_ctx("agent:main:feishu:user-1")):
         raw = await cron_tool(
             action="add",
-            schedule="every 1m",
+            schedule={"kind": "every", "every_seconds": 60},
             task="提醒喝水",
             job_kind="system_event",
             session_target="main",
@@ -254,7 +254,7 @@ async def test_channel_user_can_schedule_isolated_agent_turn(fake_scheduler) -> 
     with _with_ctx(_channel_ctx("agent:main:feishu:user-1")):
         raw = await cron_tool(
             action="add",
-            schedule="0 9 * * *",
+            schedule={"kind": "cron", "expr": "0 9 * * *"},
             task="总结昨日邮件",
             job_kind="agent_turn",
             session_target="isolated",
@@ -276,7 +276,7 @@ async def test_channel_user_cannot_inject_target_session_key(fake_scheduler) -> 
         with pytest.raises(Exception, match="target_session_key"):
             await cron_tool(
                 action="add",
-                schedule="every 5m",
+                schedule={"kind": "every", "every_seconds": 300},
                 task="leak",
                 job_kind="agent_turn",
                 session_target="session",
@@ -289,7 +289,7 @@ async def test_channel_user_cannot_use_tool_policy(fake_scheduler) -> None:
         with pytest.raises(Exception, match="tool_policy"):
             await cron_tool(
                 action="add",
-                schedule="every 5m",
+                schedule={"kind": "every", "every_seconds": 300},
                 task="x",
                 job_kind="system_event",
                 session_target="main",
@@ -317,7 +317,7 @@ async def test_channel_user_without_session_snapshot_falls_back_to_ctx(monkeypat
         with _with_ctx(ctx):
             raw = await cron_tool(
                 action="add",
-                schedule="every 1m",
+                schedule={"kind": "every", "every_seconds": 60},
                 task="hi",
                 job_kind="system_event",
                 session_target="main",
@@ -427,7 +427,7 @@ async def test_owner_path_unchanged(fake_scheduler) -> None:
     with _with_ctx(_owner_ctx()):
         raw = await cron_tool(
             action="add",
-            schedule="0 9 * * *",
+            schedule={"kind": "cron", "expr": "0 9 * * *"},
             task="Morning brief",
             job_kind="agent_turn",
             session_target="session",

@@ -20,6 +20,7 @@ from opensquilla.scheduler.types import (
     CronJob,
     DeliveryConfig,
     DeliveryMode,
+    ScheduleKind,
     SessionTarget,
 )
 
@@ -66,7 +67,8 @@ async def test_ops_add_with_webhook_delivery_persists(tmp_path: Path) -> None:
         )
         job = await ops.add(
             name="hook",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.ISOLATED,
@@ -96,7 +98,8 @@ async def test_ops_add_rejects_webhook_without_url(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="webhook URL is required"):
             await ops.add(
                 name="bad",
-                schedule_raw="*/5 * * * *",
+                schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
                 handler_key="agent_run",
                 payload=make_agent_turn_payload("x"),
                 session_target=SessionTarget.ISOLATED,
@@ -115,7 +118,8 @@ async def test_ops_add_rejects_webhook_with_bad_scheme(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="http or https"):
             await ops.add(
                 name="bad",
-                schedule_raw="*/5 * * * *",
+                schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
                 handler_key="agent_run",
                 payload=make_agent_turn_payload("x"),
                 session_target=SessionTarget.ISOLATED,
@@ -138,7 +142,8 @@ async def test_ops_add_allows_webhook_on_main_target(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="main-hook",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="system_event",
             payload=make_system_event_payload("reminder"),
             session_target=SessionTarget.MAIN,

@@ -36,8 +36,8 @@ class _FakeScheduler:
         return CronJob(
             id="job-w",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],
             session_target=kwargs["session_target"],

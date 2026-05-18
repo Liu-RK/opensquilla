@@ -44,7 +44,8 @@ async def test_ops_add_with_jitter_zero_yields_no_jitter(tmp_path: Path) -> None
         ops = SchedulerOps(store)
         job = await ops.add(
             name="exact",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,
@@ -63,7 +64,8 @@ async def test_ops_add_with_explicit_jitter_uses_that_value(tmp_path: Path) -> N
         ops = SchedulerOps(store)
         job = await ops.add(
             name="stag",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,
@@ -83,7 +85,8 @@ async def test_ops_add_with_none_jitter_uses_auto_compute(tmp_path: Path) -> Non
         ops = SchedulerOps(store)
         job = await ops.add(
             name="auto",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,
@@ -106,8 +109,8 @@ class _FakeScheduler:
         return CronJob(
             id="job-x",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             jitter_seconds=kwargs.get("jitter_seconds") or 0.0,
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],

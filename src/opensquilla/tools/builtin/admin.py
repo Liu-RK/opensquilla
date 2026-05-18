@@ -9,6 +9,12 @@ from typing import Any, Protocol
 
 import structlog
 
+from opensquilla.scheduler.parser import (
+    CronParseError,
+    parse_cron,
+    parse_iso_at,
+    validate_tz,
+)
 from opensquilla.scheduler.payloads import (
     SYSTEM_EVENT_KIND,
     make_agent_turn_payload,
@@ -18,6 +24,7 @@ from opensquilla.scheduler.types import (
     DeliveryConfig,
     DeliveryMode,
     ReplyTargetSnapshot,
+    ScheduleKind,
     SessionTarget,
 )
 from opensquilla.tools.registry import tool
@@ -94,7 +101,10 @@ class _SchedulerProtocol(Protocol):
     async def add_job(
         self,
         name: str,
-        schedule_raw: str | None = None,
+        *,
+        schedule_kind: Any,
+        schedule_value: str,
+        schedule_tz: str = "",
         handler_key: str = "agent_run",
         payload: dict[Any, Any] | None = None,
         session_target: SessionTarget = SessionTarget.ISOLATED,
@@ -103,9 +113,9 @@ class _SchedulerProtocol(Protocol):
         wake_mode: str = "now",
         max_retries: int = 3,
         origin_session_key: str = "",
-        cron_expr: str | None = None,
         delivery: DeliveryConfig | None = None,
         tool_policy: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> Any: ...
 
     async def update_job(self, job_id: str, **patch: Any) -> Any: ...
@@ -145,6 +155,107 @@ def gateway_config_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_tool_schedule(
+    schedule: Any,
+) -> tuple[ScheduleKind, str, str]:
+    """Validate the structured `schedule` param from the LLM tool call.
+
+    Returns ``(ScheduleKind, schedule_value, schedule_tz)`` ready for
+    ``add_job(schedule_kind=..., schedule_value=..., schedule_tz=...)``.
+
+    Raises ``ToolError`` whose message names the offending field and shows the
+    accepted shape so the model can self-correct on the next turn.
+    """
+    if not isinstance(schedule, dict):
+        raise ToolError(
+            "schedule must be an object with shape "
+            "{kind: 'cron'|'every'|'at', ...}; "
+            f"got {type(schedule).__name__}"
+        )
+    kind_raw = schedule.get("kind")
+    if not isinstance(kind_raw, str) or not kind_raw:
+        raise ToolError("schedule.kind must be one of: cron, every, at")
+    try:
+        kind = ScheduleKind(kind_raw)
+    except ValueError as exc:
+        raise ToolError(
+            f"schedule.kind must be one of: cron, every, at; got {kind_raw!r}"
+        ) from exc
+
+    if kind == ScheduleKind.CRON:
+        expr = schedule.get("expr")
+        if not isinstance(expr, str) or not expr.strip():
+            raise ToolError(
+                "schedule.expr required when kind='cron'; "
+                "expected 5-field POSIX cron, e.g. '*/5 * * * *'"
+            )
+        expr = expr.strip()
+        try:
+            parse_cron(expr)
+        except CronParseError as exc:
+            raise ToolError(
+                f"schedule.expr invalid: {exc}; expected 5-field POSIX cron"
+            ) from exc
+        tz_raw = schedule.get("tz") or ""
+        if not isinstance(tz_raw, str):
+            raise ToolError(
+                "schedule.tz must be a string IANA timezone name like 'Asia/Shanghai'"
+            )
+        tz_value = tz_raw.strip()
+        try:
+            validate_tz(tz_value)
+        except ValueError as exc:
+            raise ToolError(
+                f"schedule.tz invalid: {exc}; expected IANA name like 'Asia/Shanghai'"
+            ) from exc
+        return kind, expr, tz_value
+
+    if kind == ScheduleKind.EVERY:
+        every_seconds = schedule.get("every_seconds")
+        if not isinstance(every_seconds, int) or isinstance(every_seconds, bool):
+            raise ToolError(
+                "schedule.every_seconds required (integer >= 1) when kind='every'"
+            )
+        if every_seconds < 1:
+            raise ToolError("schedule.every_seconds must be >= 1 second")
+        anchor_at = schedule.get("anchor_at")
+        if anchor_at is not None and anchor_at != "":
+            if not isinstance(anchor_at, str):
+                raise ToolError(
+                    "schedule.anchor_at must be ISO-8601 with timezone, "
+                    "e.g. '2026-05-15T09:00:00+08:00'"
+                )
+            try:
+                parse_iso_at(anchor_at)
+            except CronParseError as exc:
+                raise ToolError(
+                    f"schedule.anchor_at must be ISO-8601 with timezone: {exc}"
+                ) from exc
+        return kind, str(every_seconds), ""
+
+    # kind == ScheduleKind.AT
+    at_raw = schedule.get("at")
+    if not isinstance(at_raw, str) or not at_raw.strip():
+        raise ToolError(
+            "schedule.at required when kind='at'; "
+            "expected ISO-8601 with timezone, e.g. '2026-05-15T09:00:00+08:00'"
+        )
+    try:
+        parse_iso_at(at_raw)
+    except CronParseError as exc:
+        msg = str(exc)
+        if "timezone" in msg.lower():
+            raise ToolError(
+                "schedule.at must include a timezone offset, "
+                "e.g. '2026-05-15T09:00:00+08:00'"
+            ) from exc
+        raise ToolError(
+            f"schedule.at invalid: {exc}; "
+            "expected ISO-8601 with timezone like '2026-05-15T09:00:00+08:00'"
+        ) from exc
+    return kind, at_raw.strip(), ""
+
+
 def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
     """Caller-ownership test for non-owner cron actions.
 
@@ -165,10 +276,11 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
     description=(
         "Create, list, remove, or trigger scheduled cron jobs. "
         "Use this tool (NOT exec_command or background_process) for any recurring/timed "
-        "task scheduling or reminders. For reminders such as '每分钟提醒我喝水', use "
-        "job_kind=system_event and session_target=main. For recurring background "
-        "agent tasks such as 'every morning summarize yesterday's emails', use "
-        "job_kind=agent_turn with session_target=isolated. "
+        "task scheduling or reminders. Translate any natural language into the "
+        "structured schedule shape yourself; the tool will not parse free-form text. "
+        "For reminders, use job_kind=system_event and session_target=main. "
+        "For recurring background agent tasks such as 'every morning summarize "
+        "yesterday's emails', use job_kind=agent_turn with session_target=isolated. "
         "Channel users can create reminders and tasks bound to the calling channel; "
         "list / remove / run only affect jobs the caller created."
     ),
@@ -178,11 +290,46 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
             "description": "Action: list, add, remove, run",
         },
         "schedule": {
-            "type": "string",
+            "type": "object",
             "description": (
-                "Schedule: cron expr, natural language ('every 30m', '2h'), Chinese "
-                "reminders ('每分钟', '每5分钟', '45分钟后', '每天9点'), or ISO timestamp"
+                "Structured schedule. Choose one shape. "
+                "Do not pass human language in schedule; translate it before the tool call. "
+                "Examples: "
+                "for '每5分钟提醒我喝水' call schedule={kind:'cron', expr:'*/5 * * * *'}; "
+                "for '45分钟后提醒我' call "
+                "schedule={kind:'at', at:'<now+45min as ISO-8601 with timezone>'}; "
+                "for '每30秒打印一次' call schedule={kind:'every', every_seconds:30}; "
+                "for 'every weekday at 9 AM Shanghai time' call "
+                "schedule={kind:'cron', expr:'0 9 * * 1-5', tz:'Asia/Shanghai'}."
             ),
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["cron", "every", "at"],
+                },
+                "expr": {
+                    "type": "string",
+                    "description": "5-field POSIX cron (kind=cron)",
+                },
+                "tz": {
+                    "type": "string",
+                    "description": "Optional IANA timezone (kind=cron)",
+                },
+                "every_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Interval in seconds (kind=every)",
+                },
+                "anchor_at": {
+                    "type": "string",
+                    "description": "Optional ISO-8601 first-fire anchor (kind=every)",
+                },
+                "at": {
+                    "type": "string",
+                    "description": "ISO-8601 with timezone (kind=at)",
+                },
+            },
+            "required": ["kind"],
         },
         "task": {
             "type": "string",
@@ -243,7 +390,7 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
 )
 async def cron(
     action: str,
-    schedule: str | None = None,
+    schedule: dict[str, Any] | None = None,
     task: str | None = None,
     job_kind: str = "system_event",
     session_target: str = "main",
@@ -257,7 +404,7 @@ async def cron(
     if action not in _VALID_CRON_ACTIONS:
         raise ToolError(f"Invalid action: {action}. Must be list|add|remove|run")
 
-    if action == "add" and (not schedule or not task):
+    if action == "add" and (schedule is None or not task):
         raise ToolError("'schedule' and 'task' required for add")
     if action in ("remove", "run") and not job_id:
         raise ToolError(f"'job_id' required for {action}")
@@ -324,6 +471,7 @@ async def cron(
         assert schedule is not None
         assert task is not None
         wake_mode = str(wake_mode or "now").strip().lower()
+        schedule_kind, schedule_value, schedule_tz = _coerce_tool_schedule(schedule)
 
         # Scan prompt for injection/exfiltration before scheduling
         blocked, reason = _scan_cron_prompt(task)
@@ -408,9 +556,9 @@ async def cron(
             if job_kind == SYSTEM_EVENT_KIND
             else make_agent_turn_payload(task, agent_id)
         )
+        effective_tz = (tz or schedule_tz or "").strip()
         job = await sched.add_job(
             name=task or "cron-tool-job",
-            schedule_raw=schedule,
             handler_key="system_event" if job_kind == SYSTEM_EVENT_KIND else "agent_run",
             payload=payload,
             session_target=SessionTarget(session_target),
@@ -419,9 +567,12 @@ async def cron(
             delivery=delivery,
             origin_session_key=caller_session_key,
             tool_policy=tool_policy,
-            tz=tz or "",
+            tz=effective_tz,
             creator_session_key=caller_session_key,
             creator_sender_id=caller_sender_id,
+            schedule_kind=schedule_kind,
+            schedule_value=schedule_value,
+            schedule_tz=effective_tz,
         )
         # Populate ws_topic
         if job.delivery and not job.delivery.ws_topic:
@@ -434,12 +585,13 @@ async def cron(
             {
                 "action": "add",
                 "job_id": job.id,
-                "schedule": schedule,
+                "schedule_kind": schedule_kind.value,
+                "schedule_value": schedule_value,
                 "task": task,
                 "payload_kind": job_kind,
                 "session_target": session_target,
                 "wake_mode": wake_mode,
-                "tz": tz or "",
+                "tz": effective_tz,
                 "status": "scheduled",
             }
         )

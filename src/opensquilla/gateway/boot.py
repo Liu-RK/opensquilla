@@ -83,9 +83,17 @@ def _make_channel_rpc_context_factory(svc: ServiceContainer, config: GatewayConf
 # fmt: on
 
 
-def _interval_h_to_schedule_raw(interval_h: int) -> str:
-    """Render an interval schedule accepted by the scheduler parser."""
-    return f"every {interval_h}h"
+def _interval_h_to_schedule(interval_h: int) -> tuple[Any, str]:
+    """Map an hour interval to a structured (kind, value) schedule pair.
+
+    Aligns to a clean cron expression when 24 divides evenly; otherwise falls
+    back to a raw interval-in-seconds for the EVERY kind.
+    """
+    from opensquilla.scheduler.types import ScheduleKind
+
+    if interval_h > 0 and 24 % interval_h == 0:
+        return ScheduleKind.CRON, f"0 */{interval_h} * * *"
+    return ScheduleKind.EVERY, str(interval_h * 3600)
 
 
 async def _list_scheduler_jobs(scheduler: Any) -> list[Any]:
@@ -111,12 +119,12 @@ async def _register_dream_crons(
     """Register a `memory_dream` cron per agent when enabled.
 
     Respects the ``OPENSQUILLA_MEMORY_DREAM_DISABLED=1`` kill switch.
-    Prefers ``memory_config.dream.cron`` if set, else derives
-    ``every Nh`` from ``interval_h``.
+    Prefers ``memory_config.dream.cron`` if set, else derives a structured
+    ``(kind, value)`` pair from ``interval_h``.
     """
     import os
 
-    from opensquilla.scheduler.types import SessionTarget
+    from opensquilla.scheduler.types import ScheduleKind, SessionTarget
 
     dream_cfg = getattr(memory_config, "dream", None)
     existing_jobs = await _list_scheduler_jobs(scheduler)
@@ -142,18 +150,20 @@ async def _register_dream_crons(
         return
 
     assert dream_cfg is not None
-    schedule_raw = (
-        dream_cfg.cron
-        if getattr(dream_cfg, "cron", None)
-        else _interval_h_to_schedule_raw(dream_cfg.interval_h)
-    )
+    if getattr(dream_cfg, "cron", None):
+        schedule_kind, schedule_value = ScheduleKind.CRON, dream_cfg.cron
+    else:
+        schedule_kind, schedule_value = _interval_h_to_schedule(dream_cfg.interval_h)
     for agent_id in agent_ids:
         name = f"memory_dream:{agent_id}"
         existing = existing_by_name.get(name)
         if existing is not None:
             patch: dict[str, Any] = {}
-            if getattr(existing, "schedule_raw", "") != schedule_raw:
-                patch["schedule_raw"] = schedule_raw
+            existing_kind = getattr(existing, "schedule_kind", None)
+            existing_value = getattr(existing, "cron_expr", "") or ""
+            if (existing_kind, existing_value) != (schedule_kind, schedule_value):
+                patch["schedule_kind"] = schedule_kind
+                patch["schedule_value"] = schedule_value
             if getattr(existing, "payload", {}).get("agent_id") != agent_id:
                 patch["payload"] = {"agent_id": agent_id}
             if getattr(existing, "session_target", None) != SessionTarget.ISOLATED:
@@ -166,21 +176,24 @@ async def _register_dream_crons(
             log.info(
                 "boot.dream.already_registered",
                 agent_id=agent_id,
-                schedule=schedule_raw,
+                schedule_kind=schedule_kind.value,
+                schedule_value=schedule_value,
             )
             continue
 
         await scheduler.add_job(
             name=name,
-            schedule_raw=schedule_raw,
             handler_key="memory_dream",
             payload={"agent_id": agent_id},
             session_target=SessionTarget.ISOLATED,
+            schedule_kind=schedule_kind,
+            schedule_value=schedule_value,
         )
         log.info(
             "boot.dream.registered",
             agent_id=agent_id,
-            schedule=schedule_raw,
+            schedule_kind=schedule_kind.value,
+            schedule_value=schedule_value,
         )
 
 

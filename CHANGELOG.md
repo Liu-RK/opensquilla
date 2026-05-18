@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Cron: tool `schedule` parameter is now structured (`{kind, ...}`); backend
+  natural-language schedule parsing has been removed. CLI `--expression`
+  continues to accept a 5-field cron string via an RPC compatibility shim.
+
 ### Fixed
 
 ## [0.1.0rc1] - 2026-05-12

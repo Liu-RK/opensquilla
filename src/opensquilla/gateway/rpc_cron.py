@@ -6,6 +6,12 @@ from dataclasses import asdict
 from typing import Any
 
 from opensquilla.gateway.rpc import RpcContext, RpcUnavailableError, get_dispatcher
+from opensquilla.scheduler.parser import (
+    CronParseError,
+    parse_cron,
+    parse_iso_at,
+    validate_tz,
+)
 from opensquilla.scheduler.payloads import (
     AGENT_TURN_KIND,
     SYSTEM_EVENT_KIND,
@@ -20,6 +26,7 @@ from opensquilla.scheduler.types import (
     DeliveryMode,
     FailureDestination,
     ReplyTargetSnapshot,
+    ScheduleKind,
     SessionTarget,
 )
 
@@ -60,10 +67,18 @@ def _job_to_wire(j: Any) -> dict[str, Any]:
         delivery = raw_delivery
     text = payload_text(payload, session_target)
     kind = payload_kind(payload, session_target)
+    schedule_kind_value = d.get("schedule_kind", "cron")
+    schedule_kind_str = (
+        schedule_kind_value.value
+        if hasattr(schedule_kind_value, "value")
+        else str(schedule_kind_value)
+    )
     return {  # noqa: PIE810 — wire schema favors flat literal dict
         "id": d.get("id"),
         "name": d.get("name", ""),
-        "expression": d.get("schedule_raw") or d.get("cron_expr", ""),
+        # Always serve the normalized expression so the WebUI cron editor can
+        # parse it as a 5-field cron. Historical raw text lives in scheduleRaw.
+        "expression": d.get("cron_expr", "") or "",
         "prompt": text,
         "message": text,
         "text": text,
@@ -78,8 +93,10 @@ def _job_to_wire(j: Any) -> dict[str, Any]:
         "run_count": d.get("run_count", 0),
         "error_count": d.get("error_count", 0),
         "created_at": _iso(d.get("created_at")),
-        "schedule_kind": str(d.get("schedule_kind", "cron")),
+        "schedule_kind": schedule_kind_str,
+        "scheduleKind": schedule_kind_str,
         "schedule_raw": d.get("schedule_raw", ""),
+        "scheduleRaw": d.get("schedule_raw", ""),
         "tz": d.get("tz", "") or "",
         "session_target": session_target,
         "sessionTarget": session_target,
@@ -231,6 +248,99 @@ def _iso(dt: object) -> str | None:
     if isinstance(dt, str):
         return dt
     return dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+
+
+def _coerce_schedule(raw: Any) -> tuple[ScheduleKind, str, str]:
+    """Validate a discriminated-union schedule payload from the wire.
+
+    Accepts ``{"kind":"cron","expr":...,"tz":...}``, ``{"kind":"every",
+    "every_seconds":int,"anchor_at":...}``, or ``{"kind":"at","at":...}``.
+    Returns ``(ScheduleKind, canonical_value_str, tz_str)`` ready for
+    ``scheduler.add_job(schedule_kind=..., schedule_value=..., schedule_tz=...)``.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "schedule must be an object {kind:'cron'|'every'|'at', ...}; "
+            f"got {type(raw).__name__}"
+        )
+    kind_raw = raw.get("kind")
+    if not isinstance(kind_raw, str) or not kind_raw:
+        raise ValueError("schedule.kind required; one of: cron, every, at")
+    try:
+        kind = ScheduleKind(kind_raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"schedule.kind must be one of: cron, every, at; got {kind_raw!r}"
+        ) from exc
+
+    if kind == ScheduleKind.CRON:
+        expr = raw.get("expr")
+        if not isinstance(expr, str) or not expr.strip():
+            raise ValueError(
+                "schedule.expr required when kind='cron'; expected 5-field POSIX cron"
+            )
+        expr = expr.strip()
+        try:
+            parse_cron(expr)
+        except CronParseError as exc:
+            raise ValueError(
+                f"schedule.expr invalid: {exc}; expected 5-field POSIX cron"
+            ) from exc
+        tz_raw = raw.get("tz") or ""
+        if not isinstance(tz_raw, str):
+            raise ValueError("schedule.tz must be a string IANA timezone name")
+        tz_value = tz_raw.strip()
+        try:
+            validate_tz(tz_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"schedule.tz invalid: {exc}; expected IANA name like 'Asia/Shanghai'"
+            ) from exc
+        return kind, expr, tz_value
+
+    if kind == ScheduleKind.EVERY:
+        every_seconds = raw.get("every_seconds")
+        if not isinstance(every_seconds, int) or isinstance(every_seconds, bool):
+            raise ValueError(
+                "schedule.every_seconds required (integer >= 1) when kind='every'"
+            )
+        if every_seconds < 1:
+            raise ValueError("schedule.every_seconds must be >= 1 second")
+        return kind, str(every_seconds), ""
+
+    # kind == ScheduleKind.AT
+    at_raw = raw.get("at")
+    if not isinstance(at_raw, str) or not at_raw.strip():
+        raise ValueError(
+            "schedule.at required when kind='at'; expected ISO-8601 with timezone"
+        )
+    try:
+        parse_iso_at(at_raw)
+    except CronParseError as exc:
+        raise ValueError(
+            f"schedule.at invalid: {exc}; "
+            "expected ISO-8601 with timezone like '2026-05-15T09:00:00+08:00'"
+        ) from exc
+    return kind, at_raw.strip(), ""
+
+
+def _schedule_from_params(params: dict[str, Any]) -> tuple[ScheduleKind, str, str]:
+    """Resolve the structured schedule from RPC params.
+
+    Preferred shape: ``params["schedule"]`` is a discriminated-union object.
+    CLI shim: when ``schedule`` is absent and ``expression`` is a non-empty
+    string, treat it as ``{kind:'cron', expr, tz}`` so legacy CLI callers
+    (cli/cron_cmd.py) keep working without an extra wrapper.
+    """
+    schedule_raw = params.get("schedule")
+    if isinstance(schedule_raw, dict):
+        return _coerce_schedule(schedule_raw)
+    expression = params.get("expression")
+    if isinstance(expression, str) and expression.strip():
+        return _coerce_schedule(
+            {"kind": "cron", "expr": expression, "tz": params.get("tz", "") or ""}
+        )
+    raise ValueError("params required: schedule (object) or expression (string)")
 
 
 def _resolve_session_target(params: dict[str, Any]) -> SessionTarget:
@@ -447,9 +557,8 @@ async def _handle_cron_status(params: dict | None, ctx: RpcContext) -> dict[str,
 @_d.method("cron.add", scope="operator.admin")
 async def _handle_cron_add(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if not isinstance(params, dict):
-        raise ValueError("params required: expression, text")
-    if "expression" not in params:
-        raise ValueError("params.expression is required")
+        raise ValueError("params required: schedule (object) or expression (string)")
+    schedule_kind, schedule_value, schedule_tz = _schedule_from_params(params)
     session_target = _resolve_session_target(params)
     payload_kind_name, payload = _build_payload(params, session_target, require_text=True)
     text = payload_text(payload, session_target)
@@ -472,6 +581,9 @@ async def _handle_cron_add(params: dict | None, ctx: RpcContext) -> dict[str, An
             target_session_key=target_session_key,
             origin_session_key=origin_session_key,
             delivery=delivery,
+            schedule_kind=schedule_kind,
+            schedule_value=schedule_value,
+            schedule_tz=schedule_tz,
         )
 
     # Infer or parse delivery config
@@ -525,6 +637,9 @@ async def _handle_cron_add(params: dict | None, ctx: RpcContext) -> dict[str, An
         target_session_key=target_session_key,
         origin_session_key=origin_session_key,
         delivery=delivery,
+        schedule_kind=schedule_kind,
+        schedule_value=schedule_value,
+        schedule_tz=schedule_tz,
     )
 
 
@@ -539,10 +654,16 @@ async def _finalize_cron_add(
     target_session_key: str,
     origin_session_key: str,
     delivery: DeliveryConfig | None,
+    schedule_kind: ScheduleKind,
+    schedule_value: str,
+    schedule_tz: str,
 ) -> dict[str, Any]:
-    tz_value = params.get("tz") or params.get("timezone") or ""
-    if not isinstance(tz_value, str):
-        tz_value = ""
+    tz_value = (
+        schedule_tz
+        or (params.get("tz") if isinstance(params.get("tz"), str) else "")
+        or (params.get("timezone") if isinstance(params.get("timezone"), str) else "")
+        or ""
+    )
     jitter_seconds: float | None = None
     if "jitterSeconds" in params or "staggerSeconds" in params:
         raw_jitter = params.get("jitterSeconds", params.get("staggerSeconds"))
@@ -552,7 +673,6 @@ async def _finalize_cron_add(
         jitter_seconds = 0.0
     job = await scheduler.add_job(
         name=params.get("name") or text,
-        schedule_raw=params.get("schedule") or params["expression"],
         handler_key="system_event" if payload_kind_name == SYSTEM_EVENT_KIND else "agent_run",
         payload=payload,
         session_target=session_target,
@@ -564,6 +684,9 @@ async def _finalize_cron_add(
         tool_policy=_tool_policy_from_params(params),
         tz=tz_value,
         jitter_seconds=jitter_seconds,
+        schedule_kind=schedule_kind,
+        schedule_value=schedule_value,
+        schedule_tz=tz_value,
     )
     # Populate ws_topic
     if job.delivery and not job.delivery.ws_topic:
@@ -589,8 +712,12 @@ async def _handle_cron_update(params: dict | None, ctx: RpcContext) -> dict[str,
     if "name" in params:
         patch["name"] = params["name"]
 
-    if "expression" in params or "schedule" in params:
-        patch["schedule_raw"] = params.get("schedule") or params.get("expression")
+    if "schedule" in params or "expression" in params:
+        sched_kind, sched_value, sched_tz = _schedule_from_params(params)
+        patch["schedule_kind"] = sched_kind
+        patch["schedule_value"] = sched_value
+        if sched_tz:
+            patch["schedule_tz"] = sched_tz
 
     if "tz" in params or "timezone" in params:
         tz_value = params.get("tz") if "tz" in params else params.get("timezone")

@@ -109,7 +109,8 @@ async def test_ops_add_persists_tz(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="LA brief",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("Morning briefing"),
             session_target=SessionTarget.ISOLATED,
@@ -134,7 +135,8 @@ async def test_ops_add_rejects_bad_tz(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Unknown timezone"):
             await ops.add(
                 name="bad",
-                schedule_raw="0 9 * * *",
+                schedule_kind=ScheduleKind.CRON,
+                schedule_value="0 9 * * *",
                 handler_key="agent_run",
                 payload=make_agent_turn_payload("x"),
                 session_target=SessionTarget.ISOLATED,
@@ -152,7 +154,8 @@ async def test_ops_update_changes_tz_and_recomputes_next_run(tmp_path: Path) -> 
         ops = SchedulerOps(store)
         job = await ops.add(
             name="briefing",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.ISOLATED,
@@ -160,7 +163,12 @@ async def test_ops_update_changes_tz_and_recomputes_next_run(tmp_path: Path) -> 
         )
         utc_next = job.next_run_at
         # Now patch tz to LA and reschedule.
-        updated = await ops.update(job.id, tz="America/Los_Angeles", schedule_raw="0 9 * * *")
+        updated = await ops.update(
+            job.id,
+            tz="America/Los_Angeles",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
+        )
         assert updated is not None
         assert updated.tz == "America/Los_Angeles"
         # LA next_run shifts at least 7h relative to UTC schedule.
@@ -179,7 +187,8 @@ async def test_ops_update_rejects_bad_tz(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="x",
-            schedule_raw="0 9 * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,

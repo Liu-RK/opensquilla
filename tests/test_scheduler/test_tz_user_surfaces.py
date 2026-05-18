@@ -30,8 +30,8 @@ class _FakeScheduler:
         return CronJob(
             id="job-1",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             tz=kwargs.get("tz", ""),
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],
@@ -165,8 +165,8 @@ class _ToolFakeScheduler:
         return CronJob(
             id="job-tool",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             tz=kwargs.get("tz", ""),
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],
@@ -196,7 +196,7 @@ async def test_cron_tool_accepts_tz_param() -> None:
     try:
         raw = await cron_tool(
             action="add",
-            schedule="0 9 * * *",
+            schedule={"kind": "cron", "expr": "0 9 * * *"},
             task="Morning briefing",
             job_kind="agent_turn",
             session_target="isolated",
@@ -221,7 +221,7 @@ async def test_cron_tool_defaults_tz_to_empty_string() -> None:
     try:
         raw = await cron_tool(
             action="add",
-            schedule="0 9 * * *",
+            schedule={"kind": "cron", "expr": "0 9 * * *"},
             task="x",
             job_kind="agent_turn",
             session_target="isolated",

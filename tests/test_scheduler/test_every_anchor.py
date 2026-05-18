@@ -73,13 +73,14 @@ async def test_ops_add_every_records_anchor(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="ping",
-            schedule_raw="every 5m",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("ping"),
             session_target=SessionTarget.ISOLATED,
         )
-        # every 5m + 60 % 5 == 0 → goes through the */5 cron path, not the
-        # raw-seconds path. Use a non-divisor interval to take the EVERY+int path.
+        # 5-minute cron path: anchor is unused for CRON, only EVERY+seconds anchors.
+        assert job.schedule_kind == ScheduleKind.CRON
     finally:
         await store.close()
 
@@ -90,10 +91,11 @@ async def test_ops_add_every_seconds_records_anchor(tmp_path: Path) -> None:
     await store.open()
     try:
         ops = SchedulerOps(store)
-        # "every 7m" → 60 % 7 != 0 so parse_schedule yields EVERY + seconds string
+        # 7m as raw seconds: 60 % 7 != 0 so this exercises the EVERY+seconds path.
         job = await ops.add(
             name="ping",
-            schedule_raw="every 7m",
+            schedule_kind=ScheduleKind.EVERY,
+            schedule_value=str(7 * 60),
             handler_key="agent_run",
             payload=make_agent_turn_payload("ping"),
             session_target=SessionTarget.ISOLATED,
@@ -118,7 +120,8 @@ async def test_ops_update_schedule_resets_anchor(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="ping",
-            schedule_raw="every 7m",
+            schedule_kind=ScheduleKind.EVERY,
+            schedule_value=str(7 * 60),
             handler_key="agent_run",
             payload=make_agent_turn_payload("ping"),
             session_target=SessionTarget.ISOLATED,
@@ -128,13 +131,21 @@ async def test_ops_update_schedule_resets_anchor(tmp_path: Path) -> None:
 
         # Patch to a different interval — anchor must reset, not be carried over.
         await store.save(job)  # ensure persisted
-        updated = await ops.update(job.id, schedule_raw="every 11m")
+        updated = await ops.update(
+            job.id,
+            schedule_kind=ScheduleKind.EVERY,
+            schedule_value=str(11 * 60),
+        )
         assert updated is not None
         assert updated.anchor_at is not None
         assert updated.anchor_at >= original_anchor
 
         # Patch back to a cron expression — anchor must clear.
-        updated2 = await ops.update(job.id, schedule_raw="0 9 * * *")
+        updated2 = await ops.update(
+            job.id,
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="0 9 * * *",
+        )
         assert updated2 is not None
         assert updated2.schedule_kind == ScheduleKind.CRON
         assert updated2.anchor_at is None

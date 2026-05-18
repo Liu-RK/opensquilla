@@ -10,7 +10,7 @@ from opensquilla.session.keys import normalize_agent_id
 
 from .delivery import validate_webhook_url
 from .jobs import _next_run
-from .parser import parse_schedule, validate_tz
+from .parser import parse_cron, parse_iso_at, validate_tz
 from .payloads import normalize_contract, normalize_origin_session_key, payload_agent_id
 from .persistence import JobStore
 from .stagger import compute_jitter
@@ -24,6 +24,39 @@ from .types import (
     ScheduleKind,
     SessionTarget,
 )
+
+
+def _validate_structured_schedule(
+    kind: ScheduleKind | str,
+    value: str,
+) -> tuple[ScheduleKind, str]:
+    """Validate (kind, value) per-kind and return canonical (kind, value).
+
+    Raises ``ValueError`` (or subclasses) on invalid input. ``value`` is always
+    returned as a string to match how the EVERY interval is stored elsewhere.
+    """
+    if isinstance(kind, str):
+        kind = ScheduleKind(kind)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("schedule_value must be a non-empty string")
+    value = value.strip()
+    if kind == ScheduleKind.CRON:
+        parse_cron(value)
+        return kind, value
+    if kind == ScheduleKind.AT:
+        parse_iso_at(value)
+        return kind, value
+    if kind == ScheduleKind.EVERY:
+        try:
+            seconds = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"schedule_value for kind=every must be integer seconds; got {value!r}"
+            ) from exc
+        if seconds < 1:
+            raise ValueError("schedule_value for kind=every must be >= 1 second")
+        return kind, str(seconds)
+    raise ValueError(f"Unsupported schedule_kind: {kind!r}")
 
 
 def _coerce_wake_mode(value: CronWakeMode | str) -> CronWakeMode:
@@ -93,8 +126,11 @@ class SchedulerOps:
     async def add(
         self,
         name: str,
-        schedule_raw: str,
-        handler_key: str,
+        *,
+        schedule_kind: ScheduleKind | str,
+        schedule_value: str,
+        schedule_tz: str = "",
+        handler_key: str = "",
         payload: dict | None = None,
         session_target: SessionTarget = SessionTarget.ISOLATED,
         session_key: str = "",
@@ -109,7 +145,11 @@ class SchedulerOps:
         creator_session_key: str = "",
         creator_sender_id: str = "",
     ) -> CronJob:
-        """Parse schedule, compute jitter, create and save a new CronJob.
+        """Validate the structured schedule, compute jitter, persist a new CronJob.
+
+        ``schedule_kind`` + ``schedule_value`` are required; the value is
+        validated per kind via ``parse_cron`` / ``parse_iso_at`` / integer
+        check. No natural-language detection.
 
         ``jitter_seconds`` controls stagger:
           * ``None`` (default) → auto-computed via compute_jitter (legacy behaviour).
@@ -117,9 +157,10 @@ class SchedulerOps:
           * ``>0`` → explicit fixed offset.
         """
         now_local = self._now()
-        tz = (tz or "").strip()
+        kind, cron_expr = _validate_structured_schedule(schedule_kind, schedule_value)
+        schedule_raw = cron_expr
+        tz = (schedule_tz or tz or "").strip()
         validate_tz(tz)
-        kind, cron_expr = parse_schedule(schedule_raw, reference_now=now_local)
         if jitter_seconds is None:
             jitter = compute_jitter(handler_key + name, self._max_jitter)
         else:
@@ -210,23 +251,32 @@ class SchedulerOps:
             validate_tz(raw_tz)
             job.tz = raw_tz
 
-        if "schedule_raw" in patch:
-            raw = patch.pop("schedule_raw")
-            kind, cron_expr = parse_schedule(raw, reference_now=now_local)
-            job.schedule_raw = raw
+        structured_kind = patch.pop("schedule_kind", None)
+        structured_value = patch.pop("schedule_value", None)
+        structured_tz = patch.pop("schedule_tz", None)
+        if structured_kind is not None and structured_value is not None:
+            kind, cron_expr = _validate_structured_schedule(structured_kind, structured_value)
+            if structured_tz is not None:
+                raw_tz = (structured_tz or "").strip()
+                validate_tz(raw_tz)
+                job.tz = raw_tz
+            job.schedule_raw = cron_expr
             job.schedule_kind = kind
             job.cron_expr = cron_expr
-            # Recompute next_run
             if kind == ScheduleKind.AT:
                 job.anchor_at = None
                 job.next_run_at = datetime.fromisoformat(cron_expr)
-            elif kind == ScheduleKind.EVERY and cron_expr.isdigit():
-                # Schedule replaced: reset the anchor so the new cadence starts now.
+            elif kind == ScheduleKind.EVERY:
                 job.anchor_at = now
                 job.next_run_at = now + timedelta(seconds=int(cron_expr))
             else:
                 job.anchor_at = None
                 job.next_run_at = _next_run(job, now)
+        elif "schedule_raw" in patch:
+            raise ValueError(
+                "ops.update no longer accepts schedule_raw; "
+                "pass schedule_kind + schedule_value instead"
+            )
 
         for field in ("name", "timeout_seconds", "enabled", "origin_session_key"):
             if field in patch:

@@ -16,7 +16,7 @@ import pytest
 from opensquilla.scheduler.ops import SchedulerOps
 from opensquilla.scheduler.payloads import make_agent_turn_payload
 from opensquilla.scheduler.persistence import JobStore
-from opensquilla.scheduler.types import SessionTarget
+from opensquilla.scheduler.types import ScheduleKind, SessionTarget
 
 
 async def test_current_target_with_no_binding_falls_back_to_isolated(tmp_path: Path) -> None:
@@ -27,7 +27,8 @@ async def test_current_target_with_no_binding_falls_back_to_isolated(tmp_path: P
         ops = SchedulerOps(store)
         job = await ops.add(
             name="headless",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.CURRENT,
@@ -47,7 +48,8 @@ async def test_current_target_with_origin_session_key_preserves_current(tmp_path
         ops = SchedulerOps(store)
         job = await ops.add(
             name="bound",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.CURRENT,
@@ -69,7 +71,8 @@ async def test_current_target_with_session_key_preserves_current(tmp_path: Path)
         ops = SchedulerOps(store)
         job = await ops.add(
             name="bound",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.CURRENT,
@@ -91,7 +94,8 @@ async def test_isolated_target_unaffected(tmp_path: Path) -> None:
         ops = SchedulerOps(store)
         job = await ops.add(
             name="iso",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("brief"),
             session_target=SessionTarget.ISOLATED,

@@ -31,6 +31,7 @@ from opensquilla.scheduler.types import (
     DeliveryConfig,
     DeliveryMode,
     FailureDestination,
+    ScheduleKind,
     SessionTarget,
 )
 
@@ -53,7 +54,8 @@ async def test_failure_destination_channel_round_trips(tmp_path: Path) -> None:
         delivery = DeliveryConfig(mode=DeliveryMode.NONE, failure_destination=fd)
         job = await ops.add(
             name="job",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,
@@ -90,7 +92,8 @@ async def test_failure_destination_webhook_round_trips(tmp_path: Path) -> None:
         )
         job = await ops.add(
             name="job",
-            schedule_raw="*/5 * * * *",
+            schedule_kind=ScheduleKind.CRON,
+            schedule_value="*/5 * * * *",
             handler_key="agent_run",
             payload=make_agent_turn_payload("x"),
             session_target=SessionTarget.ISOLATED,
@@ -120,8 +123,8 @@ class _FakeScheduler:
         return CronJob(
             id="job-fd",
             name=kwargs["name"],
-            cron_expr=kwargs["schedule_raw"],
-            schedule_raw=kwargs["schedule_raw"],
+            cron_expr=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
+            schedule_raw=kwargs.get("schedule_value") or kwargs.get("schedule_raw", ""),
             handler_key=kwargs["handler_key"],
             payload=kwargs["payload"],
             session_target=kwargs["session_target"],
