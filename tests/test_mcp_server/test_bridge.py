@@ -89,7 +89,7 @@ class FakeGatewayClient:
 async def test_bridge_reuses_gateway_read_rpcs() -> None:
     client = FakeGatewayClient()
     bridge = OpenSquillaMCPBridge(
-        gateway_url="ws://127.0.0.1:18790/ws",
+        gateway_url="ws://127.0.0.1:18791/ws",
         gateway_client_factory=lambda: client,
     )
 
@@ -97,7 +97,7 @@ async def test_bridge_reuses_gateway_read_rpcs() -> None:
     resolved = await bridge.session_resolve("agent:main:main")
     messages = await bridge.messages_read("agent:main:main", limit=5)
 
-    assert client.connected_url == "ws://127.0.0.1:18790/ws"
+    assert client.connected_url == "ws://127.0.0.1:18791/ws"
     assert sessions["sessions"][0]["key"] == "agent:main:main"
     assert resolved["session_id"] == "sid-1"
     assert messages["messages"][0]["text"] == "hello"

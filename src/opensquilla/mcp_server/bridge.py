@@ -45,7 +45,7 @@ class OpenSquillaMCPBridge:
         raw_url = (
             gateway_url
             or os.environ.get("OPENSQUILLA_GATEWAY_URL")
-            or "ws://localhost:18790/ws"
+            or "ws://localhost:18791/ws"
         )
         self.gateway_url = normalize_gateway_url(raw_url)
         self._gateway_client_factory = gateway_client_factory

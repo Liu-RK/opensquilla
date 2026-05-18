@@ -703,13 +703,16 @@ class SessionManager:
         session_key: str,
         context_window_tokens: int,
         config: CompactionConfig | None = None,
+        custom_instructions: str | None = None,
     ) -> str:
         """
         Compact the session transcript when context is filling up.
         Summarizes older entries, keeps recent ones, stores summary out-of-band.
         Returns the summary string.
         """
-        result = await self.compact_with_result(session_key, context_window_tokens, config)
+        result = await self.compact_with_result(
+            session_key, context_window_tokens, config, custom_instructions
+        )
         return result.summary if result.removed_count else ""
 
     async def compact_with_result(
@@ -717,6 +720,7 @@ class SessionManager:
         session_key: str,
         context_window_tokens: int,
         config: CompactionConfig | None = None,
+        custom_instructions: str | None = None,
     ) -> CompactionResult:
         """Compact the session transcript and return full compaction metadata."""
 
@@ -741,6 +745,7 @@ class SessionManager:
                 entries=raw,
                 context_window_tokens=context_window_tokens,
                 config=config or CompactionConfig(),
+                custom_instructions=custom_instructions,
             )
         )
 

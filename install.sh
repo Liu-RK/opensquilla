@@ -7,7 +7,7 @@
 #   - defaults to the "recommended" runtime profile (memory + bundled v4 router)
 #     and allows `OPENSQUILLA_INSTALL_PROFILE=core` to opt back down
 #   - prints a post-install banner documenting the default bind
-#     (127.0.0.1:18790) and the explicit opt-in required to expose the gateway
+#     (127.0.0.1:18791) and the explicit opt-in required to expose the gateway
 #     on the network (--listen 0.0.0.0 or OPENSQUILLA_LISTEN=0.0.0.0)
 #   - adds an extra WARNING when the operator requested network exposure at
 #     install time via OPENSQUILLA_LISTEN=0.0.0.0
@@ -201,7 +201,7 @@ print_banner() {
 OpenSquilla installed via ${installer} -> ${prefix} (profile: ${profile})
 Extras: $(if (( ${#install_extras[@]} > 0 )); then IFS=,; echo "${install_extras[*]}"; else echo "none"; fi)
 
-Default gateway bind: 127.0.0.1:18790 (loopback only)
+Default gateway bind: 127.0.0.1:18791 (loopback only)
 Network exposure is opt-in only. To expose the gateway on the network you
 must use one of:
   - CLI flag:  opensquilla gateway run --listen 0.0.0.0

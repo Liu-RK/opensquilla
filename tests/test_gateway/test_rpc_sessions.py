@@ -119,8 +119,10 @@ class FakeSessionManager:
         self.applied_intents: list[tuple[str, str]] = []
         self.truncate_calls: list[tuple[str, int]] = []
         self.compact_calls: list[tuple[str, int, object | None]] = []
+        self.compact_instructions: list[str | None] = []
         self.compact_summary = "summary for compacted context"
         self.compact_summary_source = "fallback"
+        self.transcript: list[Any] = []
 
     async def append_message(self, key: str, role: str = "user", content: str = "") -> None:
         self.created_messages.append((key, role, content))
@@ -143,7 +145,7 @@ class FakeSessionManager:
         return session
 
     async def get_transcript(self, key: str) -> list:
-        return []
+        return list(self.transcript)
 
     async def truncate(self, session_key: str, max_messages: int = 20) -> dict:
         session = await self._storage.get_session(session_key)
@@ -159,12 +161,23 @@ class FakeSessionManager:
         self.compact_calls.append((session_key, context_window_tokens, config))
         return self.compact_summary
 
-    async def compact_with_result(self, session_key: str, context_window_tokens: int, config=None):
+    async def compact_with_result(
+        self,
+        session_key: str,
+        context_window_tokens: int,
+        config=None,
+        custom_instructions: str | None = None,
+    ):
+        self.compact_instructions.append(custom_instructions)
         summary = await self.compact(session_key, context_window_tokens, config)
         return SimpleNamespace(
             summary=summary,
             removed_count=1 if summary else 0,
+            kept_entries=[],
             summary_source=self.compact_summary_source if summary else "skipped",
+            tokens_before=1200,
+            tokens_after=400,
+            remaining_budget_tokens=max(context_window_tokens - 400, 0),
         )
 
     async def apply_intent(self, session_key: str, intent: str, **kwargs):
@@ -197,7 +210,7 @@ def make_ctx(session_manager=None, **kwargs) -> RpcContext:
     defaults = {
         "conn_id": "test-conn",
         "principal": principal,
-        "config": GatewayConfig(),
+        "config": GatewayConfig(memory={"flush_enabled": False}),
     }
     defaults.update(kwargs)
     ctx = RpcContext(**defaults)
@@ -1022,11 +1035,20 @@ class TestSessionsDelete:
 
 class TestSessionsCompact:
     @pytest.mark.asyncio
-    async def test_compact_valid(self, dispatcher, ctx_with_sessions, session):
+    async def test_compact_valid_uses_summary_compaction(
+        self, dispatcher, ctx_with_sessions, session
+    ):
         res = await dispatcher.dispatch(
             "r1", "sessions.compact", {"key": session.session_key}, ctx_with_sessions
         )
         assert res.ok is True
+        assert res.payload["mode"] == "summary"
+        assert res.payload["compacted"] is True
+        assert ctx_with_sessions.session_manager.compact_calls[0][:2] == (
+            session.session_key,
+            ctx_with_sessions.config.context_budget_tokens,
+        )
+        assert ctx_with_sessions.session_manager.truncate_calls == []
 
     @pytest.mark.asyncio
     async def test_compact_allowed_for_operator_write_scope(self, dispatcher, session):
@@ -1038,6 +1060,7 @@ class TestSessionsCompact:
         res = await dispatcher.dispatch("r1", "sessions.compact", {"key": session.session_key}, ctx)
 
         assert res.ok is True
+        assert ctx.session_manager.compact_calls
 
     @pytest.mark.asyncio
     async def test_compact_not_found(self, dispatcher, ctx_with_sessions):
@@ -1046,6 +1069,51 @@ class TestSessionsCompact:
         )
         assert res.ok is False
         assert res.error.code == "NOT_FOUND"
+
+
+class TestSessionsTruncate:
+    @pytest.mark.asyncio
+    async def test_truncate_valid_preserves_hard_truncate_semantics(
+        self, dispatcher, ctx_with_sessions, session
+    ):
+        res = await dispatcher.dispatch(
+            "r1", "sessions.truncate", {"key": session.session_key}, ctx_with_sessions
+        )
+
+        assert res.ok is True
+        assert res.payload["mode"] == "truncate"
+        assert ctx_with_sessions.session_manager.truncate_calls == [
+            (session.session_key, 20)
+        ]
+        assert ctx_with_sessions.session_manager.compact_calls == []
+
+    @pytest.mark.asyncio
+    async def test_truncate_refuses_degraded_flush_receipt(
+        self, dispatcher, session
+    ):
+        manager = FakeSessionManager([session])
+        manager.transcript = [SimpleNamespace(content="message to preserve")]
+        flush_service = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    mode="raw",
+                    integrity_ok=True,
+                    output_coverage_status="ok",
+                    missing_candidate_count=0,
+                    invalid_candidate_count=0,
+                    obligation_status="ok",
+                )
+            )
+        )
+        ctx = make_ctx(session_manager=manager, flush_service=flush_service)
+
+        res = await dispatcher.dispatch(
+            "r1", "sessions.truncate", {"key": session.session_key}, ctx
+        )
+
+        assert res.ok is False
+        assert res.error.code == "CONTEXT_FLUSH_FAILED"
+        assert manager.truncate_calls == []
 
 
 class TestSessionsContextCompact:
@@ -1069,6 +1137,82 @@ class TestSessionsContextCompact:
         compact_call = ctx_with_sessions.session_manager.compact_calls[0]
         assert compact_call[:2] == (session.session_key, 1234)
         assert ctx_with_sessions.session_manager.truncate_calls == []
+        assert res.payload["tokens_before"] == 1200
+        assert res.payload["tokens_after"] == 400
+        assert res.payload["remaining_budget_tokens"] == 834
+        assert res.payload["removed_count"] == 1
+        assert res.payload["kept_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_context_compact_passes_custom_instructions(
+        self, dispatcher, ctx_with_sessions, session
+    ):
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.contextCompact",
+            {
+                "key": session.session_key,
+                "contextWindowTokens": 1234,
+                "instructions": "Preserve architecture decisions.",
+            },
+            ctx_with_sessions,
+        )
+
+        assert res.ok is True
+        assert ctx_with_sessions.session_manager.compact_instructions == [
+            "Preserve architecture decisions."
+        ]
+
+    @pytest.mark.asyncio
+    async def test_context_compact_refuses_missing_flush_service_when_enabled(
+        self, dispatcher, session
+    ):
+        manager = FakeSessionManager([session])
+        manager.transcript = [SimpleNamespace(content="message to preserve")]
+        ctx = make_ctx(
+            session_manager=manager,
+            config=GatewayConfig(memory={"flush_enabled": True}),
+        )
+
+        res = await dispatcher.dispatch(
+            "r1", "sessions.contextCompact", {"key": session.session_key}, ctx
+        )
+
+        assert res.ok is False
+        assert res.error.code == "CONTEXT_FLUSH_FAILED"
+        assert manager.compact_calls == []
+
+    @pytest.mark.asyncio
+    async def test_context_compact_refuses_degraded_flush_receipt(
+        self, dispatcher, session
+    ):
+        manager = FakeSessionManager([session])
+        manager.transcript = [SimpleNamespace(content="message to preserve")]
+        flush_service = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    mode="raw",
+                    integrity_ok=True,
+                    output_coverage_status="ok",
+                    missing_candidate_count=0,
+                    invalid_candidate_count=0,
+                    obligation_status="ok",
+                )
+            )
+        )
+        ctx = make_ctx(
+            session_manager=manager,
+            flush_service=flush_service,
+            config=GatewayConfig(memory={"flush_enabled": True}),
+        )
+
+        res = await dispatcher.dispatch(
+            "r1", "sessions.contextCompact", {"key": session.session_key}, ctx
+        )
+
+        assert res.ok is False
+        assert res.error.code == "CONTEXT_FLUSH_FAILED"
+        assert manager.compact_calls == []
 
     @pytest.mark.asyncio
     async def test_context_compact_allowed_for_operator_write_scope(self, dispatcher, session):

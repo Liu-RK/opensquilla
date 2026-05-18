@@ -8,6 +8,7 @@ from pathlib import Path
 
 import structlog
 
+from .source_paths import is_memory_source_path
 from .store import LongTermMemoryStore
 from .types import MemorySource
 
@@ -134,7 +135,7 @@ class MemorySyncManager:
         self._ttl_sweep_task = None
         logger.info("sync_manager.stopped")
 
-    async def sync(self, reason: str) -> None:
+    async def sync(self, reason: str, *, force: bool = False) -> None:
         """Unified sync entry point.
 
         Re-enqueues ``store.remove_file`` failures into
@@ -143,12 +144,12 @@ class MemorySyncManager:
         the queue regardless of outcome and orphan SQLite chunks for any
         path whose retry also failed.
         """
-        if reason == "search" and not self._dirty:
+        if reason == "search" and not self._dirty and not force:
             return
-        if reason == "session-delta" and not self._delta.should_sync():
+        if reason == "session-delta" and not self._delta.should_sync() and not force:
             return
 
-        logger.info("sync_manager.sync", reason=reason)
+        logger.info("sync_manager.sync", reason=reason, force=force)
         if reason == "watch" and (self._pending_changes or self._pending_deletes):
             # Snapshot AND clear before sync so that re-enqueued failures
             # land in a clean set (they survive into the next tick rather
@@ -161,7 +162,7 @@ class MemorySyncManager:
                 changes=changes, deletes=deletes
             )
         else:
-            failed_deletes = await self._do_file_sync()
+            failed_deletes = await self._do_file_sync(force=force)
 
         if failed_deletes:
             self._pending_deletes.update(failed_deletes)
@@ -211,6 +212,8 @@ class MemorySyncManager:
                     if any(part.startswith(".") for part in rel_to_memory.parts[:-1]):
                         continue
                     rel = path.relative_to(self._workspace_dir).as_posix()
+                    if not is_memory_source_path(rel):
+                        continue
                     result[rel] = path.stat().st_mtime
         return result
 
@@ -219,6 +222,7 @@ class MemorySyncManager:
         *,
         changes: set[str] | None = None,
         deletes: set[str] | None = None,
+        force: bool = False,
     ) -> set[str]:
         """Re-index changed and deleted files from disk.
 
@@ -236,7 +240,7 @@ class MemorySyncManager:
 
             for path, mtime in current.items():
                 old_mtime = self._mtimes.get(path)
-                if old_mtime is None or mtime > old_mtime:
+                if force or old_mtime is None or mtime > old_mtime:
                     changes.add(path)
 
             for path in set(self._mtimes) - set(current):

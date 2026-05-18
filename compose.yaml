@@ -12,9 +12,9 @@ services:
       # or use WSL2 with $HOME naturally.
       - ${OPENSQUILLA_HOST_HOME:-${HOME}}/.opensquilla:/root/.opensquilla
     ports:
-      - "127.0.0.1:18790:18790"
+      - "127.0.0.1:18791:18791"
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:18790/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:18791/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       start_period: 10s

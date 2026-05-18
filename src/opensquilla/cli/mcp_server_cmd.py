@@ -12,7 +12,7 @@ app = typer.Typer(help="Run the OpenSquilla MCP server bridge.")
 @app.command("run")
 def run_mcp_server(
     gateway_url: str = typer.Option(
-        "ws://localhost:18790/ws",
+        "ws://localhost:18791/ws",
         "--gateway",
         envvar="OPENSQUILLA_GATEWAY_URL",
         help="OpenSquilla gateway URL to bridge to.",

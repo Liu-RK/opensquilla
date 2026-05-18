@@ -10,11 +10,14 @@ from opensquilla.tools.registry import ToolRegistry
 
 
 class _FakeRetriever:
-    def __init__(self) -> None:
+    def __init__(self, results=None) -> None:
         self.calls = []
+        self._results = results
 
     async def search(self, query, opts, *, intent):
         self.calls.append((query, opts, intent))
+        if self._results is not None:
+            return self._results
         return [
             MemorySearchResult(
                 chunk_id="chunk-1",
@@ -90,3 +93,56 @@ def test_memory_tool_descriptions_name_nested_memory_sources(tmp_path):
     assert "MEMORY.md or memory/**/*.md" in memory_get.spec.parameters["path"][
         "description"
     ]
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_filters_non_source_paths_from_retriever(tmp_path):
+    registry = ToolRegistry()
+    retriever = _FakeRetriever(
+        [
+            MemorySearchResult(
+                chunk_id="hidden",
+                path="memory/.hidden.md",
+                source=MemorySource.memory,
+                start_line=1,
+                end_line=1,
+                snippet="hidden",
+                score=0.99,
+                text="hidden",
+            ),
+            MemorySearchResult(
+                chunk_id="raw",
+                path="memory/.raw_fallbacks/raw.md",
+                source=MemorySource.memory,
+                start_line=1,
+                end_line=1,
+                snippet="raw",
+                score=0.98,
+                text="raw",
+            ),
+            MemorySearchResult(
+                chunk_id="curated",
+                path="memory/a.md",
+                source=MemorySource.memory,
+                start_line=1,
+                end_line=1,
+                snippet="alpha",
+                score=0.9,
+                text="alpha",
+            ),
+        ]
+    )
+    create_memory_tools(
+        stores=SimpleNamespace(),
+        retrievers=retriever,
+        memory_dir=str(tmp_path),
+        registry=registry,
+    )
+
+    registered = registry.get("memory_search")
+    assert registered is not None
+    output = await registered.handler(query="alpha")
+
+    assert "memory/a.md" in output
+    assert ".hidden.md" not in output
+    assert ".raw_fallbacks" not in output

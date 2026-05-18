@@ -95,14 +95,29 @@ def test_owner_schema_keeps_canonical_tools_and_subagents_stays_explicit_only() 
     default_names = {tool.name for tool in registry.to_tool_definitions(owner_ctx)}
     assert {"image_generate", "sessions_spawn", "sessions_send"} <= default_names
     assert "subagents" not in default_names
+    assert "create_pptx" not in default_names
 
     surfaced_ctx = ToolContext(
         is_owner=True,
         caller_kind=CallerKind.AGENT,
-        surfaced_tools={"subagents"},
+        surfaced_tools={"create_pptx", "subagents"},
     )
     surfaced_names = {tool.name for tool in registry.to_tool_definitions(surfaced_ctx)}
     assert "subagents" in surfaced_names
+    assert "create_pptx" in surfaced_names
+
+
+def test_web_owner_schema_hides_basic_pptx_fallback_by_default() -> None:
+    import opensquilla.tools.builtin  # noqa: F401
+    from opensquilla.tools.registry import get_default_registry
+
+    registry = get_default_registry()
+    web_ctx = ToolContext(is_owner=True, caller_kind=CallerKind.WEB)
+
+    names = {tool.name for tool in registry.to_tool_definitions(web_ctx)}
+
+    assert "create_pptx" not in names
+    assert "execute_code" in names
 
 
 def test_channel_runtime_profile_exposes_publish_artifact() -> None:
@@ -123,7 +138,7 @@ def test_channel_runtime_profile_exposes_publish_artifact() -> None:
     assert "publish_artifact" in names
 
 
-def test_channel_runtime_profile_exposes_safe_file_authoring_tools() -> None:
+def test_channel_runtime_profile_exposes_safe_structured_file_tools_without_pptx_fallback() -> None:
     import opensquilla.tools.builtin  # noqa: F401
     from opensquilla.tools.registry import filter_by_profile, get_default_registry, resolve_profile
 
@@ -139,9 +154,42 @@ def test_channel_runtime_profile_exposes_safe_file_authoring_tools() -> None:
         )
     }
 
-    assert {"create_csv", "create_xlsx", "create_pptx", "create_pdf_report"} <= names
+    assert {"create_csv", "create_xlsx", "create_pdf_report"} <= names
+    assert "create_pptx" not in names
     assert "write_file" not in names
     assert "execute_code" not in names
+
+
+def test_channel_media_policy_surfaces_basic_pptx_fallback_explicitly() -> None:
+    from opensquilla.tools.policy import apply_tool_policy_from_config
+
+    registry = ToolRegistry()
+    registry.register(_spec("session_status"), _handler)
+    registry.register(_spec("create_pptx", exposed_by_default=False), _handler)
+    ctx = apply_tool_policy_from_config(
+        ToolContext(
+            is_owner=False,
+            caller_kind=CallerKind.CHANNEL,
+            channel_kind="feishu",
+            channel_id="oc_demo",
+        ),
+        available_tools=registry.list_names(),
+        config={
+            "channels": {
+                "feishu": {
+                    "groups": {
+                        "oc_demo": {
+                            "tools": {"profile": "minimal", "also_allow": ["channel:media"]}
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    names = {tool.name for tool in registry.to_tool_definitions(ctx)}
+
+    assert names == {"session_status", "create_pptx"}
 
 
 def test_channel_runtime_profile_exposes_explicit_category_tools_not_host_mutation() -> None:
@@ -161,7 +209,7 @@ def test_channel_runtime_profile_exposes_explicit_category_tools_not_host_mutati
     names = {tool.name for tool in filter_by_profile(tools, resolve_profile(ctx), ctx)}
 
     assert "feishu_drive_upload_artifact" in names
-    assert "create_pptx" in names
+    assert "create_pptx" not in names
     assert "write_file" not in names
 
 

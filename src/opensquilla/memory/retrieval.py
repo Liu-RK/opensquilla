@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .source_paths import is_memory_source_path
 from .store import LongTermMemoryStore
 from .types import (
     MemorySearchOpts,
@@ -204,9 +205,12 @@ class MemoryRetriever:
         filtered = [
             r
             for r in raw_results
-            if r.score >= opts.min_score
-            or is_relaxed_keyword_match(r)
-            or is_lexical_guaranteed_match(r)
+            if is_memory_source_path(str(r.path))
+            and (
+                r.score >= opts.min_score
+                or is_relaxed_keyword_match(r)
+                or is_lexical_guaranteed_match(r)
+            )
         ]
 
         if self._mmr_enabled:

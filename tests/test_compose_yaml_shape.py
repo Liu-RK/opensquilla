@@ -22,8 +22,8 @@ def test_compose_gateway_port_is_loopback() -> None:
     data = _load_compose()
     ports = data["services"]["gateway"]["ports"]
     assert any(
-        str(p) == "127.0.0.1:18790:18790" for p in ports
-    ), f"Expected '127.0.0.1:18790:18790' in ports, got: {ports}"
+        str(p) == "127.0.0.1:18791:18791" for p in ports
+    ), f"Expected '127.0.0.1:18791:18791' in ports, got: {ports}"
 
 
 def test_compose_gateway_healthcheck_exists() -> None:

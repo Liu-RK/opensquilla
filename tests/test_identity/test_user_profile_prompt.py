@@ -119,6 +119,19 @@ def test_system_prompt_limits_file_delivery_when_no_file_authoring_tools() -> No
     assert "create the file in the active workspace" not in prompt
 
 
+def test_system_prompt_describes_structured_artifact_fallback_limits() -> None:
+    prompt = assemble_system_prompt(
+        AgentProfile(agent_id="main", prompt_mode="full"),
+        tools=["publish_artifact", "create_pptx", "image_generate"],
+    )
+
+    assert "## Structured Generated File Delivery" in prompt
+    assert "only when the request fits the tool schema" in prompt
+    assert "`create_pptx` creates a basic text-only deck" in prompt
+    assert "full visual deck authoring is not enabled" in prompt
+    assert "file creation is not enabled for this session" not in prompt
+
+
 def test_legacy_image_alias_does_not_enable_image_generation_prompt() -> None:
     prompt = assemble_system_prompt(
         AgentProfile(agent_id="main", prompt_mode="full"),

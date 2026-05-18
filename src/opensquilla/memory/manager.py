@@ -328,8 +328,8 @@ class MemoryManager:
             intent = SearchIntent.TOOL
         return await self.retriever.search(query, opts, intent=intent)
 
-    async def sync(self, *, reason: str = "manual") -> None:
-        await self.sync_manager.sync(reason=reason)
+    async def sync(self, *, reason: str = "manual", force: bool = False) -> None:
+        await self.sync_manager.sync(reason=reason, force=force)
 
     async def capture_turn(self, **kwargs: Any) -> str | None:
         return await self.turn_capture.capture_turn(**kwargs)

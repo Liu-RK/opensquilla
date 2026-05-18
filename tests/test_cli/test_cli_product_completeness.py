@@ -473,6 +473,25 @@ def test_memory_status_json_reuses_doctor_rpc(monkeypatch):
     assert ("doctor.memory.status", {"agentId": "main"}) in fake.calls
 
 
+def test_memory_status_deep_json_passes_deep_flag(monkeypatch):
+    fake = _install_fake_gateway(monkeypatch)
+    fake.rpc_payloads = {
+        "doctor.memory.status": {
+            "backend": "sqlite",
+            "status": "degraded",
+            "vecAvailable": False,
+            "ftsAvailable": True,
+            "degraded": [],
+        }
+    }
+
+    result = runner.invoke(app, ["memory", "status", "--agent", "main", "--deep", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["vecAvailable"] is False
+    assert ("doctor.memory.status", {"agentId": "main", "deep": True}) in fake.calls
+
+
 def test_memory_list_json_uses_gateway_rpc(monkeypatch):
     fake = _install_fake_gateway(monkeypatch)
     fake.rpc_payloads = {
@@ -526,6 +545,43 @@ def test_memory_search_and_show_use_gateway_rpcs(monkeypatch):
     assert (
         "memory.show",
         {"path": "memory/a.md", "agentId": "main", "fromLine": 2, "lines": 1},
+    ) in fake.calls
+
+
+def test_memory_index_and_raw_fallback_commands_use_admin_rpcs(monkeypatch):
+    fake = _install_fake_gateway(monkeypatch)
+    fake.rpc_payloads = {
+        "memory.index": {"agentId": "main", "force": True},
+        "memory.raw_fallbacks.list": {
+            "agentId": "main",
+            "count": 1,
+            "files": [{"path": "memory/.raw_fallbacks/raw.md", "sizeBytes": 12}],
+        },
+        "memory.raw_fallbacks.show": {
+            "agentId": "main",
+            "path": "memory/.raw_fallbacks/raw.md",
+            "fromLine": 1,
+            "lineCount": 1,
+            "truncated": False,
+            "content": "raw",
+        },
+    }
+
+    index = runner.invoke(app, ["memory", "index", "--agent", "main", "--force", "--json"])
+    listed = runner.invoke(app, ["memory", "raw-fallbacks", "list", "--json"])
+    shown = runner.invoke(
+        app,
+        ["memory", "raw-fallbacks", "show", "memory/.raw_fallbacks/raw.md", "--json"],
+    )
+
+    assert index.exit_code == 0, index.stdout
+    assert listed.exit_code == 0, listed.stdout
+    assert shown.exit_code == 0, shown.stdout
+    assert ("memory.index", {"agentId": "main", "force": True}) in fake.calls
+    assert ("memory.raw_fallbacks.list", {"agentId": "main"}) in fake.calls
+    assert (
+        "memory.raw_fallbacks.show",
+        {"path": "memory/.raw_fallbacks/raw.md", "agentId": "main"},
     ) in fake.calls
 
 

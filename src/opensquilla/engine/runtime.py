@@ -68,6 +68,9 @@ from opensquilla.provider import (
     decide_recovery_action,
 )
 from opensquilla.safety import injection_guard, permission_matrix, sandbox, tool_tiers
+from opensquilla.session.compaction_lifecycle import (
+    flush_receipt_allows_destructive_compaction,
+)
 from opensquilla.session.cost_rollup import (
     normalize_event_cost_source,
     rollup_cost_source,
@@ -1047,6 +1050,16 @@ class TurnRunner:
         # churn the cacheable prefix mid-session.
         self._bootstrap_snapshots: dict[tuple[str, str, str], BootstrapSnapshot] = {}
         self._compaction_failures: dict[str, _CompactionFailureState] = {}
+        self._turn_compacted_sessions: set[str] = set()
+
+    def has_compacted_this_turn(self, session_key: str) -> bool:
+        return session_key in self._turn_compacted_sessions
+
+    def mark_compacted_this_turn(self, session_key: str) -> None:
+        self._turn_compacted_sessions.add(session_key)
+
+    def clear_compacted_this_turn(self, session_key: str) -> None:
+        self._turn_compacted_sessions.discard(session_key)
 
     def refresh_memory_snapshot(self, agent_id: str) -> None:
         """Refresh frozen snapshots for all sessions of the given agent.
@@ -1322,32 +1335,35 @@ class TurnRunner:
         _caller_holds_lock = owner_map is not None and id(lock) in owner_map
         if _caller_holds_lock:
             # Same call chain already holds the lock (re-entrant call).
-            async for event in self._run_turn(
-                message,
-                session_key,
-                agent_id,
-                model,
-                attachments or [],
-                effective_tool_context,
-                timeout=timeout,
-                max_iterations=max_iterations,
-                iteration_timeout=iteration_timeout,
-                tool_timeout=tool_timeout,
-                request_timeout=request_timeout,
-                max_provider_retries=max_provider_retries,
-                input_mode=input_mode,
-                persist_input=persist_input,
-                input_provenance=input_provenance,
-                history_has_persisted_user=history_has_persisted_user,
-                session_intent=session_intent,
-                semantic_message=semantic_message,
-                run_kind=run_kind,
-                heartbeat_ack_max_chars=heartbeat_ack_max_chars,
-                bootstrap_context_mode=bootstrap_context_mode,
-                no_memory_capture=no_memory_capture,
-                ingress_pipeline_steps=ingress_pipeline_steps,
-            ):
-                yield event
+            try:
+                async for event in self._run_turn(
+                    message,
+                    session_key,
+                    agent_id,
+                    model,
+                    attachments or [],
+                    effective_tool_context,
+                    timeout=timeout,
+                    max_iterations=max_iterations,
+                    iteration_timeout=iteration_timeout,
+                    tool_timeout=tool_timeout,
+                    request_timeout=request_timeout,
+                    max_provider_retries=max_provider_retries,
+                    input_mode=input_mode,
+                    persist_input=persist_input,
+                    input_provenance=input_provenance,
+                    history_has_persisted_user=history_has_persisted_user,
+                    session_intent=session_intent,
+                    semantic_message=semantic_message,
+                    run_kind=run_kind,
+                    heartbeat_ack_max_chars=heartbeat_ack_max_chars,
+                    bootstrap_context_mode=bootstrap_context_mode,
+                    no_memory_capture=no_memory_capture,
+                    ingress_pipeline_steps=ingress_pipeline_steps,
+                ):
+                    yield event
+            finally:
+                self.clear_compacted_this_turn(session_key)
         else:
             async with lock:
                 # Record this Task as the lock owner in the ContextVar so that
@@ -1384,6 +1400,7 @@ class TurnRunner:
                     ):
                         yield event
                 finally:
+                    self.clear_compacted_this_turn(session_key)
                     _SESSION_LOCK_OWNER.reset(_token)
 
     async def _run_turn(
@@ -4001,6 +4018,13 @@ class TurnRunner:
 
         if self._compaction_circuit_open(session_key):
             return _T3_HANDLED
+        if self.has_compacted_this_turn(session_key):
+            log.info(
+                "t3_upgrade_compaction.skipped",
+                session_key=session_key,
+                reason="already_compacted_this_turn",
+            )
+            return _T3_HANDLED
 
         try:
             transcript = await self._session_manager.get_transcript(session_key)
@@ -4099,6 +4123,7 @@ class TurnRunner:
                 context_window_tokens,
                 compaction_config,
             )
+            self.mark_compacted_this_turn(session_key)
             self._record_compaction_success(session_key)
             if result:
                 notify_compaction(session_key)
@@ -4141,6 +4166,13 @@ class TurnRunner:
         if session_key.startswith(("cron:", "subagent:")):
             return
         if self._compaction_circuit_open(session_key):
+            return
+        if self.has_compacted_this_turn(session_key):
+            log.info(
+                "preflight_compaction.skipped",
+                session_key=session_key,
+                reason="already_compacted_this_turn",
+            )
             return
         try:
             transcript = await self._session_manager.get_transcript(session_key)
@@ -4237,6 +4269,7 @@ class TurnRunner:
                 context_window_tokens,
                 compaction_config,
             )
+            self.mark_compacted_this_turn(session_key)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -4289,31 +4322,7 @@ class TurnRunner:
             return 0
 
     def _flush_receipt_allows_destructive_compaction(self, receipt: Any) -> bool:
-        if self._receipt_value(receipt, "mode", None) != "llm":
-            return False
-        if self._receipt_int(self._receipt_value(receipt, "indexed_chunk_count", 0)) <= 0:
-            return False
-        integrity_status = str(
-            self._receipt_value(receipt, "integrity_status", "unverified") or "unverified"
-        )
-        if integrity_status != "ok":
-            return False
-        output_coverage_status = str(
-            self._receipt_value(receipt, "output_coverage_status", "unverified")
-            or "unverified"
-        )
-        if output_coverage_status not in _SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES:
-            return False
-        if self._receipt_int(self._receipt_value(receipt, "invalid_candidate_count", 0)) > 0:
-            return False
-        if self._receipt_value(receipt, "candidate_missing_ids", []):
-            return False
-        obligation_status = str(
-            self._receipt_value(receipt, "obligation_status", "unverified") or "unverified"
-        )
-        if obligation_status not in _SAFE_FLUSH_OBLIGATION_STATUSES:
-            return False
-        return not self._receipt_value(receipt, "obligation_missing_ids", [])
+        return flush_receipt_allows_destructive_compaction(receipt)
 
     def _compaction_circuit_open(self, session_key: str) -> bool:
         state = getattr(self, "_compaction_failures", {}).get(session_key)

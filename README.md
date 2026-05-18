@@ -62,7 +62,7 @@ package is not available for your platform, use the source install path below.
 
    The launcher opens onboarding before the gateway starts. On first run, choose
    a provider and paste the requested keys; later starts let you review or change
-   the config. Then open <http://127.0.0.1:18790/control/>.
+   the config. Then open <http://127.0.0.1:18791/control/>.
 
 <details>
 <summary>Advanced portable usage</summary>
@@ -99,7 +99,7 @@ Use these options only when you want scripted setup or portable CLI commands.
 - If Windows blocks the launcher, make sure the zip came from the official
   GitHub Releases page, then use the Windows prompt to allow it.
 - If the Web UI does not open, keep the gateway terminal open and visit
-  <http://127.0.0.1:18790/control/> manually.
+  <http://127.0.0.1:18791/control/> manually.
 - If `opensquilla` is not recognized, use `OpenSquilla Shell.cmd` or
   `.\opensquilla.cmd` from the extracted folder.
 
@@ -264,7 +264,7 @@ installing, use `opensquilla ...` commands, not `uv run`.
    ```
 
 Wait until the gateway says it is running before opening the Web UI at
-<http://127.0.0.1:18790/control/>. Press `Ctrl+C` to stop the foreground
+<http://127.0.0.1:18791/control/>. Press `Ctrl+C` to stop the foreground
 gateway. If Windows lacks the Visual C++ Redistributable, the gateway still
 starts but the bundled router falls back to a safe direct route. If Windows
 prints an `onnxruntime` or `DLL load failed` warning, see the Visual C++ runtime
@@ -564,14 +564,14 @@ values.
 ### Run
 
 ```sh
-opensquilla gateway run                   # foreground, 127.0.0.1:18790
+opensquilla gateway run                   # foreground, 127.0.0.1:18791
 opensquilla gateway start --json          # background + health wait
 opensquilla chat                          # interactive REPL
 opensquilla agent -m "your prompt"        # one-shot, automation-friendly
 ```
 
-Open the Web UI at <http://127.0.0.1:18790/control/> and check health
-with `curl http://127.0.0.1:18790/health`.
+Open the Web UI at <http://127.0.0.1:18791/control/> and check health
+with `curl http://127.0.0.1:18791/health`.
 
 ### Public network binding — (optional)
 
@@ -579,19 +579,19 @@ To make the Web UI reachable from another machine, bind the gateway to
 all interfaces and use the host's public IP address:
 
 ```sh
-opensquilla gateway run --listen 0.0.0.0 --port 18790
+opensquilla gateway run --listen 0.0.0.0 --port 18791
 # or, for a background process:
-opensquilla gateway start --listen 0.0.0.0 --port 18790 --json
+opensquilla gateway start --listen 0.0.0.0 --port 18791 --json
 ```
 
-Then open `http://<public-ip>:18790/control/` and verify the public
+Then open `http://<public-ip>:18791/control/` and verify the public
 health endpoint with:
 
 ```sh
-curl http://<public-ip>:18790/health
+curl http://<public-ip>:18791/health
 ```
 
-If another gateway is already bound to `18790`, stop it first or choose
+If another gateway is already bound to `18791`, stop it first or choose
 a different `--port`. Public access also requires the host firewall or
 cloud security group to allow inbound TCP traffic on that port.
 Do not expose the gateway publicly with `[auth] mode = "none"`; configure
@@ -646,6 +646,10 @@ PinchBench 1.2.1 average results across 25 tasks:
   memory with FTS keyword search alongside `sqlite-vec` semantic recall.
   Bundled ONNX inference runs on CPU so embeddings stay on your machine;
   optionally swap to OpenAI- or Ollama-hosted embeddings.
+- **Private turn capture** — optional `auto_capture` writes raw turn
+  archives into agent state (`turns/`) for audit and future processing.
+  These files are not ordinary searchable memory; only curated
+  `MEMORY.md` and `memory/**/*.md` sources enter recall.
 - **Adaptive recall and consolidation** — frequently used memories
   auto-promote and dated ones decay exponentially (with an "evergreen"
   opt-out); periodic Dream consolidation merges scattered episodic
@@ -661,7 +665,7 @@ PinchBench 1.2.1 average results across 25 tasks:
   all skill metadata and tool results are XML-escaped to close common
   prompt-injection vectors.
 - **Unified gateway across all entry points** — Starlette ASGI server on
-  `127.0.0.1:18790` with WebSocket RPC and an embedded control console
+  `127.0.0.1:18791` with WebSocket RPC and an embedded control console
   (`/control/`). Web UI, CLI, and first-class adapters for Terminal,
   WebSocket, Slack, Telegram, Discord, Feishu, DingTalk, WeCom, MS
   Teams, Matrix, and QQ all converge on a shared `TurnRunner` for

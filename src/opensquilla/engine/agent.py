@@ -66,18 +66,21 @@ from opensquilla.provider import (
 )
 from opensquilla.provider.failures import ProviderFailureKind, classify_provider_error
 from opensquilla.provider.types import ContentBlockImage
+from opensquilla.result_budget import (
+    ToolResultBudgetClass,
+    compact_tool_result_content,
+    resolve_budget_class,
+)
 from opensquilla.session.compaction import (
     CompactionConfig,
     CompactionRequest,
     build_compaction_config_from_provider,
     compact_context,
 )
-from opensquilla.tool_boundary import AgentToolHandler as ToolHandler
-from opensquilla.result_budget import (
-    ToolResultBudgetClass,
-    compact_tool_result_content,
-    resolve_budget_class,
+from opensquilla.session.compaction_lifecycle import (
+    flush_receipt_allows_destructive_compaction,
 )
+from opensquilla.tool_boundary import AgentToolHandler as ToolHandler
 
 from .context import ContextAssembly
 from .subagent import SubagentManager, SubagentSpec
@@ -2670,22 +2673,23 @@ class Agent:
                 runtime_context_insert_index=runtime_context_insert_index,
             )
 
-        # --- Pre-compaction flush via direct Agent (best-effort, concurrent) ---
+        # --- Pre-compaction flush; qualified receipt required before removal. ---
         flush_task: asyncio.Task | None = None
         self._consume_completed_flush_task()
 
-        async def _await_flush_task() -> None:
+        async def _await_flush_task() -> Any | None:
             # Give flush a grace period to complete instead of cancelling immediately.
             # Adds up to flush_timeout_seconds (default 5s) of latency, but without
             # this the flush is effectively dead code (always cancelled before finishing).
             if flush_task is not None and not flush_task.done():
                 try:
-                    await asyncio.wait_for(
+                    receipt = await asyncio.wait_for(
                         asyncio.shield(flush_task),
                         timeout=self.config.flush_timeout_seconds,
                     )
                     logger.info("memory_flush.completed_after_compaction")
                     self._mark_flush_task_completed(flush_task)
+                    return receipt
                 except TimeoutError:
                     next_retry_seconds = self._record_flush_timeout_backoff()
                     logger.warning(
@@ -2696,6 +2700,17 @@ class Agent:
                 except Exception as exc:
                     logger.warning("memory_flush.await_failed", error=str(exc))
                     self._mark_flush_task_completed(flush_task)
+                    return None
+            if flush_task is not None and flush_task.done():
+                try:
+                    receipt = flush_task.result()
+                    self._mark_flush_task_completed(flush_task)
+                    return receipt
+                except Exception as exc:
+                    logger.warning("memory_flush.await_failed", error=str(exc))
+                    self._mark_flush_task_completed(flush_task)
+                    return None
+            return None
 
         if not self._flush_done_this_cycle and self.config.flush_enabled:
             try:
@@ -2707,6 +2722,7 @@ class Agent:
                 now = time.monotonic()
                 if self._active_flush_task is not None and not self._active_flush_task.done():
                     logger.debug("memory_flush.skipped", reason="already_running")
+                    flush_task = self._active_flush_task
                 elif now < self._flush_backoff_until:
                     logger.warning(
                         "memory_flush.skipped",
@@ -2740,6 +2756,30 @@ class Agent:
                         self._flush_done_this_cycle = True
             except Exception:
                 logger.debug("memory_flush.skipped", reason="flush module unavailable")
+
+        if self.config.flush_enabled:
+            if (
+                flush_task is not None
+                and not flush_task.done()
+                and time.monotonic() < self._flush_backoff_until
+            ):
+                logger.warning(
+                    "memory_flush.skipped",
+                    reason="backoff",
+                    retry_after_seconds=round(self._flush_backoff_until - time.monotonic(), 3),
+                )
+                self._flush_done_this_cycle = False
+                return None
+            receipt = await _await_flush_task()
+            if not flush_receipt_allows_destructive_compaction(receipt):
+                logger.warning(
+                    "memory_flush.receipt_required_before_compaction",
+                    mode=getattr(receipt, "mode", None),
+                    integrity_status=getattr(receipt, "integrity_status", None),
+                    indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
+                )
+                self._flush_done_this_cycle = False
+                return None
 
         # --- Compaction ---
         entries = [
@@ -2843,11 +2883,16 @@ class Agent:
             logger.warning("memory_flush.background_failed", error=str(exc))
         else:
             mode = getattr(receipt, "mode", None)
-            if mode in {"raw", "error"}:
+            if not flush_receipt_allows_destructive_compaction(receipt):
                 next_retry_seconds = self._ensure_flush_degraded_backoff()
                 logger.warning(
                     "memory_flush.degraded",
                     mode=mode,
+                    integrity_status=getattr(receipt, "integrity_status", None),
+                    output_coverage_status=getattr(
+                        receipt, "output_coverage_status", None
+                    ),
+                    obligation_status=getattr(receipt, "obligation_status", None),
                     raw_reason=getattr(receipt, "raw_reason", None),
                     next_retry_seconds=next_retry_seconds,
                 )
@@ -2911,12 +2956,12 @@ class Agent:
         plan: Any,
         messages: list[Message],
     ) -> Any | None:
-        """Fire-and-forget memory flush; delegates to SessionFlushService.
+        """Run memory flush before compaction; delegates to SessionFlushService.
 
-        When a ``SessionFlushService`` is injected (post-PR2a), this method
-        just forwards the call and drops the receipt. When no service is
-        injected (standalone Agent instances in unit tests or legacy paths),
-        falls back to an inline raw-dump so we don't silently drop data.
+        When a ``SessionFlushService`` is injected, this method forwards the
+        call and returns its receipt. When no service is injected (standalone
+        Agent instances in unit tests or legacy paths), it falls back to an
+        inline raw-dump so we don't silently drop data.
         """
         service = getattr(self, "_session_flush_service", None)
         if service is not None:

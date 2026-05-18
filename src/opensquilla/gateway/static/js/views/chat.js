@@ -2031,8 +2031,15 @@ const ChatView = (() => {
           .then((result) => {
             if (result && result.compacted) {
               const summaryLen = Number(result.summary_len || 0);
+              const before = Number(result.tokens_before || 0);
+              const after = Number(result.tokens_after || 0);
+              const remaining = Number(result.remaining_budget_tokens || 0);
+              const source = result.summary_source || 'unknown';
+              const tokenStats = before || after
+                ? ' (' + before + ' -> ' + after + ' tokens, ' + remaining + ' remaining, ' + source + ')'
+                : (summaryLen ? ' (summary ' + summaryLen + ' chars)' : '');
               UI.toast(
-                'Context compacted' + (summaryLen ? ' (summary ' + summaryLen + ' chars)' : ''),
+                'Context compacted' + tokenStats,
                 'info'
               );
             } else {

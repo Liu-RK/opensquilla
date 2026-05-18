@@ -23,7 +23,7 @@ from opensquilla.cli.init_cmd import init_command  # noqa: E402
 from opensquilla.cli.mcp_server_cmd import app as mcp_server_app  # noqa: E402
 from opensquilla.cli.memory_flush_cmd import memory_flush_session_cmd  # noqa: E402
 from opensquilla.cli.models_cmd import app as models_app  # noqa: E402
-from opensquilla.cli.onboard_cmd import configure_command, onboard_command  # noqa: E402
+from opensquilla.cli.onboard_cmd import configure_command, onboard_app  # noqa: E402
 from opensquilla.cli.providers_cmd import providers_app  # noqa: E402
 from opensquilla.cli.replay import replay_app  # noqa: E402
 from opensquilla.cli.search_cmd import search_app  # noqa: E402
@@ -54,7 +54,7 @@ app.add_typer(sessions_app, name="sessions")
 app.add_typer(skills_app, name="skills")
 
 app.command("init")(init_command)
-app.command("onboard")(onboard_command)
+app.add_typer(onboard_app, name="onboard")
 app.command("configure")(configure_command)
 
 
@@ -62,6 +62,8 @@ app.command("configure")(configure_command)
 
 memory_app = typer.Typer(help="Memory subsystem commands.")
 app.add_typer(memory_app, name="memory")
+raw_fallbacks_app = typer.Typer(help="Raw fallback receipt commands.")
+memory_app.add_typer(raw_fallbacks_app, name="raw-fallbacks")
 
 
 def _build_cli_dream(agent: str, *, force: bool = False, need_provider: bool = True):
@@ -101,6 +103,7 @@ def _build_cli_dream(agent: str, *, force: bool = False, need_provider: bool = T
 @memory_app.command("status")
 def memory_status_cmd(
     agent_id: str = typer.Option("main", "--agent", help="Agent id (default: main)"),
+    deep: bool = typer.Option(False, "--deep", help="Include detailed retrieval health"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Show read-only memory backend status from the running gateway."""
@@ -112,7 +115,10 @@ def memory_status_cmd(
     from opensquilla.cli.ui import console
 
     async def _run(client):
-        return await client.call("doctor.memory.status", {"agentId": agent_id})
+        params: dict[str, object] = {"agentId": agent_id}
+        if deep:
+            params["deep"] = True
+        return await client.call("doctor.memory.status", params)
 
     payload = run_gateway_sync(_run, json_output=json_output)
     if json_output:
@@ -133,6 +139,31 @@ def memory_status_cmd(
         str(payload.get("error") or ""),
     )
     console.print(table)
+
+
+@memory_app.command("index")
+def memory_index_cmd(
+    agent_id: str = typer.Option("main", "--agent", help="Agent id (default: main)"),
+    force: bool = typer.Option(False, "--force", help="Rebuild index rows and rescan sources"),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """Sync or force-rebuild the memory search index through the gateway."""
+
+    from opensquilla.cli.gateway_rpc import run_gateway_sync
+    from opensquilla.cli.output import print_json
+    from opensquilla.cli.ui import console
+
+    async def _run(client):
+        return await client.call("memory.index", {"agentId": agent_id, "force": force})
+
+    payload = run_gateway_sync(_run, json_output=json_output)
+    if json_output:
+        print_json(payload)
+        return
+    console.print(
+        f"memory index agent={payload.get('agentId', agent_id)} "
+        f"force={bool(payload.get('force'))}"
+    )
 
 
 @memory_app.command("list")
@@ -243,6 +274,73 @@ def memory_show_cmd(
         console.print("[dim]... truncated[/dim]")
 
 
+@raw_fallbacks_app.command("list")
+def memory_raw_fallbacks_list_cmd(
+    agent_id: str = typer.Option("main", "--agent", help="Agent id (default: main)"),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """List raw fallback receipts from the running gateway."""
+
+    from rich.table import Table
+
+    from opensquilla.cli.gateway_rpc import run_gateway_sync
+    from opensquilla.cli.output import print_json
+    from opensquilla.cli.ui import console
+
+    async def _run(client):
+        return await client.call("memory.raw_fallbacks.list", {"agentId": agent_id})
+
+    payload = run_gateway_sync(_run, json_output=json_output)
+    if json_output:
+        print_json(payload)
+        return
+
+    table = Table(title=f"Raw memory fallbacks - agent={agent_id}", show_header=True)
+    table.add_column("Path")
+    table.add_column("Size bytes", justify="right")
+    table.add_column("Reason")
+    table.add_column("Modified")
+    for row in payload.get("files", []):
+        table.add_row(
+            str(row.get("path") or ""),
+            "" if row.get("sizeBytes") is None else str(row.get("sizeBytes")),
+            str(row.get("reason") or ""),
+            str(row.get("modifiedAt") or ""),
+        )
+    console.print(table)
+
+
+@raw_fallbacks_app.command("show")
+def memory_raw_fallbacks_show_cmd(
+    path: str = typer.Argument(..., help="Raw fallback path"),
+    agent_id: str = typer.Option("main", "--agent", help="Agent id (default: main)"),
+    from_line: int | None = typer.Option(None, "--from-line", help="Start line, 1-indexed"),
+    lines: int | None = typer.Option(None, "--lines", help="Number of lines to return"),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """Show one raw fallback receipt from the running gateway."""
+
+    from opensquilla.cli.gateway_rpc import run_gateway_sync
+    from opensquilla.cli.output import print_json
+    from opensquilla.cli.ui import console
+
+    async def _run(client):
+        params: dict[str, object] = {"path": path, "agentId": agent_id}
+        if from_line is not None:
+            params["fromLine"] = from_line
+        if lines is not None:
+            params["lines"] = lines
+        return await client.call("memory.raw_fallbacks.show", params)
+
+    payload = run_gateway_sync(_run, json_output=json_output)
+    if json_output:
+        print_json(payload)
+        return
+    console.print(str(payload.get("content") or ""))
+    if payload.get("truncated"):
+        console.print("[dim]... truncated[/dim]")
+
+
 @memory_app.command("dream")
 def memory_dream_cmd(
     agent: str = typer.Option("main", "--agent", "-a", help="Agent ID"),
@@ -291,7 +389,7 @@ app.add_typer(gateway_app, name="gateway")
 
 @gateway_app.command("run")
 def gateway_run(
-    port: int = typer.Option(18790, "--port", "-p", help="Port to bind"),
+    port: int = typer.Option(18791, "--port", "-p", help="Port to bind"),
     bind: str = typer.Option("127.0.0.1", "--bind", "-b", help="Host to bind"),
     listen: str = typer.Option(
         "",
@@ -313,7 +411,7 @@ def gateway_run(
 
 @gateway_app.command("start")
 def gateway_start(
-    port: int = typer.Option(18790, "--port", "-p", help="Port to bind"),
+    port: int = typer.Option(18791, "--port", "-p", help="Port to bind"),
     bind: str = typer.Option("127.0.0.1", "--bind", "-b", help="Host to bind"),
     listen: str = typer.Option("", "--listen", help="Host to bind (wins over --bind)"),
     health_timeout: float = typer.Option(60.0, "--timeout", help="Readiness wait timeout"),
@@ -333,7 +431,7 @@ def gateway_start(
 
 @gateway_app.command("status")
 def gateway_status(
-    port: int = typer.Option(18790, "--port", "-p", help="Port to inspect"),
+    port: int = typer.Option(18791, "--port", "-p", help="Port to inspect"),
     bind: str = typer.Option("127.0.0.1", "--bind", "-b", help="Host to inspect"),
     listen: str = typer.Option("", "--listen", help="Host to inspect (wins over --bind)"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
@@ -346,7 +444,7 @@ def gateway_status(
 
 @gateway_app.command("stop")
 def gateway_stop(
-    port: int = typer.Option(18790, "--port", "-p", help="Port to stop"),
+    port: int = typer.Option(18791, "--port", "-p", help="Port to stop"),
     bind: str = typer.Option("127.0.0.1", "--bind", "-b", help="Host to stop"),
     listen: str = typer.Option("", "--listen", help="Host to stop (wins over --bind)"),
     shutdown_timeout: float = typer.Option(10.0, "--timeout", help="Shutdown wait timeout"),
@@ -366,7 +464,7 @@ def gateway_stop(
 
 @gateway_app.command("restart")
 def gateway_restart(
-    port: int = typer.Option(18790, "--port", "-p", help="Port to restart"),
+    port: int = typer.Option(18791, "--port", "-p", help="Port to restart"),
     bind: str = typer.Option("127.0.0.1", "--bind", "-b", help="Host to restart"),
     listen: str = typer.Option("", "--listen", help="Host to restart (wins over --bind)"),
     health_timeout: float = typer.Option(60.0, "--timeout", help="Readiness wait timeout"),
@@ -572,7 +670,7 @@ def chat(
 def reset_cmd(
     key: str = typer.Option(..., "--key", help="Session key to reset."),
     gateway_url: str = typer.Option(
-        "http://localhost:18790", "--gateway", envvar="OPENSQUILLA_GATEWAY_URL"
+        "http://localhost:18791", "--gateway", envvar="OPENSQUILLA_GATEWAY_URL"
     ),
 ) -> None:
     """Reset a session, flushing its memory synchronously.

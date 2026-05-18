@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -40,11 +41,22 @@ class _FakeSessionManager:
         return "[summary]"
 
 
+class _InsufficientCompactionSessionManager(_FakeSessionManager):
+    async def compact(self, session_key: str, budget: int, config=None) -> str:
+        self.compact_calls.append((session_key, budget, config))
+        return "[summary]"
+
+
 class _LegacyCompactSessionManager(_FakeSessionManager):
     async def compact(self, session_key: str, budget: int) -> str:
         self.compact_calls.append((session_key, budget, None))
         self._transcript = [_FakeEntry(content="[summary]")]
         return "[summary]"
+
+
+class _SummaryReadFailureSessionManager(_FakeSessionManager):
+    async def get_summaries(self, session_key: str) -> list[Any]:
+        raise RuntimeError(f"summary store unavailable for {session_key}")
 
 
 class _FakeCompactionProvider:
@@ -89,10 +101,31 @@ class _FakeProviderSelector:
         return self.provider
 
 
-def _cfg(policy: ContextOverflowPolicy, budget: int = 20) -> GatewayConfig:
+class _TurnCompactionMarker:
+    def __init__(self, compacted: set[str] | None = None) -> None:
+        self.compacted = set(compacted or set())
+        self.mark_calls: list[str] = []
+        self.clear_calls: list[str] = []
+
+    def has_compacted_this_turn(self, session_key: str) -> bool:
+        return session_key in self.compacted
+
+    def mark_compacted_this_turn(self, session_key: str) -> None:
+        self.mark_calls.append(session_key)
+        self.compacted.add(session_key)
+
+    def clear_compacted_this_turn(self, session_key: str) -> None:
+        self.clear_calls.append(session_key)
+        self.compacted.discard(session_key)
+
+
+def _cfg(
+    policy: ContextOverflowPolicy, budget: int = 20, *, flush_enabled: bool = False
+) -> GatewayConfig:
     return GatewayConfig(
         context_overflow_policy=policy,
         context_budget_tokens=budget,
+        memory={"flush_enabled": flush_enabled},
     )
 
 
@@ -171,7 +204,7 @@ async def test_hard_truncate_drops_oldest_history_until_fits() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_summarize_invokes_compaction_and_retries_once() -> None:
-    """AUTO_SUMMARIZE triggers session_manager.compact() exactly once."""
+    """AUTO_SUMMARIZE retries only after compacted payload is inside budget."""
 
     cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
     sm = _FakeSessionManager(_history(6, 40))
@@ -187,6 +220,149 @@ async def test_auto_summarize_invokes_compaction_and_retries_once() -> None:
     assert outcome.retried is True
     assert len(sm.compact_calls) == 1
     assert sm.compact_calls[0][0] == "s-auto"
+    assert outcome.tokens_after is not None
+    assert outcome.remaining_budget_tokens is not None
+    assert outcome.tokens_after <= outcome.budget_tokens
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_refuses_when_compaction_still_exceeds_budget() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _InsufficientCompactionSessionManager(_history(6, 40))
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-insufficient",
+        session_manager=sm,
+    )
+
+    assert outcome.over_budget is True
+    assert outcome.summarized is False
+    assert outcome.retried is False
+    assert outcome.reason == "compaction_insufficient"
+    assert outcome.refusal is not None
+    assert outcome.refusal["error"]["reason"] == "compaction_insufficient"
+    assert len(sm.compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_refuses_when_summary_context_cannot_be_verified() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _SummaryReadFailureSessionManager(_history(6, 40))
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-summary-fail",
+        session_manager=sm,
+    )
+
+    assert outcome.over_budget is True
+    assert outcome.summarized is False
+    assert outcome.retried is False
+    assert outcome.reason == "compaction_failed"
+    assert outcome.refusal is not None
+    assert outcome.refusal["error"]["reason"] == "compaction_failed"
+    assert len(sm.compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_refuses_degraded_flush_receipt_before_compacting() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    sm = _FakeSessionManager(_history(6, 40))
+    flush_service = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(
+                mode="llm",
+                integrity_ok=False,
+                output_coverage_status="ok",
+                missing_candidate_count=0,
+                invalid_candidate_count=0,
+                obligation_status="ok",
+            )
+        )
+    )
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="agent:main:s-flush",
+        session_manager=sm,
+        flush_service=flush_service,
+    )
+
+    assert outcome.over_budget is True
+    assert outcome.summarized is False
+    assert outcome.retried is False
+    assert outcome.reason == "compaction_flush_failed"
+    assert outcome.refusal is not None
+    assert outcome.refusal["error"]["reason"] == "compaction_flush_failed"
+    assert sm.compact_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_refuses_missing_flush_service_when_enabled() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
+    sm = _FakeSessionManager(_history(6, 40))
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="agent:main:s-missing-flush",
+        session_manager=sm,
+    )
+
+    assert outcome.over_budget is True
+    assert outcome.summarized is False
+    assert outcome.retried is False
+    assert outcome.reason == "compaction_flush_failed"
+    assert sm.compact_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_does_not_compact_twice_in_same_turn() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _InsufficientCompactionSessionManager(_history(6, 40))
+    marker = _TurnCompactionMarker({"s-once"})
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-once",
+        session_manager=sm,
+        compaction_marker=marker,
+    )
+
+    assert outcome.over_budget is True
+    assert outcome.reason == "compaction_insufficient"
+    assert sm.compact_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_auto_summarize_does_not_mark_turn_compacted() -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _InsufficientCompactionSessionManager(_history(6, 40))
+    marker = _TurnCompactionMarker()
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-failed",
+        session_manager=sm,
+        compaction_marker=marker,
+    )
+
+    assert outcome.reason == "compaction_insufficient"
+    assert outcome.compacted_this_turn is False
+    assert marker.mark_calls == []
+    assert "s-failed" not in marker.compacted
 
 
 @pytest.mark.asyncio

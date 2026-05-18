@@ -74,7 +74,7 @@ class GatewayRPCClient:
         self._connection_error: ConnectionError | None = None
         self._closing = False
 
-    async def connect(self, url: str = "ws://localhost:18790/ws") -> None:
+    async def connect(self, url: str = "ws://localhost:18791/ws") -> None:
         if self._ws is not None:
             await self.close()
         self._closing = False

@@ -109,7 +109,7 @@ async def _with_client(action):
     client = GatewayClient()
     try:
         await client.connect(
-            normalize_gateway_url(os.environ.get("OPENSQUILLA_GATEWAY_URL", "ws://localhost:18790/ws"))
+            normalize_gateway_url(os.environ.get("OPENSQUILLA_GATEWAY_URL", "ws://localhost:18791/ws"))
         )
         return await action(client)
     except SystemExit as exc:

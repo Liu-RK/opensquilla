@@ -21,6 +21,7 @@ from opensquilla.onboarding.config_store import (
     load_config,
     persist_config,
 )
+from opensquilla.onboarding.errors import UserCancelledError
 from opensquilla.onboarding.image_generation_specs import (
     ImageGenerationProviderSetupSpec,
     get_image_generation_provider_setup_spec,
@@ -206,6 +207,20 @@ def _print_noninteractive_hint() -> PersistResult:
     )
 
 
+def _ask_or_cancel(prompt, section: str) -> Any:
+    """Run a questionary prompt and convert a ``None`` answer into ``UserCancelledError``.
+
+    ``questionary`` returns ``None`` when the user aborts (Ctrl+C / Esc). Letting
+    that flow into downstream validation or upsert calls produces misleading
+    error messages — convert it to a typed cancellation at the input boundary
+    so callers can route the user back to a resumable state.
+    """
+    value = prompt.ask()
+    if value is None:
+        raise UserCancelledError(section=section)
+    return value
+
+
 def _ask_provider_choice(questionary, options: OnboardOptions):
     if options.provider_id:
         spec = get_provider_setup_spec(options.provider_id)
@@ -213,11 +228,10 @@ def _ask_provider_choice(questionary, options: OnboardOptions):
     supported = [s for s in list_provider_setup_specs() if s.runtime_supported]
     choices = [f"{s.provider_id} ({s.label})" for s in supported]
     default = next((choice for choice in choices if choice.startswith("openrouter ")), None)
-    pid = questionary.select(
-        "LLM provider",
-        choices=choices,
-        default=default,
-    ).ask()
+    pid = _ask_or_cancel(
+        questionary.select("LLM provider", choices=choices, default=default),
+        section="provider",
+    )
     pid_clean = pid.split(" ")[0]
     return get_provider_setup_spec(pid_clean), pid_clean
 
@@ -318,12 +332,12 @@ def _ask_provider_fields(
             answers["api_key_env"] = selected_env_key
             answers["api_key"] = ""
             if not selected_env_key:
-                answers["api_key"] = (
+                answers["api_key"] = _ask_or_cancel(
                     questionary.password(
                         "API key",
                         validate=_secret_value_validator("API key"),
-                    ).ask()
-                    or ""
+                    ),
+                    section="provider",
                 )
                 answers["api_key_env"] = ""
     else:
@@ -340,10 +354,13 @@ def _ask_provider_fields(
 
 def _ask_search_choice(questionary):
     supported = [s for s in list_search_provider_setup_specs() if s.runtime_supported]
-    provider_id = questionary.select(
-        "Search provider",
-        choices=[f"{s.provider_id} ({s.label})" for s in supported],
-    ).ask()
+    provider_id = _ask_or_cancel(
+        questionary.select(
+            "Search provider",
+            choices=[f"{s.provider_id} ({s.label})" for s in supported],
+        ),
+        section="search",
+    )
     provider_id_clean = provider_id.split(" ")[0]
     return get_search_provider_setup_spec(provider_id_clean), provider_id_clean
 
@@ -355,41 +372,57 @@ def _ask_search_fields(questionary, spec) -> dict[str, Any]:
         use_env_key = False
         if env_key and os.environ.get(env_key):
             use_env_key = bool(
-                questionary.confirm(
-                    f"Use {env_key} from environment?",
-                    default=False,
-                ).ask()
+                _ask_or_cancel(
+                    questionary.confirm(
+                        f"Use {env_key} from environment?",
+                        default=False,
+                    ),
+                    section="search",
+                )
             )
         if use_env_key:
             answers["api_key"] = ""
             answers["api_key_env"] = env_key
         else:
-            answers["api_key"] = (
+            answers["api_key"] = _ask_or_cancel(
                 questionary.password(
                     _search_api_key_prompt(spec),
                     validate=_secret_value_validator("Search API key"),
-                ).ask()
-                or ""
+                ),
+                section="search",
             )
             answers["api_key_env"] = ""
     else:
         answers["api_key"] = ""
         answers["api_key_env"] = ""
-    max_results = questionary.text("Max search results", default="5").ask() or "5"
+    max_results = _ask_or_cancel(
+        questionary.text("Max search results", default="5"), section="search"
+    ) or "5"
     answers["max_results"] = int(max_results)
-    answers["proxy"] = questionary.text("Search HTTP proxy", default="").ask() or ""
-    answers["use_env_proxy"] = questionary.confirm(
-        "Use environment proxy for search?", default=False
-    ).ask()
-    fallback_choice = questionary.select(
-        "Search fallback policy",
-        choices=list(_SEARCH_FALLBACK_LABELS.values()),
-        default=_SEARCH_FALLBACK_LABELS["off"],
-    ).ask()
+    answers["proxy"] = _ask_or_cancel(
+        questionary.text("Search HTTP proxy", default=""), section="search"
+    )
+    answers["use_env_proxy"] = bool(
+        _ask_or_cancel(
+            questionary.confirm("Use environment proxy for search?", default=False),
+            section="search",
+        )
+    )
+    fallback_choice = _ask_or_cancel(
+        questionary.select(
+            "Search fallback policy",
+            choices=list(_SEARCH_FALLBACK_LABELS.values()),
+            default=_SEARCH_FALLBACK_LABELS["off"],
+        ),
+        section="search",
+    )
     answers["fallback_policy"] = _search_fallback_choice_to_value(fallback_choice)
-    answers["diagnostics"] = questionary.confirm(
-        _SEARCH_DIAGNOSTICS_PROMPT, default=False
-    ).ask()
+    answers["diagnostics"] = bool(
+        _ask_or_cancel(
+            questionary.confirm(_SEARCH_DIAGNOSTICS_PROMPT, default=False),
+            section="search",
+        )
+    )
     return answers
 
 
@@ -915,7 +948,7 @@ def _print_channel_saved(name: str) -> None:
 def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     cfg = load_config()
     status = get_onboarding_status(cfg)
-    if options.if_needed and status.has_config and status.llm_configured:
+    if options.if_needed and status.has_config and not status.needs_onboarding:
         return persist_config(cfg, restart_required=False, backup=False)
 
     if not _is_tty():
@@ -964,19 +997,64 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     if not options.skip_channels and questionary.confirm(
         "Configure a messaging channel now?", default=False
     ).ask():
-        run_interactive_channel_add(None)
+        _run_optional_section(
+            section="channel",
+            label="channel",
+            runner=run_interactive_channel_add,
+            args=(None,),
+        )
 
     if not options.skip_search and questionary.confirm(
         "Configure web search now?", default=False
     ).ask():
-        run_interactive_search_configure()
+        _run_optional_section(
+            section="search",
+            label="search",
+            runner=run_interactive_search_configure,
+        )
 
     if not options.skip_image_generation and questionary.confirm(
         "Enable image generation now?", default=False
     ).ask():
-        run_interactive_image_generation_configure()
+        _run_optional_section(
+            section="image-generation",
+            label="image generation",
+            runner=run_interactive_image_generation_configure,
+        )
 
     return persist
+
+
+def _run_optional_section(
+    *,
+    section: str,
+    label: str,
+    runner,
+    args: tuple = (),
+    kwargs: dict | None = None,
+) -> None:
+    """Run an optional onboarding step, isolating cancellation from siblings.
+
+    ``section`` is the slug consumed by ``opensquilla configure <section>``;
+    ``label`` is the user-facing wording (which can contain spaces). Only
+    cancellation-shaped exceptions are caught here — real validation or
+    programming errors propagate so they surface in the operator's terminal
+    instead of being silently buried alongside the "skipping" message.
+    """
+    try:
+        runner(*args, **(kwargs or {}))
+    except UserCancelledError:
+        console.print(
+            f"[yellow]{label} setup cancelled — skipping.[/yellow]"
+        )
+        console.print(
+            f"  [dim]Resume later with[/dim] "
+            f"[{ACCENT_SOFT}]opensquilla configure {section}[/]"
+        )
+    except KeyboardInterrupt:
+        console.print(
+            f"[yellow]{label} setup interrupted — skipping.[/yellow]"
+        )
 
 
 def run_interactive_channel_add(type_name: str | None) -> PersistResult:

@@ -72,7 +72,7 @@ class GatewayClient:
         self._http_base: str | None = None
         self._auth_token: str | None = None
 
-    async def connect(self, url: str = "ws://localhost:18790/ws") -> None:
+    async def connect(self, url: str = "ws://localhost:18791/ws") -> None:
         """Connect to gateway. Raises SystemExit with friendly message on failure."""
         has_existing_connection = (
             self._ws is not None

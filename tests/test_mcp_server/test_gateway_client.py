@@ -47,7 +47,7 @@ async def test_gateway_connect_closes_socket_after_bad_handshake(monkeypatch) ->
     client = GatewayRPCClient()
 
     with pytest.raises(RuntimeError, match="Unexpected gateway handshake frame"):
-        await client.connect("ws://127.0.0.1:18790/ws")
+        await client.connect("ws://127.0.0.1:18791/ws")
 
     assert ws.closed is True
     assert client._ws is None

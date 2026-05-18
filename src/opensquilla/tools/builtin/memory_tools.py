@@ -34,6 +34,7 @@ from opensquilla.memory.types import (
     DEFAULT_MEMORY_SEARCH_RESULTS,
     normalize_memory_search_min_score,
 )
+from opensquilla.memory.source_paths import is_memory_source_path
 from opensquilla.tools.registry import tool
 from opensquilla.tools.types import ToolError, current_tool_context
 
@@ -104,17 +105,7 @@ async def _prune_expired_files(
 
 def _is_memory_source_path(path: str) -> bool:
     """Return True for OpenSquilla memory source files."""
-    rel = Path(path)
-    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
-        return False
-    if rel.parts == ("MEMORY.md",):
-        return True
-    return (
-        len(rel.parts) >= 2
-        and rel.parts[0] == "memory"
-        and rel.suffix == ".md"
-        and not any(part.startswith(".") for part in rel.parts[1:])
-    )
+    return is_memory_source_path(path)
 
 
 def _is_raw_fallback_save_path(path: str) -> bool:
@@ -664,7 +655,11 @@ def create_memory_tools(
             max_results=_memory_search_limit(max_results),
             min_score=normalize_memory_search_min_score(min_score),
         )
-        results = await r.retriever.search(query, opts, intent=SearchIntent.TOOL)
+        results = [
+            result
+            for result in await r.retriever.search(query, opts, intent=SearchIntent.TOOL)
+            if is_memory_source_path(str(result.path))
+        ]
         if not results:
             return "No results found."
 

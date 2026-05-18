@@ -114,7 +114,7 @@ def format_next_steps(config: Any, *, config_path: str | Path | None = None) -> 
         "  Or start in background: opensquilla gateway start --json",
         "  If a gateway is already running, restart it so it loads this config.",
         "  Restart gateway: opensquilla gateway restart --json",
-        "  Web UI: http://127.0.0.1:18790/control/",
+        "  Web UI: http://127.0.0.1:18791/control/",
     ]
     if key_source == "missing_env" and env_key:
         lines.append(f"  Set key before starting gateway: {_set_env_hint(env_key)}")

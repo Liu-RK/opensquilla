@@ -8,9 +8,14 @@ from typing import Any, cast
 import pytest
 
 from opensquilla.engine import Agent, AgentConfig
+from opensquilla.memory.embedding import NullEmbeddingProvider
 from opensquilla.memory.flush import resolve_flush_plan
 from opensquilla.memory.protocols import MemoryToolHandler
+from opensquilla.memory.retrieval import MemoryRetriever
 from opensquilla.memory.session_flush import FlushReceipt, SessionFlushService
+from opensquilla.memory.store import LongTermMemoryStore
+from opensquilla.memory.sync_manager import MemorySyncManager
+from opensquilla.memory.types import MemorySearchOpts, SearchIntent
 from opensquilla.provider import Message
 from opensquilla.tool_boundary import ToolCall, ToolResult
 
@@ -41,6 +46,43 @@ def test_resolve_flush_plan_rotates_oversized_daily_archive(tmp_path) -> None:
 
     third = resolve_flush_plan(workspace_dir=tmp_path, archive_max_bytes=5)
     assert third.relative_path.endswith("-part002.md")
+
+
+@pytest.mark.asyncio
+async def test_curated_flush_memory_is_searchable_but_raw_fallback_is_not(tmp_path) -> None:
+    workspace = tmp_path / "agent"
+    memory_dir = workspace / "memory"
+    raw_dir = memory_dir / ".raw_fallbacks"
+    raw_dir.mkdir(parents=True)
+    (memory_dir / "2026-05-14-session.md").write_text(
+        "Flush summary: zebra77 project decision\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "raw.md").write_text(
+        "Raw fallback transcript: zebra77 should not be searched\n",
+        encoding="utf-8",
+    )
+    store = LongTermMemoryStore(
+        str(tmp_path / "memory.db"),
+        embedding_provider=NullEmbeddingProvider(),
+    )
+    await store.initialize()
+    try:
+        sync = MemorySyncManager(store=store, workspace_dir=workspace, memory_dir=memory_dir)
+        await sync.sync(reason="manual")
+        retriever = MemoryRetriever(store)
+
+        results = await retriever.search(
+            "zebra77",
+            MemorySearchOpts(max_results=5, min_score=0.0),
+            intent=SearchIntent.TOOL,
+        )
+
+        paths = [result.path for result in results]
+        assert "memory/2026-05-14-session.md" in paths
+        assert all(".raw_fallbacks" not in path for path in paths)
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -121,6 +163,39 @@ async def test_agent_memory_flush_raw_receipt_keeps_backoff() -> None:
     task = asyncio.create_task(
         agent._run_flush(SimpleNamespace(relative_path="memory/2026-05-14.md"), [])
     )
+    agent._active_flush_task = task
+    await task
+
+    agent._mark_flush_task_completed(task)
+
+    assert agent._flush_backoff_until > time.monotonic()
+    assert agent._flush_backoff_seconds == 10.0
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_flush_unsafe_llm_receipt_keeps_backoff() -> None:
+    agent = Agent(
+        provider=None,  # type: ignore[arg-type]
+        config=AgentConfig(
+            flush_backoff_initial_seconds=10.0,
+            flush_backoff_max_seconds=20.0,
+        ),
+        session_key="agent:main:webchat:s1",
+    )
+
+    async def unsafe_flush() -> SimpleNamespace:
+        return SimpleNamespace(
+            mode="llm",
+            indexed_chunk_count=1,
+            integrity_status="degraded",
+            output_coverage_status="ok",
+            invalid_candidate_count=0,
+            candidate_missing_ids=[],
+            obligation_status="ok",
+            obligation_missing_ids=[],
+        )
+
+    task = asyncio.create_task(unsafe_flush())
     agent._active_flush_task = task
     await task
 

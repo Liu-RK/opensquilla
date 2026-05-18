@@ -644,6 +644,36 @@ def test_remote_api_key_changes_provider_fingerprint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rebuild_preserves_embedding_cache_rows() -> None:
+    store = LongTermMemoryStore(
+        ":memory:",
+        embedding_provider=NullEmbeddingProvider(),
+    )
+    store._db = await aiosqlite.connect(":memory:")  # type: ignore[assignment]
+    try:
+        await store._ensure_schema()
+        await store._db.execute(  # type: ignore[union-attr]
+            """INSERT INTO embedding_cache
+               (provider, model, provider_key, hash, embedding, dims, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ("p", "m", "k", "h", "[0.0]", 1, 1.0),
+        )
+        await store._db.commit()  # type: ignore[union-attr]
+        await store.index_file("MEMORY.md", "cache survives rebuild")
+
+        await store.rebuild()
+
+        async with store._db.execute(  # type: ignore[union-attr]
+            "SELECT COUNT(*) FROM embedding_cache"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] == 1
+        assert await store.file_count() == 0
+    finally:
+        await store._db.close()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_fts_only_reindex_after_provider_change_restores_lexical_search() -> None:
     store = LongTermMemoryStore(
         ":memory:",

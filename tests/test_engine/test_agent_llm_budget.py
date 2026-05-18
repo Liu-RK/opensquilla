@@ -280,7 +280,11 @@ async def test_context_overflow_noop_compaction_does_not_resend_unchanged_contex
     provider = _ContextOverflowProvider()
     agent = Agent(
         provider=provider,
-        config=AgentConfig(max_provider_retries=0, max_overflow_retries=2),
+        config=AgentConfig(
+            max_provider_retries=0,
+            max_overflow_retries=2,
+            flush_enabled=False,
+        ),
     )
 
     events = [event async for event in agent.run_turn("hello")]
@@ -309,7 +313,11 @@ async def test_context_overflow_summary_only_larger_payload_does_not_retry(
     provider = _ContextOverflowProvider()
     agent = Agent(
         provider=provider,
-        config=AgentConfig(max_provider_retries=0, max_overflow_retries=2),
+        config=AgentConfig(
+            max_provider_retries=0,
+            max_overflow_retries=2,
+            flush_enabled=False,
+        ),
     )
 
     events = [event async for event in agent.run_turn("hello")]
@@ -338,7 +346,11 @@ async def test_context_overflow_effective_compaction_allows_single_retry(
     provider = _ContextOverflowProvider(success_after=1)
     agent = Agent(
         provider=provider,
-        config=AgentConfig(max_provider_retries=0, max_overflow_retries=2),
+        config=AgentConfig(
+            max_provider_retries=0,
+            max_overflow_retries=2,
+            flush_enabled=False,
+        ),
     )
 
     events = [event async for event in agent.run_turn("x" * 4000)]
@@ -346,6 +358,39 @@ async def test_context_overflow_effective_compaction_allows_single_retry(
     assert len(provider.calls) == 2
     assert _provider_payload_is_smaller(provider.calls[0], provider.calls[1])
     assert any(event.kind == "done" and getattr(event, "text", "") == "ok" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_flush_receipt_required_before_live_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compact_called = False
+
+    async def _compact_should_not_run(request: Any) -> CompactionResult:
+        nonlocal compact_called
+        compact_called = True
+        return CompactionResult(
+            summary="short summary",
+            kept_entries=[],
+            removed_count=len(request.entries),
+            chunks_processed=1,
+        )
+
+    monkeypatch.setattr("opensquilla.engine.agent.compact_context", _compact_should_not_run)
+    provider = _ContextOverflowProvider()
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(max_provider_retries=0, max_overflow_retries=2),
+    )
+
+    events = [event async for event in agent.run_turn("x" * 4000)]
+
+    assert compact_called is False
+    assert len(provider.calls) == 1
+    assert any(
+        isinstance(event, ErrorEvent) and event.code == "compaction_exhausted"
+        for event in events
+    )
 
 
 async def _collect_events(stream: AsyncIterator[Any]) -> list[Any]:

@@ -6,7 +6,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import asdict, replace
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -25,6 +25,11 @@ from opensquilla.paths import media_root_from_config
 from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
     call_compact_with_optional_config,
+)
+from opensquilla.session.compaction_lifecycle import (
+    flush_receipt_allows_destructive_compaction,
+    flush_receipt_to_dict,
+    pre_compaction_flush_enabled,
 )
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id
 from opensquilla.session.terminal_reply import build_terminal_reply
@@ -1370,17 +1375,17 @@ async def _handle_sessions_reset(params: dict | None, ctx: RpcContext) -> dict[s
                 },
             ) from exc
 
-        # ``flush_service.execute`` can return ``mode="error"`` (no raise) when
-        # both the LLM path and the raw-dump fallback fail. Treat that as a
-        # hard failure so the transcript is preserved instead of cleared.
-        if receipt.mode == "error":
+        if not flush_receipt_allows_destructive_compaction(receipt):
             raise RpcHandlerError(
                 code="flush_disk_error",
-                message=f"Reset aborted: flush failed ({receipt.error or 'unknown error'})",
+                message=(
+                    "Reset aborted: flush did not produce a complete LLM receipt."
+                ),
                 details={
                     "flush_receipt": receipt.to_dict(),
                     "key": key,
                     "session_id": previous_session_id,
+                    "reason": "compaction_flush_failed",
                 },
             )
 
@@ -1503,16 +1508,78 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
         raise KeyError("No session manager available")
 
     context_window_tokens = _context_window_tokens(params, ctx)
+    custom_instructions = (params or {}).get("instructions")
+    if custom_instructions is not None and not isinstance(custom_instructions, str):
+        raise RpcHandlerError(
+            code="INVALID_PARAMS",
+            message="instructions must be a string when provided.",
+            details={"field": "instructions"},
+        )
     turn_runner = ctx.turn_runner
     lock = get_session_lock(turn_runner, key)
 
     async def _run_locked() -> dict[str, Any]:
+        receipt = None
         storage = get_session_storage(ctx.session_manager)
         session = None
         if storage is not None and await storage.get_session(key) is None:
             raise KeyError(f"Session not found: {key}")
         if storage is not None:
             session = await storage.get_session(key)
+        transcript = []
+        flush_enabled = pre_compaction_flush_enabled(ctx.config)
+        if flush_enabled:
+            get_transcript = getattr(ctx.session_manager, "get_transcript", None)
+            if not callable(get_transcript):
+                raise RpcHandlerError(
+                    code="CONTEXT_FLUSH_FAILED",
+                    message=(
+                        "Compact aborted: session manager cannot inspect the "
+                        "transcript before flush."
+                    ),
+                    details={"key": key, "reason": "compaction_flush_failed"},
+                )
+            transcript = await get_transcript(key)
+
+        if flush_enabled and transcript:
+            if ctx.flush_service is None:
+                raise RpcHandlerError(
+                    code="CONTEXT_FLUSH_FAILED",
+                    message=(
+                        "Compact aborted: flush service is unavailable and "
+                        "the transcript is non-empty."
+                    ),
+                    details={"key": key, "reason": "compaction_flush_failed"},
+                )
+            agent_id = normalize_agent_id(getattr(session, "agent_id", None) or "main")
+            try:
+                receipt = await ctx.flush_service.execute(
+                    transcript,
+                    key,
+                    agent_id=agent_id,
+                    timeout=30.0,
+                    message_window=0,
+                    segment_mode="auto",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RpcHandlerError(
+                    code="CONTEXT_FLUSH_FAILED",
+                    message=f"Compact aborted: flush failed ({exc})",
+                    details={"key": key, "reason": "compaction_flush_failed"},
+                ) from exc
+            if not flush_receipt_allows_destructive_compaction(receipt):
+                raise RpcHandlerError(
+                    code="CONTEXT_FLUSH_FAILED",
+                    message=(
+                        "Compact aborted: flush did not produce a complete "
+                        "LLM receipt."
+                    ),
+                    details={
+                        "key": key,
+                        "reason": "compaction_flush_failed",
+                        "flush_receipt": flush_receipt_to_dict(receipt),
+                    },
+                )
 
         compaction_config = build_compaction_config_from_provider(
             _resolve_compaction_provider(ctx, session),
@@ -1522,10 +1589,21 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
 
         compact_with_result = getattr(ctx.session_manager, "compact_with_result", None)
         if callable(compact_with_result):
-            result = await compact_with_result(key, context_window_tokens, compaction_config)
+            result = await compact_with_result(
+                key,
+                context_window_tokens,
+                compaction_config,
+                custom_instructions=custom_instructions,
+            )
             summary = getattr(result, "summary", "") or ""
             removed_count = int(getattr(result, "removed_count", 0) or 0)
             summary_source = getattr(result, "summary_source", "unknown") or "unknown"
+            kept_count = len(getattr(result, "kept_entries", []) or [])
+            tokens_before = int(getattr(result, "tokens_before", 0) or 0)
+            tokens_after = int(getattr(result, "tokens_after", 0) or 0)
+            remaining_budget_tokens = int(
+                getattr(result, "remaining_budget_tokens", 0) or 0
+            )
         else:
             compact = ctx.session_manager.compact
             summary = await call_compact_with_optional_config(
@@ -1536,14 +1614,26 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
             )
             removed_count = 1 if summary else 0
             summary_source = "unknown"
-        return {
+            kept_count = 0
+            tokens_before = 0
+            tokens_after = 0
+            remaining_budget_tokens = 0
+        payload = {
             "key": key,
             "compacted": removed_count > 0,
             "mode": "summary",
             "summary_len": len(summary),
             "summary_source": summary_source,
             "context_window_tokens": context_window_tokens,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "remaining_budget_tokens": remaining_budget_tokens,
+            "removed_count": removed_count,
+            "kept_count": kept_count,
         }
+        if receipt is not None:
+            payload["flush_receipt"] = flush_receipt_to_dict(receipt)
+        return payload
 
     if lock is None:
         return await _run_locked()
@@ -1553,6 +1643,11 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
 
 @_d.method("sessions.compact", scope="operator.write")
 async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict:
+    return cast(dict, await _handle_sessions_context_compact(params, ctx))
+
+
+@_d.method("sessions.truncate", scope="operator.write")
+async def _handle_sessions_truncate(params: dict | None, ctx: RpcContext) -> dict:
     from opensquilla.memory.session_flush import FlushReceipt
 
     key = _require_key(params)
@@ -1581,7 +1676,7 @@ async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict
                 raise RpcHandlerError(
                     code="flush_unavailable",
                     message=(
-                        "Compact aborted: flush service is unavailable and "
+                        "Truncate aborted: flush service is unavailable and "
                         "the transcript is non-empty. Re-run with force=true "
                         "(admin) to truncate without backup."
                     ),
@@ -1595,7 +1690,7 @@ async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict
             if transcript and force and "operator.admin" not in ctx.principal.scopes:
                 raise RpcHandlerError(
                     code="permission_denied",
-                    message="force=true on sessions.compact requires operator.admin scope.",
+                    message="force=true on sessions.truncate requires operator.admin scope.",
                     details={"key": key, "session_id": previous_session_id},
                 )
         else:
@@ -1626,8 +1721,8 @@ async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict
                         error=str(exc),
                     )
                     raise RpcHandlerError(
-                        code="flush_disk_error",
-                        message=f"Compact aborted: flush failed ({receipt.error})",
+                        code="CONTEXT_FLUSH_FAILED",
+                        message=f"Truncate aborted: flush failed ({receipt.error})",
                         details={
                             "flush_receipt": receipt.to_dict(),
                             "key": key,
@@ -1635,19 +1730,18 @@ async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict
                         },
                     ) from exc
 
-                # ``flush_service.execute`` can return ``mode="error"`` (no
-                # raise) when both LLM and raw-dump fallbacks fail. Treat as
-                # hard failure so the transcript is preserved.
-                if receipt.mode == "error":
+                if not flush_receipt_allows_destructive_compaction(receipt):
                     raise RpcHandlerError(
-                        code="flush_disk_error",
+                        code="CONTEXT_FLUSH_FAILED",
                         message=(
-                            f"Compact aborted: flush failed ({receipt.error or 'unknown error'})"
+                            "Truncate aborted: flush did not produce a complete "
+                            "LLM receipt."
                         ),
                         details={
-                            "flush_receipt": receipt.to_dict(),
+                            "flush_receipt": flush_receipt_to_dict(receipt),
                             "key": key,
                             "session_id": previous_session_id,
+                            "reason": "compaction_flush_failed",
                         },
                     )
             else:
@@ -1665,6 +1759,7 @@ async def _handle_sessions_compact(params: dict | None, ctx: RpcContext) -> dict
         payload = {
             "key": key,
             "compacted": result["truncated"],
+            "mode": "truncate",
             "before_count": result["before_count"],
             "after_count": result["after_count"],
         }

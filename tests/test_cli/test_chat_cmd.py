@@ -1005,7 +1005,17 @@ async def test_standalone_compact_refuses_non_empty_transcript_without_flush_ser
 
 class _FakeFlushService:
     def __init__(self, receipt: object | None = None, error: Exception | None = None) -> None:
-        self.receipt = receipt or SimpleNamespace(mode="llm", error=None)
+        self.receipt = receipt or SimpleNamespace(
+            mode="llm",
+            error=None,
+            indexed_chunk_count=1,
+            integrity_status="ok",
+            output_coverage_status="ok",
+            invalid_candidate_count=0,
+            candidate_missing_ids=[],
+            obligation_status="ok",
+            obligation_missing_ids=[],
+        )
         self.error = error
         self.calls: list[dict[str, object]] = []
 

@@ -244,18 +244,24 @@ async def create_xlsx(sheets: list[dict[str, Any]], name: str | None = None) -> 
 @tool(
     name="create_pptx",
     description=(
-        "Create a PowerPoint deck from structured slides and publish it as a generated artifact. "
-        "Use this for channel presentation requests instead of returning slide source text."
+        "Create a basic text-only PowerPoint deck from structured slides and publish it as a "
+        "generated artifact. This fallback only supports slide titles plus body text or bullets; "
+        "it does not support images, charts, icons, custom layouts, or templates."
     ),
     params={
         "name": {"type": "string", "description": "Output filename. .pptx is appended if missing."},
         "slides": {
             "type": "array",
-            "description": "Non-empty array of slide objects with title plus body or bullets.",
+            "description": (
+                "Non-empty array of slide objects with title plus body or bullets only. "
+                "Images, charts, icons, and custom layout fields are ignored because this "
+                "tool is a text-only fallback."
+            ),
             "items": {"type": "object"},
         },
     },
     required=["slides"],
+    exposed_by_default=False,
 )
 async def create_pptx(slides: list[dict[str, Any]], name: str | None = None) -> str:
     if not isinstance(slides, list) or not slides:

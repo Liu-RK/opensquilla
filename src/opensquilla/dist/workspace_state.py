@@ -8,7 +8,7 @@ Emits a reproducible, versioned inventory of the current opensquilla install:
       "python_requires": "<pyproject requires-python>",
       "bundled_channels": [...],
       "bundled_tools": [...],
-      "gateway_defaults": {"listen": "127.0.0.1", "port": 18790}
+      "gateway_defaults": {"listen": "127.0.0.1", "port": 18791}
     }
 
 Reproducibility contract
@@ -88,7 +88,7 @@ BUNDLED_TOOLS: tuple[str, ...] = (
 # Packaging-side enforcement keeps these values consistent across release surfaces.
 GATEWAY_DEFAULTS: dict[str, object] = {
     "listen": "127.0.0.1",
-    "port": 18790,
+    "port": 18791,
 }
 
 # Fallback version used only when the package is not installed (editable

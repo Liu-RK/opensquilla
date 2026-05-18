@@ -52,7 +52,6 @@ _CHANNEL_DEFAULT_ALLOW: frozenset[str] = frozenset(
         "publish_artifact",
         "create_csv",
         "create_pdf_report",
-        "create_pptx",
         "create_xlsx",
         "feishu_doc_create",
         "feishu_doc_list_blocks",

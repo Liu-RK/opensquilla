@@ -8,7 +8,7 @@
 #   - on Windows, best-effort installs Microsoft Visual C++ Redistributable
 #     before the recommended router profile because onnxruntime requires it
 #   - prints a post-install banner documenting the default bind
-#     (127.0.0.1:18790) and the explicit opt-in required to expose the gateway
+#     (127.0.0.1:18791) and the explicit opt-in required to expose the gateway
 #     on the network (-Listen 0.0.0.0 or $env:OPENSQUILLA_LISTEN="0.0.0.0")
 #   - adds an extra WARNING when the operator requested network exposure at
 #     install time via $env:OPENSQUILLA_LISTEN="0.0.0.0"
@@ -257,7 +257,7 @@ function Write-Banner {
 OpenSquilla installed via $installer -> $prefix (profile: $profile)
 Extras: $(if ($installExtras.Count -gt 0) { $installExtras -join ', ' } else { 'none' })
 
-Default gateway bind: 127.0.0.1:18790 (loopback only)
+Default gateway bind: 127.0.0.1:18791 (loopback only)
 Network exposure is opt-in only. To expose the gateway on the network you
 must use one of:
   - CLI flag:  opensquilla gateway run --listen 0.0.0.0

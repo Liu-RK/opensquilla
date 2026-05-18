@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json as _json
+
 import typer
+from rich.table import Table
 
 from opensquilla.cli.ui import (
     ACCENT,
@@ -21,7 +24,10 @@ from opensquilla.onboarding.flow import (
     run_noninteractive_provider_configure,
 )
 from opensquilla.onboarding.next_steps import env_reference_warnings, format_next_steps
-from opensquilla.onboarding.status import get_onboarding_status
+from opensquilla.onboarding.section_status import SectionStatus
+from opensquilla.onboarding.status import OnboardingStatus, get_onboarding_status
+
+_STATUS_BLOCKING = {SectionStatus.MISSING, SectionStatus.DEGRADED, SectionStatus.UNKNOWN}
 
 
 def _print_env_reference_warnings(config) -> None:
@@ -29,7 +35,25 @@ def _print_env_reference_warnings(config) -> None:
         console.print(warning_panel(warning))
 
 
+def _format_missing_sections(status: OnboardingStatus) -> str:
+    parts = [
+        f"{name} ({state.value})"
+        for name, state in status.sections.items()
+        if state in _STATUS_BLOCKING
+    ]
+    return ", ".join(parts) if parts else "none"
+
+
+onboard_app = typer.Typer(
+    help="Run or inspect OpenSquilla onboarding.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+
+
+@onboard_app.callback(invoke_without_command=True)
 def onboard_command(
+    ctx: typer.Context,
     provider: str = typer.Option("", "--provider"),
     model: str = typer.Option("", "--model"),
     api_key: str = typer.Option("", "--api-key"),
@@ -48,15 +72,26 @@ def onboard_command(
     if_needed: bool = typer.Option(False, "--if-needed"),
 ) -> None:
     """Run first-run onboarding (interactive or non-interactive)."""
+    if ctx.invoked_subcommand is not None:
+        # ``opensquilla onboard <subcommand>`` was invoked; let the subcommand
+        # handler take over instead of running the interactive flow.
+        return
     if if_needed:
         cfg = load_config()
         status = get_onboarding_status(cfg)
-        if status.has_config and status.llm_configured:
+        if status.has_config and not status.needs_onboarding:
             console.print(
                 f"[{ACCENT_SOFT}]◆[/] [bold]onboarding already complete[/]"
                 " [dim]— nothing to do[/dim]"
             )
             raise typer.Exit(code=0)
+        # Tell the operator what is still pending so it is obvious why the
+        # idempotent gate did not short-circuit.
+        if status.has_config:
+            console.print(
+                f"[{ACCENT_SOFT}]◆[/] [bold]onboarding has unfinished sections:[/] "
+                f"{markup_escape(_format_missing_sections(status))}"
+            )
 
     if provider:
         result = run_noninteractive_provider_configure(
@@ -113,6 +148,75 @@ def onboard_command(
         markup=False,
         highlight=False,
     )
+
+
+_STATUS_STYLE: dict[SectionStatus, str] = {
+    SectionStatus.OK: "green",
+    SectionStatus.OPTIONAL: "dim",
+    SectionStatus.MISSING: "yellow",
+    SectionStatus.DEGRADED: "yellow",
+    SectionStatus.UNKNOWN: "red",
+}
+
+
+def _status_payload(status: OnboardingStatus) -> dict:
+    return {
+        "configPath": status.config_path,
+        "hasConfig": status.has_config,
+        "needsOnboarding": status.needs_onboarding,
+        "sections": {name: state.value for name, state in status.sections.items()},
+        "llmSource": status.llm_source,
+        "imageGenerationEnabled": status.image_generation_enabled,
+        "imageGenerationProvider": status.image_generation_provider,
+        "imageGenerationPrimary": status.image_generation_primary,
+        "channelCount": status.channel_count,
+    }
+
+
+@onboard_app.command("status")
+def onboard_status_command(
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """Print readiness of every onboarding section without mutating state."""
+    cfg = load_config()
+    status = get_onboarding_status(cfg)
+
+    if json_output:
+        typer.echo(_json.dumps(_status_payload(status), ensure_ascii=False))
+        return
+
+    table = Table(title="Onboarding readiness", show_header=True)
+    table.add_column("Section")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for name, state in status.sections.items():
+        style = _STATUS_STYLE.get(state, "")
+        detail = ""
+        if name == "llm":
+            detail = status.llm_source
+        elif name == "image_generation" and status.image_generation_provider:
+            detail = (
+                f"{status.image_generation_provider} "
+                f"({status.image_generation_source})"
+            ).strip()
+        elif name == "channels":
+            detail = f"{status.channel_count} configured"
+        table.add_row(
+            name,
+            f"[{style}]{state.value}[/]" if style else state.value,
+            detail,
+        )
+    console.print(table)
+    console.print(
+        f"[bold]Needs onboarding:[/] "
+        f"{'yes' if status.needs_onboarding else 'no'}"
+    )
+    if status.needs_onboarding:
+        console.print(
+            f"  [dim]Run[/] [{ACCENT_SOFT}]opensquilla onboard --if-needed[/] "
+            f"[dim]to address:[/] "
+            f"{markup_escape(_format_missing_sections(status))}"
+        )
 
 
 def configure_command(

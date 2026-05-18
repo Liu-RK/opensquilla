@@ -1405,7 +1405,7 @@ class GatewayConfig(BaseSettings):
     # precedence order (explicit kwarg/flag > OPENSQUILLA_LISTEN > OPENSQUILLA_GATEWAY_HOST
     # > default) is testable without the pydantic-settings env cache.
     host: str = "127.0.0.1"
-    port: int = 18790
+    port: int = 18791
     version: str = "0.1.0"
     debug: bool = False
     log_file_enabled: bool = True

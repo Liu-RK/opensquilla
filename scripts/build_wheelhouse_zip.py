@@ -600,7 +600,7 @@ echo "Start it with:"
 echo "  opensquilla gateway run"
 echo
 echo "Then open:"
-echo "  http://127.0.0.1:18790/control/"
+echo "  http://127.0.0.1:18791/control/"
 """
 
 
@@ -696,7 +696,7 @@ Write-Host "Start it with:"
 Write-Host "  opensquilla gateway run"
 Write-Host ""
 Write-Host "Then open:"
-Write-Host "  http://127.0.0.1:18790/control/"
+Write-Host "  http://127.0.0.1:18791/control/"
 """
 
 
@@ -837,7 +837,7 @@ fi
 
 echo
 echo "Starting OpenSquilla gateway."
-echo "Web UI: http://127.0.0.1:18790/control/"
+echo "Web UI: http://127.0.0.1:18791/control/"
 echo "Press Ctrl+C in this terminal to stop the gateway."
 if [[ -t 1 ]]; then
   exec "${OPENSQUILLA_BIN}" "${OPENSQUILLA_MODULE[@]}" gateway run
@@ -1060,7 +1060,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Starting OpenSquilla gateway."
-Write-Host "Web UI: http://127.0.0.1:18790/control/"
+Write-Host "Web UI: http://127.0.0.1:18791/control/"
 Write-Host "Press Ctrl+C in this terminal to stop the gateway."
 $OutputRedirected = [Console]::IsOutputRedirected
 if (-not $OutputRedirected) {
@@ -1180,7 +1180,7 @@ def render_readme(
 2. Keep the terminal open. Closing the terminal stops the gateway.
 3. Complete onboarding. On first run, choose a provider and paste the requested
    keys; later starts let you review or change the config.
-4. Open `http://127.0.0.1:18790/control/`.
+4. Open `http://127.0.0.1:18791/control/`.
 
 <details>
 <summary>Advanced portable usage</summary>
@@ -1229,7 +1229,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 2. Keep the terminal open. Closing the terminal stops the gateway.
 3. Complete onboarding. On first run, choose a provider and paste the requested
    keys; later starts let you review or change the config.
-4. Open `http://127.0.0.1:18790/control/`.
+4. Open `http://127.0.0.1:18791/control/`.
 """
         else:
             command_section = f"""## macOS / Linux
@@ -1242,7 +1242,7 @@ Set-ExecutionPolicy -Scope Process Bypass
     web_ui_note = (
         ""
         if portable
-        else "Open `http://127.0.0.1:18790/control/`.\n\n"
+        else "Open `http://127.0.0.1:18791/control/`.\n\n"
     )
 
     return f"""# OpenSquilla {app_version} {release_kind}

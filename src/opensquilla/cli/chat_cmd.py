@@ -33,6 +33,9 @@ from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
     call_compact_with_optional_config,
 )
+from opensquilla.session.compaction_lifecycle import (
+    flush_receipt_allows_destructive_compaction,
+)
 from opensquilla.session.terminal_reply import build_terminal_reply
 
 _CLI_ALLOWED_FILE_MIMES = _cli_attachments.CLI_ALLOWED_FILE_MIMES
@@ -529,7 +532,7 @@ async def _flush_before_standalone_rewrite(
         console.print(f"[yellow]{operation} aborted: flush failed ({exc}).[/yellow]")
         return False
 
-    if getattr(receipt, "mode", None) == "error":
+    if not flush_receipt_allows_destructive_compaction(receipt):
         error = getattr(receipt, "error", None) or "unknown error"
         console.print(f"[yellow]{operation} aborted: flush failed ({error}).[/yellow]")
         return False
@@ -669,16 +672,34 @@ async def _standalone_repl(
                             model_override=model,
                             compaction_config=getattr(svc.config, "compaction", None),
                         )
-                        summary = await call_compact_with_optional_config(
-                            svc.session_manager.compact,
-                            session_key,
-                            context_window,
-                            compaction_config,
+                        compact_with_result = getattr(
+                            svc.session_manager, "compact_with_result", None
                         )
+                        if callable(compact_with_result):
+                            result = await compact_with_result(
+                                session_key,
+                                context_window,
+                                compaction_config,
+                            )
+                            summary = getattr(result, "summary", "") or ""
+                            token_stats = (
+                                f"{getattr(result, 'tokens_before', 0)} -> "
+                                f"{getattr(result, 'tokens_after', 0)} tokens, "
+                                f"{getattr(result, 'remaining_budget_tokens', 0)} remaining, "
+                                f"{getattr(result, 'summary_source', 'unknown')}"
+                            )
+                        else:
+                            summary = await call_compact_with_optional_config(
+                                svc.session_manager.compact,
+                                session_key,
+                                context_window,
+                                compaction_config,
+                            )
+                            token_stats = f"summary {len(summary)} chars"
                         if summary:
                             console.print(
                                 f"[{ACCENT}]compacted[/] "
-                                f"[dim]summary {len(summary)} chars[/dim]"
+                                f"[dim]{token_stats}[/dim]"
                             )
                         else:
                             console.print(
@@ -940,9 +961,18 @@ async def _handle_gateway_slash_command(
     if cmd == "/compact":
         payload = await client.compact_session(state.session_key)
         if payload.get("compacted"):
+            before = int(payload.get("tokens_before") or 0)
+            after = int(payload.get("tokens_after") or 0)
+            remaining = int(payload.get("remaining_budget_tokens") or 0)
+            source = payload.get("summary_source") or "unknown"
+            token_stats = (
+                f"{before} -> {after} tokens, {remaining} remaining, {source}"
+                if before or after
+                else f"summary {payload.get('summary_len', 0)} chars"
+            )
             console.print(
                 f"[{ACCENT}]compacted[/] "
-                f"[dim]summary {payload.get('summary_len', 0)} chars[/dim]"
+                f"[dim]{token_stats}[/dim]"
             )
         else:
             console.print(
@@ -1532,7 +1562,7 @@ async def _resolve_gateway_session_cost(
         # Real teardown signal — propagate so asyncio can unwind the task
         # tree. The footer ∑ segment is not worth delaying cancellation for.
         raise
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # 2s budget elapsed; the turn already finished, so silently fall back
         # to "no ∑ segment" rather than crashing a successful turn.
         return None
