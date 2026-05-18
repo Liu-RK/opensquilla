@@ -18,6 +18,7 @@ from opensquilla.sandbox.integration import get_runtime, sandboxed
 from opensquilla.tools.path_policy import reject_foreign_host_path
 from opensquilla.tools.registry import tool
 from opensquilla.tools.types import ToolError, WorkspaceAccessError, current_tool_context
+from opensquilla.tools.write_tracking import record_workspace_file_write
 
 _SPREADSHEET_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
 _OFFICE_BINARY_EXTENSIONS = {".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"}
@@ -688,12 +689,15 @@ async def write_file(path: str, content: str, approval_id: str | None = None) ->
         return json.dumps(approval)
 
     loop = asyncio.get_event_loop()
+    created = not p.exists()
 
     def _write() -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
     await loop.run_in_executor(None, _write)
+    if created:
+        record_workspace_file_write(p)
     _notify_memory_source_write(p)
     _notify_bootstrap_source_write(p)
     return f"Written {len(content)} bytes to {p}"

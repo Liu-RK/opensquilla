@@ -14,6 +14,7 @@ from opensquilla.sandbox.integration import sandboxed
 from opensquilla.tools.path_policy import reject_foreign_host_path
 from opensquilla.tools.registry import tool
 from opensquilla.tools.types import ToolError, current_tool_context
+from opensquilla.tools.write_tracking import record_workspace_file_write
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -212,6 +213,12 @@ def _notify_bootstrap_source_writes(ops: list[PatchOp], root: Path) -> None:
             continue
         seen.add(rel)
         ctx.on_bootstrap_source_write(ctx.agent_id or "main", rel)
+
+
+def _record_workspace_file_writes(ops: list[PatchOp], root: Path) -> None:
+    for op in ops:
+        if isinstance(op, AddFile):
+            record_workspace_file_write(_validate_path(op.path, root))
 
 
 @dataclass(frozen=True)
@@ -570,6 +577,7 @@ async def apply_patch(patch: str, approval_id: str | None = None) -> str:
         return _apply_ops(ops, root)
 
     added, modified, deleted = await loop.run_in_executor(None, _run)
+    _record_workspace_file_writes(ops, root)
     _notify_memory_source_writes(ops, root)
     _notify_bootstrap_source_writes(ops, root)
     parts = []

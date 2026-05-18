@@ -834,6 +834,133 @@ async def test_direct_channel_turn_honors_final_only_stream_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_streaming_path_falls_back_when_adapter_stream_fails() -> None:
+    class FailingStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivered_chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.delivered_chunks.append(chunk)
+                raise RuntimeError("stream edit failed")
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="part-one")
+            yield TextDeltaEvent(text="part-two")
+            yield DoneEvent()
+
+    channel = FailingStreamingChannel()
+    config = SimpleNamespace(
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:stream-fallback",
+        _FakeEventBridge(),
+        None,
+        config,
+    )
+
+    assert channel.delivered_chunks == ["part-one"]
+    assert channel.sent
+    assert "part-one" in channel.sent[-1].content
+    assert "part-two" in channel.sent[-1].content
+
+
+@pytest.mark.asyncio
+async def test_direct_streaming_path_fallback_skips_delivered_chunks() -> None:
+    class FailingLateStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivered_chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            count = 0
+            async for chunk in chunks:
+                count += 1
+                if count == 3:
+                    raise RuntimeError("late stream edit failed")
+                self.delivered_chunks.append(chunk)
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            for chunk in ("alpha", "beta", "gamma", "delta"):
+                yield TextDeltaEvent(text=chunk)
+            yield DoneEvent()
+
+    channel = FailingLateStreamingChannel()
+    config = SimpleNamespace(
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:stream-fallback-late",
+        _FakeEventBridge(),
+        None,
+        config,
+    )
+
+    assert channel.delivered_chunks == ["alpha", "beta"]
+    assert channel.sent
+    fallback = channel.sent[-1].content
+    assert "gamma" in fallback
+    assert "delta" in fallback
+    assert "alpha" not in fallback
+    assert "beta" not in fallback
+
+
+@pytest.mark.asyncio
+async def test_direct_streaming_fallback_sanitizes_queued_directive_tags() -> None:
+    class FailingStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delivered_chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.delivered_chunks.append(chunk)
+                raise RuntimeError("stream edit failed")
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="visible ")
+            yield TextDeltaEvent(text="[[reply_to_current]]hidden")
+            yield DoneEvent()
+
+    channel = FailingStreamingChannel()
+    config = SimpleNamespace(
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:stream-fallback-directive",
+        _FakeEventBridge(),
+        None,
+        config,
+    )
+
+    assert channel.delivered_chunks == ["visible "]
+    assert channel.sent
+    fallback = channel.sent[-1].content
+    assert "[[reply_to_current]]" not in fallback
+    assert "hidden" in fallback
+
+
+@pytest.mark.asyncio
 async def test_channel_batch_turn_uses_agent_registry_model() -> None:
     class RecordingTurnRunner:
         def __init__(self) -> None:

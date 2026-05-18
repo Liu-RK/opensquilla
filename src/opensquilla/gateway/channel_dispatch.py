@@ -1865,21 +1865,29 @@ async def _run_turn_streaming_path(
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     text_emitted = False
     stream_error: str | None = None
+    stream_task_error: BaseException | None = None
+    yielded_stream_chunks: list[str] = []
+    stream_delivered_index = 0
     artifacts: list[dict[str, Any]] = []
+    stream_sanitizer = _DirectiveTagStreamSanitizer()
 
     async def _chunk_iter() -> AsyncIterator[str]:
         """Async iterator that yields text chunks from the queue."""
-        sanitizer = _DirectiveTagStreamSanitizer()
+        nonlocal stream_delivered_index
         while True:
             chunk = await queue.get()
             if chunk is None:
-                tail = sanitizer.flush()
+                tail = stream_sanitizer.flush()
                 if tail:
+                    yielded_stream_chunks.append(tail)
                     yield tail
+                    stream_delivered_index = len(yielded_stream_chunks)
                 return
-            cleaned = sanitizer.clean(chunk)
+            cleaned = stream_sanitizer.clean(chunk)
             if cleaned:
+                yielded_stream_chunks.append(cleaned)
                 yield cleaned
+                stream_delivered_index = len(yielded_stream_chunks)
 
     # Start the streaming consumer as a background task
     stream_task = asyncio.create_task(
@@ -1946,8 +1954,53 @@ async def _run_turn_streaming_path(
         # Wait for the streaming task to finish
         try:
             await asyncio.wait_for(stream_task, timeout=10.0)
-        except (TimeoutError, Exception):
+        except TimeoutError as exc:
+            stream_task_error = exc
+            log.warning(
+                "channel_dispatch.direct_streaming_failed",
+                channel_type=type(channel).__name__,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             stream_task.cancel()
+        except Exception as exc:  # noqa: BLE001 - streaming adapter fallback below
+            stream_task_error = exc
+            log.warning(
+                "channel_dispatch.direct_streaming_failed",
+                channel_type=type(channel).__name__,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            stream_task.cancel()
+
+    if stream_task_error is not None and text_emitted:
+        queued_remainder: list[str] = []
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(item, str):
+                cleaned = stream_sanitizer.clean(item)
+                if cleaned:
+                    queued_remainder.append(cleaned)
+        tail = stream_sanitizer.flush()
+        if tail:
+            queued_remainder.append(tail)
+        undelivered_yielded = "".join(
+            yielded_stream_chunks[stream_delivered_index:]
+        )
+        fallback_text = undelivered_yielded + "".join(queued_remainder)
+        if fallback_text:
+            try:
+                await channel.send(_build_reply_message(channel, fallback_text, msg))
+            except Exception as exc:  # noqa: BLE001 - best-effort fallback
+                log.warning(
+                    "channel_dispatch.direct_streaming_batch_fallback_failed",
+                    channel_type=type(channel).__name__,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
     # Error recovery
     if stream_error is not None:

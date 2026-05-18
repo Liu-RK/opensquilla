@@ -404,7 +404,7 @@ _CORPUS_BY_ID = {c.case_id: c for c in _CORPUS}
 # ---------------------------------------------------------------------------
 
 
-def _build_runner() -> TurnRunner:
+def _build_runner(*, compaction_hooks=None) -> TurnRunner:
     return TurnRunner(
         provider_selector=None,
         tool_registry=None,
@@ -420,11 +420,17 @@ def _build_runner() -> TurnRunner:
         session_lock_provider=None,
         diagnostics_state=None,
         turn_hooks=None,
+        compaction_hooks=compaction_hooks,
     )
 
 
-def _setup_runner(monkeypatch: pytest.MonkeyPatch, case: _Case) -> TurnRunner:
-    runner = _build_runner()
+def _setup_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    case: _Case,
+    *,
+    compaction_hooks=None,
+) -> TurnRunner:
+    runner = _build_runner(compaction_hooks=compaction_hooks)
     selector = _StubSelector(
         "sel",
         current_model="claude-sonnet-4.5",

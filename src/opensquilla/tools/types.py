@@ -57,6 +57,7 @@ class ToolContext:
     artifact_max_bytes: int | None = None
     artifact_disk_budget_bytes: int | None = None
     published_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    workspace_file_writes: list[dict[str, Any]] = field(default_factory=list)
     allowed_tools: set[str] | None = None
     denied_tools: set[str] = field(default_factory=set)
     on_memory_source_write: Callable[[str, str], None] | None = None

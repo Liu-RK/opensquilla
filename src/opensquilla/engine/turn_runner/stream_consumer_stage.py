@@ -14,15 +14,14 @@ contract. Terminal state for the post-stream surface flows
 through the harness-owned ``_StreamState`` value object the stage
 mutates in place.
 
-Compaction refresh preservation: the ``_CompactionHandler`` executes the
-three-step ``persist -> snapshot refresh -> system-prompt refresh``
-sequence as a single transaction. The
+Compaction refresh preservation: the ``_CompactionHandler`` fires the
+supplied ``CompactionHook`` observers around the three-step
+``persist -> snapshot refresh -> system-prompt refresh`` sequence. The
 ``persist_compaction_result`` re-entrancy contract is preserved -- the
 adapter forwards the call verbatim and the IN-TURN path remains the
 only call site after the previous extraction landed.
 
 No ``TurnHook`` is fired from inside the stream loop today.
-``CompactionHook`` integration for the in-turn refresh path is deferred.
 """
 
 from __future__ import annotations
@@ -33,8 +32,11 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import structlog
 
+from opensquilla.engine.hooks.types import CompactionState
+
 if TYPE_CHECKING:
     from opensquilla.engine.agent import Agent
+    from opensquilla.engine.hooks.types import CompactionHook
     from opensquilla.engine.types import (
         AgentEvent,
         ArtifactEvent,
@@ -249,6 +251,8 @@ class StreamConsumerStageInput:
     # Mutable shared accumulators (passed by reference)
     state: _StreamState
 
+    # Effective tool context for runtime-generated delivery backstops.
+    tool_context: Any | None = None
     # Original input provenance for runtime-generated disclosures.
     input_provenance: dict[str, Any] | None = None
 
@@ -423,6 +427,9 @@ class _DoneHandler:
         inp: StreamConsumerStageInput,
         state: _StreamState,
     ) -> tuple[DoneEvent, list[AgentEvent]]:
+        from opensquilla.engine.artifact_delivery import (
+            auto_publish_omitted_workspace_artifacts,
+        )
         from opensquilla.engine.runtime import (
             _artifact_delivery_failure_notice,
             _claims_image_without_tool_use,
@@ -495,6 +502,20 @@ class _DoneHandler:
 
         accumulated_text = "".join(state.final_text_parts)
         extra_yields: list[AgentEvent] = []
+        from opensquilla.engine.types import ArtifactEvent as _ArtifactEvent
+
+        omitted_publish_result = auto_publish_omitted_workspace_artifacts(
+            inp.tool_context,
+            final_text=accumulated_text,
+        )
+        for artifact in omitted_publish_result.artifacts:
+            artifact_event = _ArtifactEvent(**artifact)
+            state.turn_artifacts.append(artifact)
+            extra_yields.append(artifact_event)
+        state.artifact_delivery_failures.extend(
+            omitted_publish_result.failure_summaries
+        )
+
         if _should_add_artifact_delivery_failure_notice(
             failure_summaries=state.artifact_delivery_failures,
             turn_artifacts=state.turn_artifacts,
@@ -503,7 +524,7 @@ class _DoneHandler:
             event, notice_event = _append_done_notice_delta(
                 event,
                 state,
-                _artifact_delivery_failure_notice(),
+                _artifact_delivery_failure_notice(partial=bool(state.turn_artifacts)),
                 accumulated_text=accumulated_text,
             )
             extra_yields.append(notice_event)
@@ -648,16 +669,28 @@ class _CompactionHandler:
         persist: CompactionPersistPort,
         memory_snapshot: MemorySnapshotRefreshPort,
         system_prompt: SystemPromptRefreshPort,
+        compaction_hooks: tuple[CompactionHook, ...] = (),
     ) -> None:
         self._persist = persist
         self._memory_snapshot = memory_snapshot
         self._system_prompt = system_prompt
+        self._compaction_hooks = compaction_hooks
 
     async def handle(
         self,
         event: CompactionEvent,
         inp: StreamConsumerStageInput,
     ) -> None:
+        state = CompactionState(
+            session_key=inp.session_key,
+            agent_id=inp.agent_id,
+            extra={
+                "phase": "in_turn_stream",
+                "summary": event.summary,
+                "kept_entries": event.kept_entries,
+            },
+        )
+        await self._fire_before_compact(state)
         if inp.session_manager_present:
             try:
                 await self._persist.persist_and_notify(
@@ -680,6 +713,31 @@ class _CompactionHandler:
             session_key=inp.session_key,
             bootstrap_context_mode=inp.bootstrap_context_mode,
         )
+        await self._fire_after_compact(
+            state,
+            {
+                "summary": event.summary,
+                "kept_entries": event.kept_entries,
+            },
+        )
+
+    async def _fire_before_compact(self, state: CompactionState) -> None:
+        for hook in self._compaction_hooks:
+            try:
+                await hook.before_compact(state)
+            except Exception:  # noqa: BLE001 - hook isolation contract
+                pass
+
+    async def _fire_after_compact(
+        self,
+        state: CompactionState,
+        outcome: dict[str, Any],
+    ) -> None:
+        for hook in self._compaction_hooks:
+            try:
+                await hook.after_compact(state, outcome)
+            except Exception:  # noqa: BLE001 - hook isolation contract
+                pass
 
 # ---------------------------------------------------------------------------
 # Outer stage class
@@ -712,8 +770,9 @@ class StreamConsumerStage:
     in a log-and-continue try/except so transient persistence failures
     do not abort the surrounding turn.
 
-    No ``TurnHook`` or ``CompactionHook`` is fired from inside the
-    stream loop today.
+    ``CompactionHook`` observers supplied by the runner fire around
+    in-turn ``CompactionEvent`` handling only; hook exceptions are
+    isolated and do not change the stream outcome.
     """
 
     name = "stream_consumer_stage"
@@ -727,6 +786,7 @@ class StreamConsumerStage:
         system_prompt_refresh: SystemPromptRefreshPort,
         memory_sync_notify: MemorySyncNotifyPort,
         warning_transformer: WarningTransformer,
+        compaction_hooks: tuple[CompactionHook, ...] = (),
     ) -> None:
         self._agent_run = agent_run
         self._memory_sync_notify = memory_sync_notify
@@ -742,6 +802,7 @@ class StreamConsumerStage:
             persist=compaction_persist,
             memory_snapshot=memory_snapshot_refresh,
             system_prompt=system_prompt_refresh,
+            compaction_hooks=compaction_hooks,
         )
 
     async def run(

@@ -39,6 +39,36 @@ from .test_stream_consumer_stage_snapshot import (
 )
 
 
+class _RecordingCompactionHook:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.raises = raises
+        self.events: list[tuple[str, str | None, str | None, list[int] | None]] = []
+
+    async def before_compact(self, state) -> None:
+        self.events.append(
+            (
+                "before",
+                state.extra.get("phase"),
+                None,
+                None,
+            )
+        )
+        if self.raises:
+            raise RuntimeError("before hook failed")
+
+    async def after_compact(self, state, outcome) -> None:
+        self.events.append(
+            (
+                "after",
+                state.extra.get("phase"),
+                outcome.get("summary") if isinstance(outcome, dict) else None,
+                outcome.get("kept_entries") if isinstance(outcome, dict) else None,
+            )
+        )
+        if self.raises:
+            raise RuntimeError("after hook failed")
+
+
 def _baseline_case(
     *,
     persist_raises: type[BaseException] | None = None,
@@ -82,6 +112,66 @@ async def test_persist_compaction_result_invoked_with_event_args(
     assert persist_calls[0][1] == "agent:main:s1"
     assert persist_calls[0][2] == "THE_SUMMARY"
     assert persist_calls[0][3] == [10, 20, 30]
+
+
+@pytest.mark.asyncio
+async def test_in_turn_compaction_event_fires_compaction_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hook = _RecordingCompactionHook()
+    case = _baseline_case()
+    runner = _setup_runner(monkeypatch, case, compaction_hooks=(hook,))
+
+    yielded, raised = await _drive(runner)
+
+    assert raised is None
+    assert any(isinstance(e, DoneEvent) for e in yielded)
+    in_turn_events = [
+        event for event in hook.events if event[1] == "in_turn_stream"
+    ]
+    assert in_turn_events == [
+        ("before", "in_turn_stream", None, None),
+        ("after", "in_turn_stream", "THE_SUMMARY", [10, 20, 30]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_in_turn_compaction_hook_errors_do_not_abort_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hook = _RecordingCompactionHook(raises=True)
+    case = _baseline_case()
+    runner = _setup_runner(monkeypatch, case, compaction_hooks=(hook,))
+
+    yielded, raised = await _drive(runner)
+
+    assert raised is None
+    assert any(isinstance(e, DoneEvent) for e in yielded)
+    in_turn_events = [
+        event for event in hook.events if event[1] == "in_turn_stream"
+    ]
+    assert [event[0] for event in in_turn_events] == ["before", "after"]
+
+
+@pytest.mark.asyncio
+async def test_in_turn_compaction_after_hook_fires_after_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hook = _RecordingCompactionHook()
+    case = _baseline_case(persist_raises=RuntimeError)
+    runner = _setup_runner(monkeypatch, case, compaction_hooks=(hook,))
+
+    yielded, raised = await _drive(runner)
+
+    assert raised is None
+    assert any(isinstance(e, DoneEvent) for e in yielded)
+    in_turn_events = [
+        event for event in hook.events if event[1] == "in_turn_stream"
+    ]
+    assert in_turn_events == [
+        ("before", "in_turn_stream", None, None),
+        ("after", "in_turn_stream", "THE_SUMMARY", [10, 20, 30]),
+    ]
 
 
 # ---------------------------------------------------------------------------

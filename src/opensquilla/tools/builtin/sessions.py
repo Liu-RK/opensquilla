@@ -20,10 +20,9 @@ _VALID_STATUSES = ("running", "done", "failed", "killed", "timeout")
 _TERMINAL_STATUSES = ("done", "failed", "killed", "timeout")
 _MAX_SPAWN_DEPTH = MAX_SPAWN_DEPTH
 
-# COMPACTION RISK: grounding is injected into the first user turn only.
-# If the subagent session is compacted before the task executes, this
-# prefix may be discarded with early history. For durable anti-injection
-# enforcement a system-prompt pipeline hook (applied on every turn) is required.
+# Subagent grounding also has a per-turn system-prompt fallback in
+# engine.steps.inject_subagent_grounding. Keep this spawn prompt text in
+# sync with that fallback so compaction cannot erase the subagent contract.
 _SUBAGENT_SYSTEM_PROMPT = (
     "You are a subagent. Execute the delegated task faithfully and return "
     "a structured result to your parent session."

@@ -729,7 +729,13 @@ def _artifact_delivery_failure_summary(event: ToolResultEvent) -> str | None:
     return summary or "publish_artifact failed"
 
 
-def _artifact_delivery_failure_notice() -> str:
+def _artifact_delivery_failure_notice(*, partial: bool = False) -> str:
+    if partial:
+        return (
+            f"{_ARTIFACT_DELIVERY_FAILURE_MARKER} some generated files were attached, "
+            "but at least one file could not be attached. Ask me to resend the "
+            "missing file after I correct the generated file path."
+        )
     return (
         f"{_ARTIFACT_DELIVERY_FAILURE_MARKER} no downloadable file was attached "
         "to this response. Ask me to resend the file after I correct the generated "
@@ -743,7 +749,7 @@ def _should_add_artifact_delivery_failure_notice(
     turn_artifacts: list[dict[str, Any]],
     final_text: str,
 ) -> bool:
-    if not failure_summaries or turn_artifacts:
+    if not failure_summaries:
         return False
     return _ARTIFACT_DELIVERY_FAILURE_MARKER not in final_text
 
@@ -1265,6 +1271,7 @@ class TurnRunner:
             system_prompt_refresh=_TurnRunnerSystemPromptRefreshAdapter(self),
             memory_sync_notify=_TurnRunnerMemorySyncNotifyAdapter(),
             warning_transformer=self._handle_runtime_warning,
+            compaction_hooks=self._compaction_hooks,
         )
         # TurnRunner stage decomposition TurnFinalizerStage instance. Holds no
         # per-turn state. Active unconditionally as of. Adapter
@@ -1382,8 +1389,10 @@ class TurnRunner:
             session_id = session_key.split(":")[-1] or session_key
         return replace(
             tool_context,
+            session_key=session_key,
             artifact_media_root=str(media_root),
             artifact_session_id=session_id,
+            workspace_file_writes=[],
             artifact_max_bytes=getattr(attachments_cfg, "artifact_max_bytes", None),
             artifact_disk_budget_bytes=getattr(
                 attachments_cfg,
@@ -1945,6 +1954,7 @@ class TurnRunner:
                 router_cfg=getattr(self._config, "squilla_router", None),
                 session_manager_present=self._session_manager is not None,
                 state=stream_state,
+                tool_context=tool_context,
             )
             async for event in self._stream_consumer_stage.run(stream_inp):
                 yield event
