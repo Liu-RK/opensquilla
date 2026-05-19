@@ -1,4 +1,4 @@
-> ⚠️ **NOTE:** Installer links and download URLs in this README point to the upcoming **v0.2.0** release and are not live yet.
+> ⚠️ **NOTE:** Installer links and download URLs in this README point to the upcoming **v0.2.0rc1 preview** release and are not live until that tag is published.
 
 # OpenSquilla — Token-Efficient AI Agent
 
