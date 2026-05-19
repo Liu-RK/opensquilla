@@ -38,7 +38,8 @@ from opensquilla.migration.openclaw import (
     SKILL_CONFLICT_MODES as OPENCLAW_SKILL_CONFLICT_MODES,
 )
 
-SOURCE_ORDER: tuple[str, ...] = ("openclaw", "hermes")
+SourceName = Literal["openclaw", "hermes"]
+SOURCE_ORDER: tuple[SourceName, ...] = ("openclaw", "hermes")
 
 
 class MigrationOptionError(ValueError):
@@ -47,7 +48,7 @@ class MigrationOptionError(ValueError):
 
 @dataclass(frozen=True)
 class DetectedMigrationSource:
-    name: Literal["openclaw", "hermes"]
+    name: SourceName
     path: Path
 
 
@@ -100,7 +101,7 @@ def detect_default_sources() -> list[DetectedMigrationSource]:
 def canonical_source_selection(
     selected: list[str] | tuple[str, ...],
     detected: list[DetectedMigrationSource],
-) -> tuple[str, ...]:
+) -> tuple[SourceName, ...]:
     detected_names = {source.name for source in detected}
     unknown = sorted(set(selected) - set(SOURCE_ORDER))
     if unknown:
@@ -117,7 +118,9 @@ def canonical_source_selection(
     return tuple(name for name in SOURCE_ORDER if name in selected)
 
 
-def validate_batch_options(selected: tuple[str, ...], options: MigrationBatchOptions) -> None:
+def validate_batch_options(
+    selected: tuple[SourceName, ...], options: MigrationBatchOptions
+) -> None:
     for name in selected:
         if name == "openclaw":
             _validate_openclaw_options(options)
