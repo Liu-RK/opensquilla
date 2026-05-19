@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import re
@@ -10,15 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from opensquilla.migration.orchestrator import (
-    DetectedMigrationSource,
-    MigrationBatchOptions,
-    MigrationBatchResult,
-    MigrationOptionError,
-    detect_default_sources,
-    report_status_counts,
-    run_migration_batch,
-)
 from opensquilla.onboarding.channel_specs import (
     ChannelSetupField,
     ChannelSetupSpec,
@@ -973,16 +965,82 @@ _MIGRATION_SOURCE_LABELS = {
 }
 
 
+@dataclass(frozen=True)
+class DetectedMigrationSource:
+    name: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class MigrationBatchOptions:
+    config: Path
+    apply: bool
+    migrate_secrets: bool
+    overwrite: bool
+    preset: str
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+    skill_conflict: str
+    persona_conflict: str
+
+
+@dataclass(frozen=True)
+class MigrationBatchResult:
+    selected: tuple[str, ...]
+    reports: dict[str, dict[str, Any]]
+    apply: bool
+
+    @property
+    def has_error(self) -> bool:
+        return any(
+            item.get("status") == "error"
+            for report in self.reports.values()
+            for item in report.get("items", [])
+            if isinstance(item, dict)
+        )
+
+
 def _config_path_from_loaded_config(cfg: Any) -> Path:
     raw = getattr(cfg, "config_path", "") or default_config_path()
     return Path(raw).expanduser()
+
+
+def _migration_orchestrator() -> Any:
+    return importlib.import_module("opensquilla.migration.orchestrator")
+
+
+def detect_default_sources() -> list[Any]:
+    return cast(list[Any], _migration_orchestrator().detect_default_sources())
+
+
+def run_migration_batch(
+    detected: list[Any], selected: list[str] | tuple[str, ...], options: Any
+) -> Any:
+    migration = _migration_orchestrator()
+    if isinstance(options, MigrationBatchOptions):
+        options = migration.MigrationBatchOptions(
+            config=options.config,
+            apply=options.apply,
+            migrate_secrets=options.migrate_secrets,
+            overwrite=options.overwrite,
+            preset=options.preset,
+            include=options.include,
+            exclude=options.exclude,
+            skill_conflict=options.skill_conflict,
+            persona_conflict=options.persona_conflict,
+        )
+    return migration.run_migration_batch(detected, selected, options)
+
+
+def report_status_counts(report: dict[str, Any]) -> dict[str, int]:
+    return cast(dict[str, int], _migration_orchestrator().report_status_counts(report))
 
 
 def _run_onboard_migration_step(
     questionary,
     *,
     config_path: Path,
-) -> MigrationBatchResult | None:
+) -> Any | None:
     """Run the interactive onboarding migration pre-step.
 
     Migration is intentionally isolated from the rest of onboarding: detection,
@@ -990,7 +1048,9 @@ def _run_onboard_migration_step(
     so provider setup can continue normally.
     """
 
+    migration = None
     try:
+        migration = _migration_orchestrator()
         detected = detect_default_sources()
         if not detected:
             return None
@@ -1024,6 +1084,7 @@ def _run_onboard_migration_step(
             )
         )
         dry_run_options = _onboard_migration_options(
+            migration=migration,
             config_path=config_path,
             apply=False,
             migrate_secrets=migrate_secrets,
@@ -1050,6 +1111,7 @@ def _run_onboard_migration_step(
             return None
 
         applied_options = _onboard_migration_options(
+            migration=migration,
             config_path=config_path,
             apply=True,
             migrate_secrets=migrate_secrets,
@@ -1071,15 +1133,16 @@ def _run_onboard_migration_step(
     except KeyboardInterrupt:
         console.print("[yellow]Migration interrupted — continuing onboarding.[/yellow]")
         return None
-    except MigrationOptionError as exc:
-        console.print(
-            warning_panel(
-                f"Migration options were rejected: {exc}. "
-                "Onboarding will continue without migration."
-            )
-        )
-        return None
     except Exception as exc:
+        option_error = getattr(migration, "MigrationOptionError", None)
+        if isinstance(option_error, type) and isinstance(exc, option_error):
+            console.print(
+                warning_panel(
+                    f"Migration options were rejected: {exc}. "
+                    "Onboarding will continue without migration."
+                )
+            )
+            return None
         console.print(
             warning_panel(
                 f"Migration failed before onboarding completed: {exc}. "
@@ -1091,10 +1154,11 @@ def _run_onboard_migration_step(
 
 def _onboard_migration_options(
     *,
+    migration: Any,
     config_path: Path,
     apply: bool,
     migrate_secrets: bool,
-) -> MigrationBatchOptions:
+) -> Any:
     return MigrationBatchOptions(
         config=config_path,
         apply=apply,
@@ -1108,7 +1172,7 @@ def _onboard_migration_options(
     )
 
 
-def _print_detected_migration_sources(detected: list[DetectedMigrationSource]) -> None:
+def _print_detected_migration_sources(detected: list[Any]) -> None:
     console.print(f"[bold {ACCENT}]◆[/] [bold]Existing agent data detected[/]")
     for source in detected:
         label = _MIGRATION_SOURCE_LABELS.get(source.name, source.name)
@@ -1116,7 +1180,7 @@ def _print_detected_migration_sources(detected: list[DetectedMigrationSource]) -
 
 
 def _print_selected_migration_sources(
-    detected: list[DetectedMigrationSource],
+    detected: list[Any],
     selected: list[str],
 ) -> None:
     selected_names = set(selected)
@@ -1130,7 +1194,7 @@ def _print_selected_migration_sources(
 
 def _ask_migration_sources(
     questionary,
-    detected: list[DetectedMigrationSource],
+    detected: list[Any],
 ) -> list[str]:
     if len(detected) == 1:
         return [detected[0].name]
@@ -1170,7 +1234,7 @@ def _ask_migration_sources(
     return [str(value) for value in selected]
 
 
-def _print_migration_summary(result: MigrationBatchResult, *, title: str) -> None:
+def _print_migration_summary(result: Any, *, title: str) -> None:
     console.print(f"[bold {ACCENT}]◆[/] [bold]{title}[/]")
     mode = "applied" if result.apply else "dry-run"
     for name in result.selected:
@@ -1192,7 +1256,7 @@ def _print_migration_summary(result: MigrationBatchResult, *, title: str) -> Non
 
 def _migration_result_path(
     cfg: Any,
-    migration_result: MigrationBatchResult | None,
+    migration_result: Any | None,
     *,
     config_path: Path,
 ) -> PersistResult:
@@ -1406,7 +1470,7 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     )
     _wait_for_setup_start()
     config_path = _config_path_from_loaded_config(cfg)
-    migration_result: MigrationBatchResult | None = None
+    migration_result: Any | None = None
     if not options.skip_migration:
         migration_result = _run_onboard_migration_step(
             questionary,
