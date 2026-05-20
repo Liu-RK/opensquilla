@@ -29,6 +29,18 @@ import structlog
 from opensquilla.artifacts import artifact_marker
 from opensquilla.attachment_refs import is_attachment_ref, read_attachment_ref_bytes
 from opensquilla.bootstrap_types import BootstrapFileReport
+from opensquilla.contracts.attachments import (
+    ALLOWED_MEDIA_TYPES as _ALLOWED_ENGINE_MEDIA_TYPES,
+)
+from opensquilla.contracts.attachments import (
+    MAX_ATTACHMENTS as _MAX_ATTACHMENT_COUNT,
+)
+from opensquilla.contracts.attachments import (
+    TEXT_ATTACHMENT_MIMES as _ENGINE_TEXT_FAMILY_MIMES,
+)
+from opensquilla.contracts.attachments import (
+    attachment_size_limit_for_mime as _attachment_size_limit_for_mime,
+)
 from opensquilla.engine.agent import Agent, ToolHandler
 from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.engine.hooks import (
@@ -1044,41 +1056,8 @@ class BootstrapSnapshot:
     report: list[BootstrapFileReport] = field(default_factory=list)
 
 
-_MAX_ATTACHMENT_COUNT = 10
-_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
-_MAX_TEXT_ATTACHMENT_BYTES = 2 * 1000 * 1000
-_MAX_STAGED_ATTACHMENT_BYTES = 30 * 1024 * 1024
 _PDF_ATTACHMENT_TEXT_LIMIT = 200_000
 _TEXT_ATTACHMENT_TEXT_LIMIT = 200_000
-
-# Image, PDF, and text-family allow-list. Mirrors
-# gateway.rpc_sessions._ALLOWED_MEDIA_TYPES; intentionally duplicated to avoid
-# an engine -> gateway import cycle. Provider-facing conversion is more
-# conservative: images become image blocks; text-family and PDFs become text
-# file-context blocks after local decoding/extraction.
-_ALLOWED_ENGINE_MEDIA_TYPES: frozenset[str] = frozenset(
-    {
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-        "application/pdf",
-        "text/plain",
-        "text/markdown",
-        "text/html",
-        "text/csv",
-        "application/json",
-    }
-)
-_ENGINE_TEXT_FAMILY_MIMES: frozenset[str] = frozenset(
-    {
-        "text/plain",
-        "text/markdown",
-        "text/html",
-        "text/csv",
-        "application/json",
-    }
-)
 
 _XML_ATTR_ESCAPES = {
     "<": "&lt;",
@@ -4836,12 +4815,10 @@ class TurnRunner:
                     raw_bytes = base64.b64decode(data, validate=True)
                 except (binascii.Error, ValueError) as exc:
                     raise ValueError(f"attachments[{index}].data must be valid base64") from exc
-            if media_type in _ENGINE_TEXT_FAMILY_MIMES:
-                max_bytes = _MAX_TEXT_ATTACHMENT_BYTES
-            elif media_type == "application/pdf" and att.get("_was_staged") is True:
-                max_bytes = _MAX_STAGED_ATTACHMENT_BYTES
-            else:
-                max_bytes = _MAX_ATTACHMENT_BYTES
+            max_bytes = _attachment_size_limit_for_mime(
+                media_type,
+                staged=media_type == "application/pdf" and att.get("_was_staged") is True,
+            )
             if len(raw_bytes) > max_bytes:
                 raise ValueError(f"attachments[{index}] exceeds the {max_bytes} byte limit")
 

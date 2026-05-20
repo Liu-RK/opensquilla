@@ -13,10 +13,12 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("agents", "onboarding"),
     ("agents", "session"),
     ("channels", "engine"),
+    ("channels", "contracts"),
     ("channels", "gateway"),
     ("channels", "session"),
     ("channels", "tools"),
     ("cli", "agents"),
+    ("cli", "contracts"),
     ("cli", "dist"),
     ("cli", "engine"),
     ("cli", "gateway"),
@@ -31,6 +33,7 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("cli", "tools"),
     ("engine", "agents"),
     ("engine", "channels"),
+    ("engine", "contracts"),
     ("engine", "gateway"),
     ("engine", "identity"),
     ("engine", "memory"),
@@ -44,6 +47,7 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("engine", "tools"),
     ("gateway", "agents"),
     ("gateway", "channels"),
+    ("gateway", "contracts"),
     ("gateway", "engine"),
     ("gateway", "identity"),
     ("gateway", "mcp"),
@@ -255,4 +259,16 @@ def test_new_packages_do_not_join_existing_circular_dependency_baseline() -> Non
     unexpected = cyclic_packages - APPROVED_CYCLIC_PACKAGES
     assert not unexpected, "Packages unexpectedly joined import cycles: " + ", ".join(
         sorted(unexpected)
+    )
+
+
+def test_contracts_package_stays_implementation_free() -> None:
+    actual_edges = _package_import_edges()
+    implementation_edges = {
+        target for source, target in actual_edges if source == "contracts"
+    }
+
+    assert not implementation_edges, (
+        "contracts must not import implementation packages: "
+        + ", ".join(sorted(implementation_edges))
     )
