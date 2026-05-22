@@ -5,13 +5,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
+from uuid import uuid4
 
-SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset(
-    {"ok", "unverifiable"}
-)
+SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok", "unverifiable"})
 SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
     {"ok", "backfilled", "unverifiable"}
 )
+COMPACTION_TRIGGERED_EVENT: Final[str] = "compaction.triggered"
+COMPACTION_CHUNK_SUMMARIZED_EVENT: Final[str] = "compaction.chunk_summarized"
+COMPACTION_SUMMARY_VERIFIED_EVENT: Final[str] = "compaction.summary_verified"
+COMPACTION_PERSISTED_EVENT: Final[str] = "compaction.persisted"
+COMPACTION_REPLAYED_EVENT: Final[str] = "compaction.replayed"
+COMPACTION_COVERAGE_UNKNOWN: Final[str] = "unknown"
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,86 @@ class CompactionLifecycleResult:
     summary_len: int = 0
     summary_source: str = "unknown"
     flush_receipt: Any = None
+
+
+def new_compaction_id() -> str:
+    """Return an opaque id used to correlate one compaction attempt's events."""
+
+    return f"cmp_{uuid4().hex}"
+
+
+def compaction_event_chain(event: str) -> list[str]:
+    """Return the lifecycle events completed by the given telemetry event."""
+
+    if event == COMPACTION_REPLAYED_EVENT:
+        return [
+            COMPACTION_TRIGGERED_EVENT,
+            COMPACTION_CHUNK_SUMMARIZED_EVENT,
+            COMPACTION_SUMMARY_VERIFIED_EVENT,
+            COMPACTION_PERSISTED_EVENT,
+            COMPACTION_REPLAYED_EVENT,
+        ]
+    if event == COMPACTION_PERSISTED_EVENT:
+        return [
+            COMPACTION_TRIGGERED_EVENT,
+            COMPACTION_CHUNK_SUMMARIZED_EVENT,
+            COMPACTION_SUMMARY_VERIFIED_EVENT,
+            COMPACTION_PERSISTED_EVENT,
+        ]
+    if event == COMPACTION_SUMMARY_VERIFIED_EVENT:
+        return [
+            COMPACTION_TRIGGERED_EVENT,
+            COMPACTION_CHUNK_SUMMARIZED_EVENT,
+            COMPACTION_SUMMARY_VERIFIED_EVENT,
+        ]
+    if event == COMPACTION_CHUNK_SUMMARIZED_EVENT:
+        return [COMPACTION_TRIGGERED_EVENT, COMPACTION_CHUNK_SUMMARIZED_EVENT]
+    return [COMPACTION_TRIGGERED_EVENT]
+
+
+def compaction_lifecycle_payload(compaction_id: str, event: str) -> dict[str, Any]:
+    return {
+        "compaction_id": compaction_id,
+        "event": event,
+        "event_chain": compaction_event_chain(event),
+        "coverage_status": COMPACTION_COVERAGE_UNKNOWN,
+    }
+
+
+def compaction_result_payload(
+    result: Any,
+    *,
+    tokens_before: int | None = None,
+    tokens_after: int | None = None,
+    remaining_budget_tokens: int | None = None,
+) -> dict[str, Any]:
+    kept_entries = getattr(result, "kept_entries", None) or []
+    payload: dict[str, Any] = {
+        "removed_count": int(getattr(result, "removed_count", 0) or 0),
+        "kept_count": len(kept_entries),
+        "chunk_count": int(getattr(result, "chunks_processed", 0) or 0),
+        "summary_len": len(str(getattr(result, "summary", "") or "")),
+        "summary_source": str(getattr(result, "summary_source", "unknown") or "unknown"),
+    }
+    if tokens_before is None:
+        tokens_before = getattr(result, "tokens_before", None)
+    if tokens_after is None:
+        tokens_after = getattr(result, "tokens_after", None)
+    if remaining_budget_tokens is None:
+        remaining_budget_tokens = getattr(result, "remaining_budget_tokens", None)
+    if tokens_before is not None:
+        payload["tokens_before"] = int(tokens_before)
+    if tokens_after is not None:
+        payload["tokens_after"] = int(tokens_after)
+    if remaining_budget_tokens is not None:
+        payload["remaining_budget_tokens"] = int(remaining_budget_tokens)
+    return payload
+
+
+def flush_receipt_status(receipt: Any) -> str:
+    if receipt is None:
+        return "not_requested"
+    return "safe" if flush_receipt_allows_destructive_compaction(receipt) else "unsafe"
 
 
 def _receipt_value(receipt: Any, name: str, default: Any) -> Any:
@@ -53,8 +138,7 @@ def flush_receipt_allows_destructive_compaction(receipt: Any) -> bool:
     if integrity_status != "ok":
         return False
     output_coverage_status = str(
-        _receipt_value(receipt, "output_coverage_status", "unverified")
-        or "unverified"
+        _receipt_value(receipt, "output_coverage_status", "unverified") or "unverified"
     )
     if output_coverage_status not in SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES:
         return False
