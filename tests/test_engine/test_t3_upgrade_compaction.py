@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from opensquilla.engine import runtime as runtime_module
 from opensquilla.engine.pipeline import TurnContext
 from opensquilla.engine.runtime import TurnRunner
 from opensquilla.session.models import TranscriptEntry
@@ -28,6 +29,26 @@ class _FakeSessionManager:
     async def compact(self, session_key: str, context_window_tokens: int, **kwargs: Any) -> str:
         self.compact_calls.append((session_key, context_window_tokens))
         return "summary"
+
+
+class _ResultCompactionSessionManager(_FakeSessionManager):
+    async def compact_with_result(
+        self,
+        session_key: str,
+        context_window_tokens: int,
+        config: object | None = None,
+    ) -> SimpleNamespace:
+        self.compact_calls.append((session_key, context_window_tokens))
+        return SimpleNamespace(
+            summary="summary",
+            kept_entries=[{"role": "assistant", "content": "tail"}],
+            removed_count=2,
+            chunks_processed=1,
+            summary_source="llm",
+            tokens_before=300,
+            tokens_after=100,
+            remaining_budget_tokens=context_window_tokens - 100,
+        )
 
 
 @dataclass(frozen=True)
@@ -74,6 +95,7 @@ class _FakeFlushService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _sample_transcript() -> list[TranscriptEntry]:
     return [
@@ -131,6 +153,7 @@ def _make_runner(
     flush_enabled: bool = True,
     flush_timeout_seconds: float = 15.0,
     flush_background_timeout_seconds: float = 120.0,
+    flush_compaction_requires_safe_receipt: bool = False,
 ) -> TurnRunner:
     config = SimpleNamespace(
         squilla_router=SimpleNamespace(upgrade_to_t3_compaction_enabled=enabled),
@@ -138,6 +161,7 @@ def _make_runner(
             flush_enabled=flush_enabled,
             flush_timeout_seconds=flush_timeout_seconds,
             flush_background_timeout_seconds=flush_background_timeout_seconds,
+            flush_compaction_requires_safe_receipt=flush_compaction_requires_safe_receipt,
         ),
     )
     return TurnRunner(
@@ -160,14 +184,55 @@ async def test_t2_to_t3_triggers_flush_then_compact() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(fs.execute_calls) == 1
     assert len(sm.compact_calls) == 1
     assert sm.compact_calls[0] == ("agent:main:webchat:default", 100_000)
+
+
+@pytest.mark.asyncio
+async def test_t3_completed_event_reports_compaction_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm = _ResultCompactionSessionManager(_sample_transcript())
+    fs = _FakeFlushService()
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        runtime_module,
+        "notify_compaction",
+        lambda session_key, **payload: events.append((session_key, payload)),
+    )
+    runner = _make_runner(session_manager=sm, flush_service=fs)
+
+    turn = _make_turn(routed_tier="t3", previous_tier="t2")
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
+
+    assert result == "handled"
+    assert [(key, payload["status"]) for key, payload in events] == [
+        ("agent:main:webchat:default", "started"),
+        ("agent:main:webchat:default", "completed"),
+    ]
+    compaction_ids = {payload.get("compaction_id") for _, payload in events}
+    assert len(compaction_ids) == 1
+    assert None not in compaction_ids
+    assert events[0][1]["event"] == "compaction.triggered"
+    completed = events[-1][1]
+    assert completed["event"] == "compaction.persisted"
+    assert completed["event_chain"] == [
+        "compaction.triggered",
+        "compaction.chunk_summarized",
+        "compaction.summary_verified",
+        "compaction.persisted",
+    ]
+    assert completed["coverage_status"] == "unknown"
+    assert completed["chunk_count"] == 1
+    assert completed["summary_source"] == "llm"
+    assert completed["removed_count"] == 2
+    assert completed["kept_count"] == 1
+    assert completed["tokens_after"] == 100
+    assert completed["remaining_budget_tokens"] == 99_900
 
 
 @pytest.mark.asyncio
@@ -194,9 +259,7 @@ async def test_t3_to_t3_skips() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t3")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "not_applicable"
     assert len(fs.execute_calls) == 0
@@ -210,9 +273,7 @@ async def test_non_t3_route_skips() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t1", previous_tier="t0")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "not_applicable"
     assert len(fs.execute_calls) == 0
@@ -226,9 +287,7 @@ async def test_config_disabled_skips() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs, enabled=False)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "not_applicable"
     assert len(fs.execute_calls) == 0
@@ -242,9 +301,7 @@ async def test_observe_mode_skips() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2", routing_applied=False)
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "not_applicable"
     assert len(fs.execute_calls) == 0
@@ -258,9 +315,7 @@ async def test_flush_raises_does_not_block_compaction() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(fs.execute_calls) == 1
@@ -274,9 +329,7 @@ async def test_flush_error_receipt_does_not_block_compaction() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(fs.execute_calls) == 1
@@ -303,13 +356,29 @@ async def test_degraded_flush_receipts_do_not_block_compaction(
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(fs.execute_calls) == 1
     assert len(sm.compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_t3_strict_flush_receipt_skips_destructive_compaction() -> None:
+    sm = _FakeSessionManager(_sample_transcript())
+    fs = _FakeFlushService(receipt=_FakeFlushReceipt(integrity_status="missing_chunks"))
+    runner = _make_runner(
+        session_manager=sm,
+        flush_service=fs,
+        flush_compaction_requires_safe_receipt=True,
+    )
+
+    turn = _make_turn(routed_tier="t3", previous_tier="t2")
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
+
+    assert result == "handled"
+    assert len(fs.execute_calls) == 1
+    assert sm.compact_calls == []
 
 
 @pytest.mark.asyncio
@@ -319,9 +388,7 @@ async def test_backfilled_flush_receipt_allows_compact() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(fs.execute_calls) == 1
@@ -340,9 +407,7 @@ async def test_t3_flush_uses_background_timeout_for_service_call() -> None:
     )
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert fs.execute_calls[0]["timeout"] == 42.0
@@ -355,9 +420,7 @@ async def test_t3_flush_uses_longer_default_background_timeout() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert fs.execute_calls[0]["timeout"] == 120.0
@@ -375,9 +438,7 @@ async def test_t3_flush_grace_timeout_does_not_block_compaction() -> None:
     )
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert fs.execute_calls[0]["timeout"] == 42.0
@@ -394,9 +455,7 @@ async def test_memory_flush_disabled_compacts_without_flush_service() -> None:
     )
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(sm.compact_calls) == 1
@@ -413,9 +472,7 @@ async def test_env_flush_disabled_compacts_without_flush_service(
     runner = _make_runner(session_manager=sm, flush_service=None)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "handled"
     assert len(sm.compact_calls) == 1
@@ -433,9 +490,7 @@ async def test_compact_raises_continues() -> None:
     runner = _make_runner(session_manager=sm, flush_service=fs)
 
     turn = _make_turn(routed_tier="t3", previous_tier="t2")
-    result = await runner._maybe_compact_on_t3_upgrade(
-        "agent:main:webchat:default", turn, 100_000
-    )
+    result = await runner._maybe_compact_on_t3_upgrade("agent:main:webchat:default", turn, 100_000)
 
     assert result == "compact_failed"
     assert len(fs.execute_calls) == 1

@@ -224,9 +224,7 @@ def _is_threshold_denial(result: ToolResult) -> bool:
     )
 
 
-_PENDING_APPROVAL_STATUSES: frozenset[str] = frozenset(
-    {"approval_required", "approval_pending"}
-)
+_PENDING_APPROVAL_STATUSES: frozenset[str] = frozenset({"approval_required", "approval_pending"})
 
 
 def _pending_approval_payload(content: str) -> dict[str, Any] | None:
@@ -386,9 +384,8 @@ class _ProviderRetryPolicy:
         kind: _ProviderAttemptKind,
         used: dict[_ProviderAttemptKind, int],
     ) -> bool:
-        return (
-            self.max_provider_retries > 0
-            and used.get(kind, 0) < self.attempt_budgets.get(kind, 0)
+        return self.max_provider_retries > 0 and used.get(kind, 0) < self.attempt_budgets.get(
+            kind, 0
         )
 
     def can_retry_provider_failure(
@@ -844,9 +841,7 @@ class Agent:
         if fallback is not None and fallback > 0:
             return max(1, int(fallback))
         budget_chars = int(
-            self.config.context_window_tokens
-            * self.config.tool_result_compression_max_share
-            * 4
+            self.config.context_window_tokens * self.config.tool_result_compression_max_share * 4
         )
         return max(
             1,
@@ -949,10 +944,7 @@ class Agent:
         if len(tool_result_refs) <= 2:
             return messages
 
-        recent_ids = {
-            id(block)
-            for _message_index, _block_index, block in tool_result_refs[-2:]
-        }
+        recent_ids = {id(block) for _message_index, _block_index, block in tool_result_refs[-2:]}
         budget_tokens = int(
             self.config.context_window_tokens * self.config.tool_result_compression_max_share
         )
@@ -990,9 +982,7 @@ class Agent:
             head = content[:240]
             tail = content[-240:] if len(content) > 240 else ""
             omitted = max(0, len(content) - len(head) - len(tail))
-            handle_line = (
-                f"tool_result_handle: {stored.handle}\n" if stored is not None else ""
-            )
+            handle_line = f"tool_result_handle: {stored.handle}\n" if stored is not None else ""
             compacted = (
                 "[aggregate_tool_result_compacted]\n"
                 f"tool_use_id: {block.tool_use_id}\n"
@@ -1070,9 +1060,9 @@ class Agent:
         self.config.metadata["tool_aggregate_compression_tokens_after"] = after_tokens
         self.config.metadata["tool_aggregate_compression_tokens_saved"] = saved_tokens
         self.config.metadata["tool_compression_applied"] = True
-        self.config.metadata["tool_compression_calls"] = (
-            self.config.metadata.get("tool_compression_calls", 0) + len(replacements)
-        )
+        self.config.metadata["tool_compression_calls"] = self.config.metadata.get(
+            "tool_compression_calls", 0
+        ) + len(replacements)
         self.config.metadata["tool_compression_tokens_before"] = (
             self.config.metadata.get("tool_compression_tokens_before", 0) + before_tokens
         )
@@ -1080,8 +1070,7 @@ class Agent:
             self.config.metadata.get("tool_compression_tokens_after", 0) + after_tokens
         )
         self.config.metadata["tool_compression_tokens_saved"] = (
-            self.config.metadata.get("tool_compression_tokens_saved", 0)
-            + saved_tokens
+            self.config.metadata.get("tool_compression_tokens_saved", 0) + saved_tokens
         )
         self._write_turn_call_log(
             "tool_aggregate_compression",
@@ -1107,9 +1096,7 @@ class Agent:
             return block.content if isinstance(block.content, str) else str(block.content)
 
         total_chars = sum(len(_content(block)) for _m, _b, block in tool_result_refs)
-        external_cap = self._tool_result_provider_request_max_chars(
-            ToolResultBudgetClass.EXTERNAL
-        )
+        external_cap = self._tool_result_provider_request_max_chars(ToolResultBudgetClass.EXTERNAL)
         external_chars = sum(
             len(_content(block))
             for _m, _b, block in tool_result_refs
@@ -1170,10 +1157,7 @@ class Agent:
                 and not _tool_result_content_has_artifact(content)
                 and (
                     single_over_budget
-                    or (
-                        self.config.context_window_tokens >= 64_000
-                        and id(block) not in recent_ids
-                    )
+                    or (self.config.context_window_tokens >= 64_000 and id(block) not in recent_ids)
                 )
             ):
                 replacement_content = self._tool_result_projection_for_provider(
@@ -1229,9 +1213,9 @@ class Agent:
             self.config.metadata.get("tool_absolute_compression_calls", 0) + 1
         )
         self.config.metadata["tool_compression_applied"] = True
-        self.config.metadata["tool_compression_calls"] = (
-            self.config.metadata.get("tool_compression_calls", 0) + len(replacements)
-        )
+        self.config.metadata["tool_compression_calls"] = self.config.metadata.get(
+            "tool_compression_calls", 0
+        ) + len(replacements)
         return compacted_messages
 
     def _tool_result_projection_for_provider(
@@ -1252,9 +1236,7 @@ class Agent:
             tool_use_id=tool_use_id,
             tool_name=tool_name,
         )
-        handle_line = (
-            f"tool_result_handle: {stored.handle}\n" if stored is not None else ""
-        )
+        handle_line = f"tool_result_handle: {stored.handle}\n" if stored is not None else ""
         if max_preview_chars <= 0:
             head = ""
             tail = ""
@@ -1361,8 +1343,8 @@ class Agent:
 
         self.config.metadata["tool_argument_provider_view_summaries_applied"] = True
         metadata_key = "tool_argument_provider_view_summaries"
-        self.config.metadata[metadata_key] = (
-            self.config.metadata.get(metadata_key, 0) + len(replacements)
+        self.config.metadata[metadata_key] = self.config.metadata.get(metadata_key, 0) + len(
+            replacements
         )
         self._write_turn_call_log(
             "tool_argument_provider_view_summary",
@@ -1565,9 +1547,7 @@ class Agent:
                 )
                 applied_mode = "tokenjuice_truncate"
                 self.config.metadata["tool_compression_tokenjuice_over_budget_fallbacks"] = (
-                    self.config.metadata.get(
-                        "tool_compression_tokenjuice_over_budget_fallbacks", 0
-                    )
+                    self.config.metadata.get("tool_compression_tokenjuice_over_budget_fallbacks", 0)
                     + 1
                 )
         elif budget_class is ToolResultBudgetClass.CONTROL:
@@ -1617,10 +1597,9 @@ class Agent:
         self.config.metadata["tool_compression_tokens_after"] = (
             self.config.metadata.get("tool_compression_tokens_after", 0) + tokens_after
         )
-        self.config.metadata["tool_compression_tokens_saved"] = (
-            self.config.metadata.get("tool_compression_tokens_saved", 0)
-            + max(0, tokens_before - tokens_after)
-        )
+        self.config.metadata["tool_compression_tokens_saved"] = self.config.metadata.get(
+            "tool_compression_tokens_saved", 0
+        ) + max(0, tokens_before - tokens_after)
 
         self._write_turn_call_log(
             "tool_response_compression",
@@ -1765,10 +1744,6 @@ class Agent:
 
         # Build initial message list
         turn_messages: list[Message] = list(history)
-        # Keep large request-scoped context at a stable provider prefix. If
-        # history is allowed to move ahead of it after the first turn,
-        # prefix-based provider caches can no longer reuse that block.
-        request_context_insert_index = 0
         # Insert this turn's skills context BEFORE the user content so it
         # joins turn_messages permanently (persists into self._history at
         # turn end). Re-inserting a fresh skills_ctx into request_messages
@@ -1780,6 +1755,11 @@ class Agent:
         skills_context_message = self._skills_context_message()
         if skills_context_message is not None:
             turn_messages.append(skills_context_message)
+        # Keep persisted history and persisted skills as the provider-visible
+        # prefix. Request-scoped context can change every turn, so keep it near
+        # the current turn instead of letting it invalidate implicit prefix
+        # caches from messages[0].
+        request_context_insert_index = len(turn_messages)
         runtime_context_insert_index = len(turn_messages)
         if extra_messages:
             turn_messages.extend(extra_messages)
@@ -1796,9 +1776,7 @@ class Agent:
         )
         runtime_context = self._runtime_context_block()
         runtime_context_message = self._runtime_context_message(runtime_context)
-        request_context_message = self._request_context_message(
-            self.config.request_context_prompt
-        )
+        request_context_message = self._request_context_message(self.config.request_context_prompt)
         runtime_context_hash = hashlib.sha256(runtime_context.encode("utf-8")).hexdigest()[:16]
 
         chat_cfg = ChatConfig(
@@ -1869,9 +1847,7 @@ class Agent:
             return parsed if parsed > 0 else None
 
         def _turn_budget_error() -> ErrorEvent | None:
-            max_llm_calls = self._positive_int(
-                getattr(self.config, "max_turn_llm_calls", 0)
-            )
+            max_llm_calls = self._positive_int(getattr(self.config, "max_turn_llm_calls", 0))
             if max_llm_calls is not None and turn_llm_calls > max_llm_calls:
                 return ErrorEvent(
                     message=(
@@ -1880,9 +1856,7 @@ class Agent:
                     ),
                     code="turn_llm_call_budget_exceeded",
                 )
-            max_input = self._positive_int(
-                getattr(self.config, "max_turn_input_tokens", 0)
-            )
+            max_input = self._positive_int(getattr(self.config, "max_turn_input_tokens", 0))
             if max_input is not None and total_input_tokens > max_input:
                 return ErrorEvent(
                     message=(
@@ -1891,9 +1865,7 @@ class Agent:
                     ),
                     code="turn_input_token_budget_exceeded",
                 )
-            max_output = self._positive_int(
-                getattr(self.config, "max_turn_output_tokens", 0)
-            )
+            max_output = self._positive_int(getattr(self.config, "max_turn_output_tokens", 0))
             if max_output is not None and total_output_tokens > max_output:
                 return ErrorEvent(
                     message=(
@@ -1902,9 +1874,7 @@ class Agent:
                     ),
                     code="turn_output_token_budget_exceeded",
                 )
-            max_cost = _positive_float(
-                getattr(self.config, "max_turn_billed_cost_usd", 0.0)
-            )
+            max_cost = _positive_float(getattr(self.config, "max_turn_billed_cost_usd", 0.0))
             if max_cost is not None and total_billed_cost > max_cost:
                 return ErrorEvent(
                     message=(
@@ -1913,9 +1883,7 @@ class Agent:
                     ),
                     code="turn_billed_cost_budget_exceeded",
                 )
-            max_tool_errors = self._positive_int(
-                getattr(self.config, "max_turn_tool_errors", 0)
-            )
+            max_tool_errors = self._positive_int(getattr(self.config, "max_turn_tool_errors", 0))
             if max_tool_errors is not None and turn_tool_errors >= max_tool_errors:
                 return ErrorEvent(
                     message=(
@@ -1927,9 +1895,7 @@ class Agent:
             return None
 
         def _turn_llm_call_budget_error(next_call_number: int) -> ErrorEvent | None:
-            max_llm_calls = self._positive_int(
-                getattr(self.config, "max_turn_llm_calls", 0)
-            )
+            max_llm_calls = self._positive_int(getattr(self.config, "max_turn_llm_calls", 0))
             if max_llm_calls is None or next_call_number <= max_llm_calls:
                 return None
             return ErrorEvent(
@@ -2022,9 +1988,7 @@ class Agent:
 
                 _retry_attempt = 0
                 _call_attempt = 0
-                _retry_policy = _ProviderRetryPolicy.from_provider_budget(
-                    _fallback.max_retries
-                )
+                _retry_policy = _ProviderRetryPolicy.from_provider_budget(_fallback.max_retries)
                 _attempt_retries_used = _retry_policy.used_attempts()
                 _invalid_response_fallback_done = False
                 while _retry_attempt <= _fallback.max_retries:
@@ -2169,18 +2133,16 @@ class Agent:
                                         acc.json_chars - last_heartbeat_chars
                                         >= _TOOL_ARGUMENT_HEARTBEAT_CHARS
                                     ):
-                                        tool_argument_heartbeat_chars[
-                                            raw_ev.tool_use_id
-                                        ] = acc.json_chars
+                                        tool_argument_heartbeat_chars[raw_ev.tool_use_id] = (
+                                            acc.json_chars
+                                        )
                                         yield RunHeartbeatEvent(
                                             phase="llm_tool_arguments",
                                             elapsed_ms=int(
                                                 (time.monotonic() - call_started_at) * 1000
                                             ),
                                             idle_ms=0,
-                                            message=(
-                                                f"Receiving {acc.tool_name} arguments"
-                                            ),
+                                            message=(f"Receiving {acc.tool_name} arguments"),
                                         )
 
                             elif isinstance(raw_ev, ToolUseEndEvent):
@@ -2189,9 +2151,7 @@ class Agent:
                                         ignored_post_delivery_tool_use = True
                                     continue
                                 acc = pending_tools.pop(raw_ev.tool_use_id, None)
-                                tool_argument_heartbeat_chars.pop(
-                                    raw_ev.tool_use_id, None
-                                )
+                                tool_argument_heartbeat_chars.pop(raw_ev.tool_use_id, None)
                                 if acc and acc.json_buf:
                                     arguments = acc.finish()
                                 else:
@@ -2440,8 +2400,7 @@ class Agent:
                             continue
 
                         if (
-                            attempt_classification.kind
-                            == _ProviderAttemptKind.STREAM_INCOMPLETE
+                            attempt_classification.kind == _ProviderAttemptKind.STREAM_INCOMPLETE
                             and not attempt_classification.user_visible_emitted
                             and _retry_policy.can_retry_attempt(
                                 _ProviderAttemptKind.STREAM_INCOMPLETE,
@@ -2665,8 +2624,8 @@ class Agent:
                             provider_compaction_window_tokens = (
                                 self._provider_budget_compaction_window_tokens(provider_error)
                             )
-                            provider_estimated_tokens = (
-                                self._provider_budget_estimated_tokens(provider_error)
+                            provider_estimated_tokens = self._provider_budget_estimated_tokens(
+                                provider_error
                             )
                             provider_compaction_refusal_reason = (
                                 self._last_compaction_refusal_reason
@@ -2735,9 +2694,7 @@ class Agent:
                                     self._last_compaction_refusal_reason
                                     != "provider_recent_tail_too_large"
                                 ):
-                                    self._last_compaction_refusal_reason = (
-                                        "compaction_not_smaller"
-                                    )
+                                    self._last_compaction_refusal_reason = "compaction_not_smaller"
                                 terminal_error = self._context_overflow_error()
                                 yield terminal_error
                                 break
@@ -2881,9 +2838,7 @@ class Agent:
                     # DoneEvent usage/cost accounting for this turn.
                     turn_messages = overflow_outcome.messages
                     if overflow_outcome.request_context_insert_index is not None:
-                        request_context_insert_index = (
-                            overflow_outcome.request_context_insert_index
-                        )
+                        request_context_insert_index = overflow_outcome.request_context_insert_index
                     if overflow_outcome.runtime_context_insert_index is not None:
                         runtime_context_insert_index = overflow_outcome.runtime_context_insert_index
                     yield CompactionEvent(
@@ -2919,9 +2874,7 @@ class Agent:
                             if isinstance(self.config.thinking, ThinkingLevel)
                             else None
                         ),
-                        provider_request_max_chars=(
-                            self._provider_request_proof_max_chars()
-                        ),
+                        provider_request_max_chars=(self._provider_request_proof_max_chars()),
                     )
 
                 assembled_text = "".join(assistant_text_parts)
@@ -2941,9 +2894,7 @@ class Agent:
                         preflight_tool_results[tc.tool_use_id] = resolved
                         if self._is_provider_context_projection_reuse_result(resolved):
                             terminal_projection_preflight_error = True
-                        resolved_tool_calls.append(
-                            self._sanitize_projected_tool_call_arguments(tc)
-                        )
+                        resolved_tool_calls.append(self._sanitize_projected_tool_call_arguments(tc))
                         continue
                     resolved_tool_calls.append(resolved)
                 tool_calls = resolved_tool_calls
@@ -3048,9 +2999,7 @@ class Agent:
                             res = ToolResult(
                                 tool_use_id=tc.tool_use_id,
                                 tool_name=tc.tool_name,
-                                content=(
-                                    f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"
-                                ),
+                                content=(f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"),
                                 is_error=True,
                                 execution_status=runtime_execution_status(
                                     "timeout",
@@ -3115,8 +3064,7 @@ class Agent:
                             )
                             if not done:
                                 if _loop.time() >= tool_deadline or (
-                                    _total_deadline is not None
-                                    and _loop.time() >= _total_deadline
+                                    _total_deadline is not None and _loop.time() >= _total_deadline
                                 ):
                                     for task, tc in list(task_to_tool_call.items()):
                                         if task in pending:
@@ -3231,9 +3179,7 @@ class Agent:
                         async with key_lock:
                             return await _run_after_key_lock()
 
-                    task_to_tool_call = {
-                        asyncio.create_task(_run_limited(tc)): tc for tc in batch
-                    }
+                    task_to_tool_call = {asyncio.create_task(_run_limited(tc)): tc for tc in batch}
                     async for event in _collect_tool_tasks(task_to_tool_call):
                         yield event
 
@@ -3272,10 +3218,7 @@ class Agent:
                         execution_status=result.execution_status,
                     )
                     pending_approval = _pending_approval_payload(result.content)
-                    if (
-                        pending_approval is not None
-                        and not tc.arguments.get("approval_id")
-                    ):
+                    if pending_approval is not None and not tc.arguments.get("approval_id"):
                         await _wait_for_pending_approval_resolution(
                             pending_approval,
                             timeout=_cap_timeout_by_deadlines(self._approval_wait_timeout()),
@@ -3328,9 +3271,7 @@ class Agent:
                         )
                     )
 
-                terminal_artifacts = self._terminal_artifact_delivery_artifacts(
-                    executed_results
-                )
+                terminal_artifacts = self._terminal_artifact_delivery_artifacts(executed_results)
                 if terminal_artifacts:
                     artifact_delivery_final_response_artifacts = terminal_artifacts
 
@@ -3558,15 +3499,9 @@ class Agent:
             runtime_context_insert_index,
         )
         source_messages = self._apply_provider_tool_result_overrides(source_messages)
-        source_messages = self._strip_provider_context_marker_replay_for_provider(
-            source_messages
-        )
-        source_messages = self._compact_aggregate_tool_results_for_provider(
-            source_messages
-        )
-        source_messages = self._sanitize_projected_tool_use_arguments_for_provider(
-            source_messages
-        )
+        source_messages = self._strip_provider_context_marker_replay_for_provider(source_messages)
+        source_messages = self._compact_aggregate_tool_results_for_provider(source_messages)
+        source_messages = self._sanitize_projected_tool_use_arguments_for_provider(source_messages)
         return sanitize_session_messages(source_messages)
 
     def _apply_provider_tool_result_overrides(self, messages: list[Message]) -> list[Message]:
@@ -3906,6 +3841,19 @@ class Agent:
                     indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
                 )
                 self._flush_done_this_cycle = False
+                if self.config.flush_compaction_requires_safe_receipt:
+                    self._last_compaction_refusal_reason = reason
+                    if self._session_key:
+                        notify_compaction(
+                            self._session_key,
+                            source="automatic",
+                            phase="agent_inline_overflow",
+                            status="skipped",
+                            reason=reason,
+                            tokens_before=total_tokens,
+                            context_window_tokens=window_tokens,
+                        )
+                    return None
 
         # --- Compaction ---
         entries = [
@@ -4062,9 +4010,7 @@ class Agent:
                     "memory_flush.degraded",
                     mode=mode,
                     integrity_status=getattr(receipt, "integrity_status", None),
-                    output_coverage_status=getattr(
-                        receipt, "output_coverage_status", None
-                    ),
+                    output_coverage_status=getattr(receipt, "output_coverage_status", None),
                     obligation_status=getattr(receipt, "obligation_status", None),
                     raw_reason=getattr(receipt, "raw_reason", None),
                     next_retry_seconds=next_retry_seconds,
@@ -4183,8 +4129,7 @@ class Agent:
         if Agent._has_provider_context_argument_marker(arguments):
             return True
         return any(
-            isinstance(value, str)
-            and value.startswith(_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX)
+            isinstance(value, str) and value.startswith(_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX)
             for value in arguments.values()
         )
 
@@ -4225,10 +4170,7 @@ class Agent:
             next_content: list[Any] = []
             changed = False
             for block in message.content:
-                if (
-                    isinstance(block, ContentBlockToolUse)
-                    and block.id in blocked_tool_ids
-                ):
+                if isinstance(block, ContentBlockToolUse) and block.id in blocked_tool_ids:
                     stripped_blocks += 1
                     changed = True
                     continue
@@ -4288,9 +4230,8 @@ class Agent:
 
     @staticmethod
     def _has_provider_context_argument_marker(arguments: dict[str, Any]) -> bool:
-        return (
-            arguments.get(_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY) is True
-            or any(arguments.get(marker) is True for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
+        return arguments.get(_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY) is True or any(
+            arguments.get(marker) is True for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS
         )
 
     @staticmethod
@@ -4451,8 +4392,7 @@ class Agent:
         )
         if (
             block_threshold > 0
-            and self._tool_failure_loop_counts.get(failure_signature, 0)
-            >= block_threshold - 1
+            and self._tool_failure_loop_counts.get(failure_signature, 0) >= block_threshold - 1
         ):
             return ToolResult(
                 tool_use_id=tc.tool_use_id,
@@ -4613,12 +4553,8 @@ class Agent:
             tool_use_argument_provider_request_max_chars=(
                 self.config.tool_use_argument_provider_request_max_chars
             ),
-            tool_use_argument_projection_enabled=(
-                self.config.tool_use_argument_projection_enabled
-            ),
-            tool_failure_loop_block_threshold=(
-                self.config.tool_failure_loop_block_threshold
-            ),
+            tool_use_argument_projection_enabled=(self.config.tool_use_argument_projection_enabled),
+            tool_failure_loop_block_threshold=(self.config.tool_failure_loop_block_threshold),
             max_safe_tool_concurrency=self.config.max_safe_tool_concurrency,
             tool_result_external_keep_recent=self.config.tool_result_external_keep_recent,
             tool_result_store_dir=self.config.tool_result_store_dir,
@@ -4626,12 +4562,8 @@ class Agent:
             tool_result_store_session_key=self.config.tool_result_store_session_key,
             tool_result_store_agent_id=self.config.tool_result_store_agent_id,
             tool_result_store_max_bytes=self.config.tool_result_store_max_bytes,
-            tool_result_store_disk_budget_bytes=(
-                self.config.tool_result_store_disk_budget_bytes
-            ),
-            tool_result_store_retention_seconds=(
-                self.config.tool_result_store_retention_seconds
-            ),
+            tool_result_store_disk_budget_bytes=(self.config.tool_result_store_disk_budget_bytes),
+            tool_result_store_retention_seconds=(self.config.tool_result_store_retention_seconds),
         )
         return Agent(
             provider=self.provider,

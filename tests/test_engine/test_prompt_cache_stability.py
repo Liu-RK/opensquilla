@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
@@ -35,6 +37,16 @@ class _CapturingProvider:
 
     async def list_models(self) -> list[Any]:
         return []
+
+
+def _message_item_hash(message: Message) -> str:
+    payload = json.dumps(
+        message.model_dump(mode="json", exclude_none=True),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 @pytest.fixture
@@ -116,12 +128,12 @@ async def test_summary_context_is_request_only_and_keeps_system_cache_anchor(
     call = provider.calls[0]
     assert call["config"].system == "stable base"
     assert call["config"].cache_breakpoints == [{"text": "stable base", "cache": "true"}]
-    request_context = call["messages"][0].content
-    assert "[Request context for this turn]" in request_context
-    assert [message.content for message in call["messages"][1:3]] == [
+    assert [message.content for message in call["messages"][0:2]] == [
         "old question",
         "old answer",
     ]
+    request_context = call["messages"][2].content
+    assert "[Request context for this turn]" in request_context
     assert "[Compacted Session Summaries]" in request_context
     assert "summary outside transcript" in request_context
     assert "<memory_context>volatile recall</memory_context>" in request_context
@@ -133,3 +145,45 @@ async def test_summary_context_is_request_only_and_keeps_system_cache_anchor(
         for message in agent._history
         if isinstance(message.content, str)
     )
+
+
+@pytest.mark.asyncio
+async def test_changing_request_context_does_not_pollute_persisted_history_prefix() -> None:
+    provider = _CapturingProvider()
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            system_prompt="stable base",
+            request_context_prompt="<memory_context>volatile one</memory_context>",
+            cache_breakpoints=[{"text": "stable base", "cache": "true"}],
+            cache_mode="auto",
+            max_iterations=1,
+        ),
+    )
+    agent.set_history(
+        [
+            Message(role="user", content="old question"),
+            Message(role="assistant", content="old answer"),
+        ]
+    )
+
+    first_events = [event async for event in agent.run_turn("first question")]
+    agent.config.request_context_prompt = "<memory_context>volatile two</memory_context>"
+    second_events = [event async for event in agent.run_turn("second question")]
+
+    assert any(event.kind == "done" for event in first_events)
+    assert any(event.kind == "done" for event in second_events)
+    first_messages = provider.calls[0]["messages"]
+    second_messages = provider.calls[1]["messages"]
+    assert first_messages[0] == Message(role="user", content="old question")
+    assert first_messages[1] == Message(role="assistant", content="old answer")
+    assert second_messages[0] == Message(role="user", content="old question")
+    assert second_messages[1] == Message(role="assistant", content="old answer")
+    assert [_message_item_hash(message) for message in first_messages[0:2]] == [
+        _message_item_hash(message) for message in second_messages[0:2]
+    ]
+    old_prefix_payload = json.dumps(
+        [message.model_dump(mode="json", exclude_none=True) for message in second_messages[0:2]],
+        ensure_ascii=False,
+    )
+    assert "<memory_context>volatile two</memory_context>" not in old_prefix_payload

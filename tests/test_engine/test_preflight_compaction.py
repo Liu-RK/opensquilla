@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from opensquilla.engine import runtime as runtime_module
 from opensquilla.engine.runtime import TurnRunner
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.provider import DoneEvent as ProviderDone
@@ -134,6 +135,33 @@ class _FakeProviderSelector:
 
     def resolve(self) -> _FakeCompactionProvider:
         return self.provider
+
+
+class _ResultCompactionSessionManager:
+    def __init__(self, transcript: list[TranscriptEntry]) -> None:
+        self._transcript = transcript
+        self.compact_with_result_calls: list[tuple[str, int, object | None]] = []
+
+    async def get_transcript(self, session_key: str) -> list[TranscriptEntry]:
+        return list(self._transcript)
+
+    async def compact_with_result(
+        self,
+        session_key: str,
+        context_window_tokens: int,
+        config: object | None = None,
+    ) -> SimpleNamespace:
+        self.compact_with_result_calls.append((session_key, context_window_tokens, config))
+        return SimpleNamespace(
+            summary="summary text",
+            kept_entries=[{"role": "assistant", "content": "tail"}],
+            removed_count=4,
+            chunks_processed=3,
+            summary_source="llm",
+            tokens_before=1000,
+            tokens_after=200,
+            remaining_budget_tokens=800,
+        )
 
 
 @pytest.fixture
@@ -274,6 +302,50 @@ async def test_preflight_above_threshold_triggers_compact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_preflight_completed_event_reports_compaction_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_window = 1000
+    entries = [_make_entry("a" * 4000)]
+    sm = _ResultCompactionSessionManager(entries)
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        runtime_module,
+        "notify_compaction",
+        lambda session_key, **payload: events.append((session_key, payload)),
+    )
+    runner = TurnRunner(provider_selector=MagicMock(), session_manager=sm)
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("user:session", context_window)
+
+    assert sm.compact_with_result_calls == [("user:session", context_window, None)]
+    assert [(key, payload["status"]) for key, payload in events] == [
+        ("user:session", "started"),
+        ("user:session", "completed"),
+    ]
+    compaction_ids = {payload.get("compaction_id") for _, payload in events}
+    assert len(compaction_ids) == 1
+    assert None not in compaction_ids
+    assert events[0][1]["event"] == "compaction.triggered"
+    completed = events[-1][1]
+    assert completed["event"] == "compaction.persisted"
+    assert completed["event_chain"] == [
+        "compaction.triggered",
+        "compaction.chunk_summarized",
+        "compaction.summary_verified",
+        "compaction.persisted",
+    ]
+    assert completed["coverage_status"] == "unknown"
+    assert completed["chunk_count"] == 3
+    assert completed["summary_source"] == "llm"
+    assert completed["removed_count"] == 4
+    assert completed["kept_count"] == 1
+    assert completed["tokens_after"] == 200
+    assert completed["remaining_budget_tokens"] == 800
+
+
+@pytest.mark.asyncio
 async def test_preflight_counts_tool_call_arguments_when_deciding_to_compact() -> None:
     context_window = 1000
     entries = [
@@ -409,6 +481,39 @@ async def test_preflight_degraded_flush_receipts_do_not_block_compaction(
 
     flush_service.execute.assert_awaited_once()
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.asyncio
+async def test_preflight_strict_flush_receipt_skips_destructive_compaction() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(
+        return_value=_flush_receipt(integrity_status="missing_chunks")
+    )
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(
+                flush_enabled=True,
+                flush_timeout_seconds=0.25,
+                flush_background_timeout_seconds=42.0,
+                flush_compaction_requires_safe_receipt=True,
+            )
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_awaited_once()
+    mock_sm.compact.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -759,7 +864,7 @@ async def test_preflight_exactly_at_threshold_does_not_compact() -> None:
 
 @pytest.mark.asyncio
 async def test_preflight_integration_with_real_session_manager(session_mgr) -> None:
-    """Integration: pre-flight with real SessionManager calls compact() when over threshold."""
+    """Integration: pre-flight with real SessionManager compacts when over threshold."""
     mgr = session_mgr
     key = "user:preflight-test"
     await mgr.create(key)
@@ -771,21 +876,21 @@ async def test_preflight_integration_with_real_session_manager(session_mgr) -> N
 
     runner = TurnRunner(provider_selector=MagicMock(), session_manager=mgr)
 
-    # Patch compact() on the real manager to verify it gets called
-    original_compact = mgr.compact
+    # Patch compact_with_result() to verify the metadata-preserving path is used.
+    original_compact_with_result = mgr.compact_with_result
     compact_calls: list[tuple] = []
 
-    async def _spy_compact(session_key, context_window_tokens, config=None):
+    async def _spy_compact_with_result(session_key, context_window_tokens, config=None):
         compact_calls.append((session_key, context_window_tokens))
-        return await original_compact(session_key, context_window_tokens, config)
+        return await original_compact_with_result(session_key, context_window_tokens, config)
 
-    mgr.compact = _spy_compact  # type: ignore[method-assign]
+    mgr.compact_with_result = _spy_compact_with_result  # type: ignore[method-assign]
 
     # Force all tokens to exceed the default threshold (100 * 0.85 = 85)
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact(key, 100)
 
-    # compact() was invoked with the correct args
+    # compact_with_result() was invoked with the correct args.
     assert len(compact_calls) == 1
     assert compact_calls[0] == (key, 100)
 

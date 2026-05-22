@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import weakref
 from collections.abc import Sequence
 from typing import Any
@@ -33,6 +34,7 @@ from opensquilla.result_budget import (
     ToolResultBudgetTracker,
     ToolRunBudgetExceededError,
     ToolRunBudgetPolicy,
+    ToolRunBudgetReservation,
     ToolRunBudgetTracker,
     clamp_tool_arguments,
 )
@@ -137,6 +139,44 @@ def _build_envelope_result(
         ),
         is_error=True,
         execution_status=normalize_execution_status(status),
+    )
+
+
+async def _emit_webresearch_tool_run_diagnostics(
+    *,
+    tool_call: ToolCall,
+    effective_ctx: ToolContext | None,
+    reservation: ToolRunBudgetReservation,
+    run_budget_tracker: ToolRunBudgetTracker,
+    started_at: float,
+    raw_result: Any,
+    exception: BaseException | None,
+) -> None:
+    if not reservation.counted_as_external_text:
+        return
+    snapshot = await run_budget_tracker.snapshot()
+    if exception is None:
+        status = "ok"
+    elif isinstance(exception, ToolRunBudgetExceededError):
+        status = "budget_exhausted"
+    else:
+        status = "error"
+    result_chars = 0
+    if raw_result is not None:
+        result_chars = len(raw_result if isinstance(raw_result, str) else str(raw_result))
+    log.debug(
+        "dispatch.webresearch_tool_run_diagnostics",
+        tool=tool_call.tool_name,
+        tool_use_id=tool_call.tool_use_id,
+        agent_id=effective_ctx.agent_id if effective_ctx else None,
+        session_key=effective_ctx.session_key if effective_ctx else None,
+        status=status,
+        tool_wall_time_ms=round((time.monotonic() - started_at) * 1000, 3),
+        result_chars=result_chars,
+        reserved_external_text_chars=reservation.reserved_external_text_chars,
+        counted_as_search=reservation.counted_as_search,
+        counted_as_fetch=reservation.counted_as_fetch,
+        **snapshot,
     )
 
 
@@ -510,6 +550,7 @@ def build_tool_handler(
             return envelope
 
         token = current_tool_context.set(effective_ctx)
+        tool_started_at = time.monotonic()
         raw_result: Any = None
         exception: BaseException | None = None
         artifact_start = (
@@ -545,6 +586,15 @@ def build_tool_handler(
                                 error=str(hook_exc),
                             )
                 if not isinstance(exception, asyncio.CancelledError):
+                    await _emit_webresearch_tool_run_diagnostics(
+                        tool_call=tool_call,
+                        effective_ctx=effective_ctx,
+                        reservation=reservation,
+                        run_budget_tracker=run_budget_tracker,
+                        started_at=tool_started_at,
+                        raw_result=raw_result,
+                        exception=exception,
+                    )
                     # 7. Single finalisation point.
                     return await finalize(
                         tool_call,

@@ -168,9 +168,7 @@ class CopiedProjectionToolLoopCapturingProvider(LargeArgumentToolLoopCapturingPr
             "field: code\n"
             f"original_chars: {len(self.code)}\n"
             f"original_input_chars: {len(self.code)}\n"
-            "sha256: "
-            + hashlib.sha256(self.code.encode("utf-8")).hexdigest()
-            + "\n"
+            "sha256: " + hashlib.sha256(self.code.encode("utf-8")).hexdigest() + "\n"
             "tool_argument_handle: tr-1234567890abcdef1234567890abcdef\n"
             "omitted_chars: 123\n"
             "reason: legacy test marker\n"
@@ -880,6 +878,7 @@ def test_agent_provider_view_scrubs_legacy_projected_tool_argument(tmp_path) -> 
     ]
     assert all("tool_use_argument_projection" not in content for content in stored_contents)
 
+
 def test_agent_provider_view_does_not_project_aggregate_tool_use_arguments(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
@@ -912,9 +911,7 @@ def test_agent_provider_view_does_not_project_aggregate_tool_use_arguments(tmp_p
     projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_blocks = [
-        block
-        for block in projected[0].content
-        if isinstance(block, ContentBlockToolUse)
+        block for block in projected[0].content if isinstance(block, ContentBlockToolUse)
     ]
     assert all(block.input["content"] == "x" * 700 for block in projected_blocks)
     assert all(
@@ -976,6 +973,7 @@ def test_agent_provider_view_derives_tool_result_budget_above_legacy_default(
     assert first_result.content.startswith("FETCH_DERIVED_0")
     assert "external_tool_result_compacted" not in first_result.content
 
+
 def test_agent_provider_view_does_not_project_small_aggregate_tool_use_arguments(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
@@ -1008,9 +1006,7 @@ def test_agent_provider_view_does_not_project_small_aggregate_tool_use_arguments
     projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_blocks = [
-        block
-        for block in projected[0].content
-        if isinstance(block, ContentBlockToolUse)
+        block for block in projected[0].content if isinstance(block, ContentBlockToolUse)
     ]
     assert all(block.input["content"] == "x" * 200 for block in projected_blocks)
     assert all(block.input["path"].startswith("generated/") for block in projected_blocks)
@@ -1056,9 +1052,7 @@ def test_agent_provider_view_keeps_successful_file_write_argument_executable(tmp
     projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_tool_use = next(
-        block
-        for block in projected[0].content
-        if isinstance(block, ContentBlockToolUse)
+        block for block in projected[0].content if isinstance(block, ContentBlockToolUse)
     )
     projected_content = projected_tool_use.input["content"]
     assert projected_tool_use.id == "write-1"
@@ -1069,16 +1063,12 @@ def test_agent_provider_view_keeps_successful_file_write_argument_executable(tmp
     assert "successful_file_write_projection" not in projected_content
     assert "<p>word</p>" in projected_content
     projected_result = next(
-        block
-        for block in projected[1].content
-        if isinstance(block, ContentBlockToolResult)
+        block for block in projected[1].content if isinstance(block, ContentBlockToolResult)
     )
     assert projected_result.tool_use_id == "write-1"
     assert projected[-1].role == "user"
     history_block = next(
-        block
-        for block in messages[0].content
-        if isinstance(block, ContentBlockToolUse)
+        block for block in messages[0].content if isinstance(block, ContentBlockToolUse)
     )
     assert history_block.input["content"] == large_html
     assert "tool_argument_projection_applied" not in agent.config.metadata
@@ -1527,16 +1517,16 @@ async def test_agent_request_context_is_request_only_after_history() -> None:
     assert "<memory_context>volatile recall</memory_context>" not in call["config"].system
     assert [message.role for message in call["messages"]] == [
         "user",
-        "user",
         "assistant",
         "user",
         "user",
+        "user",
     ]
-    assert "[Request context for this turn]" in call["messages"][0].content
-    assert "<memory_context>volatile recall</memory_context>" in call["messages"][0].content
-    assert call["messages"][1] == Message(role="user", content="old question")
-    assert call["messages"][2] == Message(role="assistant", content="old answer")
-    assert "[Available skills for this turn]" in call["messages"][3].content
+    assert call["messages"][0] == Message(role="user", content="old question")
+    assert call["messages"][1] == Message(role="assistant", content="old answer")
+    assert "[Available skills for this turn]" in call["messages"][2].content
+    assert "[Request context for this turn]" in call["messages"][3].content
+    assert "<memory_context>volatile recall</memory_context>" in call["messages"][3].content
     assert call["messages"][4].content.startswith("hello")
     assert "[Runtime context for this turn]" in call["messages"][4].content
     assert all(
@@ -1706,6 +1696,62 @@ def test_agent_provider_request_messages_project_overflow_retry_tool_results(
 
 
 @pytest.mark.asyncio
+async def test_agent_inline_strict_flush_receipt_refuses_destructive_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            context_window_tokens=10,
+            context_overflow_threshold=0.1,
+            flush_enabled=True,
+            flush_timeout_seconds=0.1,
+            flush_compaction_requires_safe_receipt=True,
+        ),
+    )
+    messages = [Message(role="user", content="important history")]
+    compact_called = False
+
+    monkeypatch.setattr(
+        "opensquilla.memory.flush.should_flush",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "opensquilla.memory.flush.resolve_flush_plan",
+        lambda **_kwargs: SimpleNamespace(relative_path="flush.md"),
+    )
+
+    async def degraded_flush(_plan: Any, _messages: list[Message]) -> Any:
+        return SimpleNamespace(
+            mode="llm",
+            indexed_chunk_count=1,
+            integrity_status="missing_chunks",
+            output_coverage_status="ok",
+            invalid_candidate_count=0,
+            candidate_missing_ids=[],
+            obligation_status="ok",
+            obligation_missing_ids=[],
+        )
+
+    async def compact_context_should_not_run(_request: Any) -> Any:
+        nonlocal compact_called
+        compact_called = True
+        return SimpleNamespace(summary="", kept_entries=[], removed_count=0)
+
+    monkeypatch.setattr(agent, "_run_flush", degraded_flush)
+    monkeypatch.setattr(
+        "opensquilla.engine.agent.compact_context",
+        compact_context_should_not_run,
+    )
+
+    outcome = await agent._check_context_overflow(messages, total_tokens=100)
+
+    assert outcome is None
+    assert compact_called is False
+    assert agent._last_compaction_refusal_reason == "memory_flush_degraded_before_compaction"
+
+
+@pytest.mark.asyncio
 async def test_agent_keeps_large_tool_arguments_during_tool_replay(tmp_path) -> None:
     large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
     provider = LargeArgumentToolLoopCapturingProvider(large_code)
@@ -1743,9 +1789,7 @@ async def test_agent_keeps_large_tool_arguments_during_tool_replay(tmp_path) -> 
         and any(getattr(block, "type", None) == "tool_use" for block in message.content)
     )
     replay_block = next(
-        block
-        for block in assistant_replay.content
-        if isinstance(block, ContentBlockToolUse)
+        block for block in assistant_replay.content if isinstance(block, ContentBlockToolUse)
     )
     assert replay_block.input["code"] == large_code
     assert "tool_use_argument_projection" not in replay_block.input["code"]

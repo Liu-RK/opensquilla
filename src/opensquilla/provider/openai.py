@@ -489,6 +489,19 @@ def _stable_json_hash(value: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _openrouter_non_system_prefix_item_hashes(
+    messages: list[dict[str, Any]], *, max_items: int = 3
+) -> list[str]:
+    hashes: list[str] = []
+    for message in messages:
+        if message.get("role") == "system":
+            continue
+        hashes.append(_stable_json_hash(message))
+        if len(hashes) >= max_items:
+            break
+    return hashes
+
+
 def _attach_reasoning_content(
     msg: Message,
     payload: dict[str, Any],
@@ -916,6 +929,9 @@ class OpenAIProvider:
                 if openai_messages and openai_messages[0].get("role") == "system"
                 else None
             )
+            non_system_prefix_item_hashes = _openrouter_non_system_prefix_item_hashes(
+                openai_messages
+            )
             log.debug(
                 "openrouter.payload_cache_shape",
                 model=self._model,
@@ -923,6 +939,10 @@ class OpenAIProvider:
                 system_hash=_stable_json_hash(system_payload) if system_payload else "",
                 tools_hash=_stable_json_hash(payload.get("tools", [])) if tools else "",
                 messages_prefix_hash=_stable_json_hash(openai_messages[:-1]),
+                first_non_system_hash=(
+                    non_system_prefix_item_hashes[0] if non_system_prefix_item_hashes else ""
+                ),
+                non_system_prefix_item_hashes=non_system_prefix_item_hashes,
                 message_count=len(openai_messages),
             )
 

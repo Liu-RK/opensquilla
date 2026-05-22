@@ -126,7 +126,13 @@ from opensquilla.provider import (
 )
 from opensquilla.safety import injection_guard, permission_matrix, sandbox, tool_tiers
 from opensquilla.session.compaction_lifecycle import (
+    COMPACTION_PERSISTED_EVENT,
+    COMPACTION_TRIGGERED_EVENT,
+    compaction_lifecycle_payload,
+    compaction_result_payload,
     flush_receipt_allows_destructive_compaction,
+    new_compaction_id,
+    pre_compaction_flush_requires_safe_receipt,
 )
 from opensquilla.session.cost_rollup import (
     normalize_event_cost_source,
@@ -163,15 +169,11 @@ _T3_NOT_APPLICABLE: Final[str] = "not_applicable"
 _T3_HANDLED: Final[str] = "handled"
 _T3_FLUSH_FAILED: Final[str] = "flush_failed"
 _T3_COMPACT_FAILED: Final[str] = "compact_failed"
-_SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset(
-    {"ok", "unverifiable"}
-)
+_SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok", "unverifiable"})
 _SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
     {"ok", "backfilled", "unverifiable"}
 )
-_IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset(
-    {"image_generate"}
-)
+_IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset({"image_generate"})
 _ARTIFACT_DELIVERY_FAILURE_MARKER: Final[str] = "File delivery failed:"
 _ARTIFACT_DELIVERY_TOOL_NAME: Final[str] = "publish_artifact"
 _ARTIFACT_DELIVERY_FAILURE_MAX_CHARS: Final[int] = 360
@@ -202,30 +204,32 @@ def _is_deepseek_model_id(model: str) -> bool:
 
 # Tools that are safe to run concurrently within a single LLM turn.
 # Any tool name absent from this set is treated as mutex (serial dispatch).
-_SAFE_TOOL_NAMES: frozenset[str] = frozenset({
-    "agents_list",
-    "git_diff",
-    "git_log",
-    "git_status",
-    "glob_search",
-    "grep_search",
-    "image",
-    "list_dir",
-    "memory_get",
-    "memory_search",
-    "pdf",
-    "read_file",
-    "read_spreadsheet",
-    "session_search",
-    "session_status",
-    "sessions_history",
-    "sessions_list",
-    "skill_list",
-    "skill_view",
-    "tts",
-    "web_fetch",
-    "web_search",
-})
+_SAFE_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "agents_list",
+        "git_diff",
+        "git_log",
+        "git_status",
+        "glob_search",
+        "grep_search",
+        "image",
+        "list_dir",
+        "memory_get",
+        "memory_search",
+        "pdf",
+        "read_file",
+        "read_spreadsheet",
+        "session_search",
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "skill_list",
+        "skill_view",
+        "tts",
+        "web_fetch",
+        "web_search",
+    }
+)
 
 _ToolConcurrencyMode = Literal["mutex", "concurrent", "keyed", "predicate"]
 
@@ -238,17 +242,19 @@ class _ToolConcurrencyPolicy:
     limit_key: Hashable | None = None
 
 
-_FEISHU_READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
-    "feishu_chat_read",
-    "feishu_doc_list_blocks",
-    "feishu_doc_read_raw",
-    "feishu_drive_meta",
-    "feishu_drive_search",
-    "feishu_scopes_status",
-    "feishu_wiki_get_node",
-    "feishu_wiki_list_nodes",
-    "feishu_wiki_list_spaces",
-})
+_FEISHU_READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "feishu_chat_read",
+        "feishu_doc_list_blocks",
+        "feishu_doc_read_raw",
+        "feishu_drive_meta",
+        "feishu_drive_search",
+        "feishu_scopes_status",
+        "feishu_wiki_get_node",
+        "feishu_wiki_list_nodes",
+        "feishu_wiki_list_spaces",
+    }
+)
 
 _MUTEX_TOOL_POLICY = _ToolConcurrencyPolicy(mode="mutex")
 _CONCURRENT_TOOL_POLICY = _ToolConcurrencyPolicy(mode="concurrent")
@@ -296,8 +302,8 @@ def _get_tool_concurrency_policy(
 # running, which matters for stream wrappers such as heartbeat_stream. Treating
 # the lock id as the ownership token lets those child tasks enter without
 # self-deadlocking while unrelated tasks still see their own context values.
-_SESSION_LOCK_OWNER: contextvars.ContextVar[dict[int, asyncio.Task[Any]]] = (
-    contextvars.ContextVar("_session_lock_owner")
+_SESSION_LOCK_OWNER: contextvars.ContextVar[dict[int, asyncio.Task[Any]]] = contextvars.ContextVar(
+    "_session_lock_owner"
 )
 
 
@@ -518,9 +524,9 @@ def _format_compaction_summary_context(summary_texts: list[str]) -> str | None:
     rendered = f"{_COMPACTION_SUMMARY_CONTEXT_HEADER}\n" + "\n\n".join(blocks)
     if len(rendered) <= _COMPACTION_SUMMARY_CONTEXT_MAX_CHARS:
         return rendered
-    tail_budget = _COMPACTION_SUMMARY_CONTEXT_MAX_CHARS - len(
-        _COMPACTION_SUMMARY_CONTEXT_HEADER
-    ) - 80
+    tail_budget = (
+        _COMPACTION_SUMMARY_CONTEXT_MAX_CHARS - len(_COMPACTION_SUMMARY_CONTEXT_HEADER) - 80
+    )
     tail_budget = max(1000, tail_budget)
     return (
         f"{_COMPACTION_SUMMARY_CONTEXT_HEADER}\n"
@@ -768,9 +774,7 @@ def _persisted_tool_result_segment(
     segment["result_truncated"] = True
     segment["result_original_chars"] = len(result)
     if "execution_status" in segment:
-        segment["execution_status"] = mark_execution_status_truncated(
-            segment["execution_status"]
-        )
+        segment["execution_status"] = mark_execution_status_truncated(segment["execution_status"])
     try:
         parsed = json.loads(result)
     except (json.JSONDecodeError, TypeError):
@@ -971,9 +975,8 @@ class _SelectorFallbackProvider:
                 yield event
                 continue
 
-            if (
-                isinstance(event, ProviderErrorEvent)
-                and _should_use_selector_fallback(self.provider_name, event)
+            if isinstance(event, ProviderErrorEvent) and _should_use_selector_fallback(
+                self.provider_name, event
             ):
                 try:
                     self._provider = self._selector.next_fallback_after_failure(
@@ -1166,6 +1169,7 @@ def _extract_pdf_attachment_text(raw_bytes: bytes, filename: str) -> str:
     if not extracted:
         raise ValueError(f"PDF attachment {filename!r} has no extractable text")
     return _truncate_attachment_text(extracted)
+
 
 # Strong past-tense / perfect-aspect phrases that signal the model is claiming
 # to have produced an image. Only checked when ``image_generate`` is available
@@ -1840,9 +1844,7 @@ class TurnRunner:
                 # Harness performs the legacy observability + persist +
                 # yield sequence in the legacy ORDER (trace-emit, persist,
                 # yield, return).
-                provider_error_event = cast(
-                    ErrorEvent, pt_outcome.require_early_yield()
-                )
+                provider_error_event = cast(ErrorEvent, pt_outcome.require_early_yield())
                 log.error("turn_runner.no_provider", session_key=session_key)
                 self._emit_turn_event(
                     "turn_error",
@@ -1937,9 +1939,7 @@ class TurnRunner:
                         "input_mode": input_mode,
                         "message": effective_runtime_message,
                         "attachment_count": len(attachments),
-                        "tool_names": [
-                            getattr(td, "name", "") for td in turn.tool_defs
-                        ],
+                        "tool_names": [getattr(td, "name", "") for td in turn.tool_defs],
                     },
                 )
             log.debug(
@@ -2003,9 +2003,7 @@ class TurnRunner:
                 )
             )
             ch_out = ch_outcome.require_output()
-            agent.config.request_context_prompt = (
-                ch_out.final_request_context_prompt
-            )
+            agent.config.request_context_prompt = ch_out.final_request_context_prompt
 
             # 8. Build extra messages for attachments + turn_input rebind.
             # AttachmentStage owns the slice.
@@ -2074,9 +2072,7 @@ class TurnRunner:
             # text segment. The stage's post-stream notify already
             # fired (it is the last action of the stage body).
             if current_text_parts:
-                turn_segments.append(
-                    {"type": "text", "text": "".join(current_text_parts)}
-                )
+                turn_segments.append({"type": "text", "text": "".join(current_text_parts)})
 
             # 10. Persist assistant response (filter sentinel tokens).
             # TurnFinalizerStage owns the slice. The four side effects
@@ -2254,8 +2250,7 @@ class TurnRunner:
             )
             event_code = (
                 error_code
-                if error_code
-                in {"provider_request_too_large", "provider_output_truncated"}
+                if error_code in {"provider_request_too_large", "provider_output_truncated"}
                 else "agent_error"
             )
             log.error(
@@ -2478,8 +2473,7 @@ class TurnRunner:
         )
         event_code = (
             error_code
-            if error_code
-            in {"provider_request_too_large", "provider_output_truncated"}
+            if error_code in {"provider_request_too_large", "provider_output_truncated"}
             else event.code
         )
         if event_code == "provider_output_truncated":
@@ -2563,8 +2557,10 @@ class TurnRunner:
                     error=str(exc),
                 )
 
-        base_message = event.message.strip() if event.message else (
-            f"Tool result summarization failed for model {model_label!r}."
+        base_message = (
+            event.message.strip()
+            if event.message
+            else (f"Tool result summarization failed for model {model_label!r}.")
         )
         suffix = " Tool Compress has been turned OFF." if disabled else ""
         return WarningEvent(
@@ -2736,9 +2732,7 @@ class TurnRunner:
             try:
                 value = float(raw)
             except ValueError:
-                log.warning(
-                    "turn_runner.invalid_agent_iteration_timeout", source="env", raw=raw
-                )
+                log.warning("turn_runner.invalid_agent_iteration_timeout", source="env", raw=raw)
             else:
                 if value >= 0:
                     return value
@@ -2846,15 +2840,11 @@ class TurnRunner:
             try:
                 value = float(raw)
             except ValueError:
-                log.warning(
-                    "turn_runner.invalid_agent_request_timeout", source="env", raw=raw
-                )
+                log.warning("turn_runner.invalid_agent_request_timeout", source="env", raw=raw)
             else:
                 if value > 0:
                     return value
-                log.warning(
-                    "turn_runner.invalid_agent_request_timeout", source="env", value=value
-                )
+                log.warning("turn_runner.invalid_agent_request_timeout", source="env", value=value)
 
         value = getattr(self._config, "agent_request_timeout_seconds", None)
         if self._non_bool_number(value) and value > 0:
@@ -2903,9 +2893,7 @@ class TurnRunner:
             try:
                 value = int(raw)
             except ValueError:
-                log.warning(
-                    "turn_runner.invalid_agent_max_provider_retries", source="env", raw=raw
-                )
+                log.warning("turn_runner.invalid_agent_max_provider_retries", source="env", raw=raw)
             else:
                 if value >= 0:
                     return value
@@ -3068,8 +3056,7 @@ class TurnRunner:
 
         detected = detect_runtime_tool_surface_capabilities(
             channel_backing=(
-                ctx.caller_kind in {CallerKind.CHANNEL, CallerKind.WEB}
-                and bool(ctx.channel_id)
+                ctx.caller_kind in {CallerKind.CHANNEL, CallerKind.WEB} and bool(ctx.channel_id)
             )
         )
         capabilities = ToolSurfaceCapabilities(
@@ -3318,9 +3305,7 @@ class TurnRunner:
             prompt_metadata["memory_retrieval_vector_weight"] = retrieval_metadata.get(
                 "vector_weight"
             )
-            prompt_metadata["memory_retrieval_text_weight"] = retrieval_metadata.get(
-                "text_weight"
-            )
+            prompt_metadata["memory_retrieval_text_weight"] = retrieval_metadata.get("text_weight")
             prompt_metadata["memory_mode_fingerprint"] = retrieval_metadata
 
         soul_doc = parse_soul(workspace_files["SOUL.md"]) if "SOUL.md" in workspace_files else None
@@ -3550,9 +3535,7 @@ class TurnRunner:
                 )
                 return commit_deferred_router_history(routed)
             except TimeoutError as exc:
-                raise TimeoutError(
-                    f"squilla router timed out after {router_timeout:g}s"
-                ) from exc
+                raise TimeoutError(f"squilla router timed out after {router_timeout:g}s") from exc
 
         _bounded_apply_squilla_router.__name__ = "apply_squilla_router"
 
@@ -3853,10 +3836,7 @@ class TurnRunner:
                     )
                     if baseline.price.output_per_m > 0:
                         savings_telemetry.short_reply_savings_usd_estimated_vs_baseline = round(
-                            (
-                                savings_telemetry.short_reply_savings_tokens_estimated
-                                / 1_000_000
-                            )
+                            (savings_telemetry.short_reply_savings_tokens_estimated / 1_000_000)
                             * baseline.price.output_per_m,
                             6,
                         )
@@ -3882,9 +3862,7 @@ class TurnRunner:
                 savings_telemetry.billed_cost_usd = (
                     done_event.billed_cost if done_event is not None else None
                 )
-                savings_telemetry.cost_usd = (
-                    done_event.cost_usd if done_event is not None else None
-                )
+                savings_telemetry.cost_usd = done_event.cost_usd if done_event is not None else None
                 savings_telemetry.cost_source = (
                     normalize_event_cost_source(
                         done_event.cost_source,
@@ -3941,18 +3919,14 @@ class TurnRunner:
                 retrieval_mode=prompt_report.retrieval_mode if prompt_report else None,
                 cache_mode=prompt_report.cache_mode if prompt_report else None,
                 cache_base_hash=prompt_report.cache_base_hash if prompt_report else None,
-                cache_dynamic_hash=(
-                    prompt_report.cache_dynamic_hash if prompt_report else None
-                ),
+                cache_dynamic_hash=(prompt_report.cache_dynamic_hash if prompt_report else None),
                 cache_read_input_tokens=(
                     int(done_event.cached_tokens or 0) if done_event is not None else 0
                 ),
                 cache_creation_input_tokens=(
                     int(done_event.cache_write_tokens or 0) if done_event is not None else 0
                 ),
-                resolved_model=(
-                    prompt_report.resolved_model if prompt_report else None
-                )
+                resolved_model=(prompt_report.resolved_model if prompt_report else None)
                 or resolved_model,
                 alias_resolution_chain=(
                     prompt_report.alias_resolution_chain
@@ -3967,9 +3941,7 @@ class TurnRunner:
                 cache_shadow_final_hash=(
                     prompt_report.cache_shadow_final_hash if prompt_report else None
                 ),
-                cache_key_collision=(
-                    prompt_report.cache_key_collision if prompt_report else False
-                ),
+                cache_key_collision=(prompt_report.cache_key_collision if prompt_report else False),
                 reasoning_hint_resolved=(
                     prompt_report.reasoning_hint_resolved if prompt_report else None
                 ),
@@ -4064,6 +4036,7 @@ class TurnRunner:
             final_tier="t3",
             context_window_tokens=context_window_tokens,
         )
+        compaction_id = new_compaction_id()
         notify_compaction(
             session_key,
             source="automatic",
@@ -4071,14 +4044,35 @@ class TurnRunner:
             status="started",
             previous_tier=previous,
             context_window_tokens=context_window_tokens,
+            **compaction_lifecycle_payload(compaction_id, COMPACTION_TRIGGERED_EVENT),
         )
 
         if self._pre_compaction_flush_enabled():
-            await self._await_pre_compaction_flush_grace(
+            flush_safe = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="t3_upgrade_compaction",
             )
+            if self._pre_compaction_flush_requires_safe_receipt() and not flush_safe:
+                log.warning(
+                    "t3_upgrade_compaction.skipped",
+                    session_key=session_key,
+                    reason="unsafe_flush_receipt",
+                )
+                notify_compaction(
+                    session_key,
+                    source="automatic",
+                    phase="t3_upgrade",
+                    status="skipped",
+                    reason="unsafe_flush_receipt",
+                    context_window_tokens=context_window_tokens,
+                    flush_receipt_status="unsafe",
+                    **compaction_lifecycle_payload(
+                        compaction_id,
+                        COMPACTION_TRIGGERED_EVENT,
+                    ),
+                )
+                return _T3_HANDLED
 
         try:
             compaction_config = None
@@ -4092,22 +4086,36 @@ class TurnRunner:
                 )
             from opensquilla.session.compaction import call_compact_with_optional_config
 
-            result = await call_compact_with_optional_config(
-                self._session_manager.compact,
-                session_key,
-                context_window_tokens,
-                compaction_config,
-            )
+            compaction_result = None
+            compact_with_result = getattr(type(self._session_manager), "compact_with_result", None)
+            if callable(compact_with_result):
+                compaction_result = await self._session_manager.compact_with_result(
+                    session_key,
+                    context_window_tokens,
+                    compaction_config,
+                )
+                result = getattr(compaction_result, "summary", "") or ""
+            else:
+                result = await call_compact_with_optional_config(
+                    self._session_manager.compact,
+                    session_key,
+                    context_window_tokens,
+                    compaction_config,
+                )
             self.mark_compacted_this_turn(session_key)
             self._record_compaction_success(session_key)
             if result:
+                completed_payload = {"summary_len": len(result)}
+                if compaction_result is not None:
+                    completed_payload.update(compaction_result_payload(compaction_result))
                 notify_compaction(
                     session_key,
                     source="automatic",
                     phase="t3_upgrade",
                     status="completed",
                     context_window_tokens=context_window_tokens,
-                    summary_len=len(result),
+                    **completed_payload,
+                    **compaction_lifecycle_payload(compaction_id, COMPACTION_PERSISTED_EVENT),
                 )
             else:
                 notify_compaction(
@@ -4117,6 +4125,10 @@ class TurnRunner:
                     status="skipped",
                     reason="empty_summary",
                     context_window_tokens=context_window_tokens,
+                    **compaction_lifecycle_payload(
+                        compaction_id,
+                        COMPACTION_TRIGGERED_EVENT,
+                    ),
                 )
             log.info(
                 "t3_upgrade_compaction.compact_done",
@@ -4140,6 +4152,10 @@ class TurnRunner:
                 status="failed",
                 message=str(exc),
                 context_window_tokens=context_window_tokens,
+                **compaction_lifecycle_payload(
+                    compaction_id,
+                    COMPACTION_TRIGGERED_EVENT,
+                ),
             )
             return _T3_COMPACT_FAILED
 
@@ -4195,6 +4211,7 @@ class TurnRunner:
             threshold=threshold,
             ratio=ratio,
         )
+        compaction_id = new_compaction_id()
         notify_compaction(
             session_key,
             source="automatic",
@@ -4202,13 +4219,35 @@ class TurnRunner:
             status="started",
             tokens_before=total_tokens,
             context_window_tokens=context_window_tokens,
+            **compaction_lifecycle_payload(compaction_id, COMPACTION_TRIGGERED_EVENT),
         )
         if self._pre_compaction_flush_enabled():
-            await self._await_pre_compaction_flush_grace(
+            flush_safe = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="preflight_compaction",
             )
+            if self._pre_compaction_flush_requires_safe_receipt() and not flush_safe:
+                log.warning(
+                    "preflight_compaction.skipped",
+                    session_key=session_key,
+                    reason="unsafe_flush_receipt",
+                )
+                notify_compaction(
+                    session_key,
+                    source="automatic",
+                    phase="preflight",
+                    status="skipped",
+                    reason="unsafe_flush_receipt",
+                    tokens_before=total_tokens,
+                    context_window_tokens=context_window_tokens,
+                    flush_receipt_status="unsafe",
+                    **compaction_lifecycle_payload(
+                        compaction_id,
+                        COMPACTION_TRIGGERED_EVENT,
+                    ),
+                )
+                return
         compaction_config = None
         if compaction_provider is not None or compaction_model:
             from opensquilla.session.compaction import build_compaction_config_from_provider
@@ -4221,12 +4260,22 @@ class TurnRunner:
         from opensquilla.session.compaction import call_compact_with_optional_config
 
         try:
-            result = await call_compact_with_optional_config(
-                self._session_manager.compact,
-                session_key,
-                context_window_tokens,
-                compaction_config,
-            )
+            compaction_result = None
+            compact_with_result = getattr(type(self._session_manager), "compact_with_result", None)
+            if callable(compact_with_result):
+                compaction_result = await self._session_manager.compact_with_result(
+                    session_key,
+                    context_window_tokens,
+                    compaction_config,
+                )
+                result = getattr(compaction_result, "summary", "") or ""
+            else:
+                result = await call_compact_with_optional_config(
+                    self._session_manager.compact,
+                    session_key,
+                    context_window_tokens,
+                    compaction_config,
+                )
             self.mark_compacted_this_turn(session_key)
         except asyncio.CancelledError:
             raise
@@ -4245,17 +4294,30 @@ class TurnRunner:
                 message=str(exc),
                 tokens_before=total_tokens,
                 context_window_tokens=context_window_tokens,
+                **compaction_lifecycle_payload(
+                    compaction_id,
+                    COMPACTION_TRIGGERED_EVENT,
+                ),
             )
             return
         self._record_compaction_success(session_key)
         if result:
+            completed_payload = {"tokens_before": total_tokens}
+            if compaction_result is not None:
+                completed_payload.update(
+                    compaction_result_payload(
+                        compaction_result,
+                        tokens_before=total_tokens,
+                    )
+                )
             notify_compaction(
                 session_key,
                 source="automatic",
                 phase="preflight",
                 status="completed",
-                tokens_before=total_tokens,
                 context_window_tokens=context_window_tokens,
+                **completed_payload,
+                **compaction_lifecycle_payload(compaction_id, COMPACTION_PERSISTED_EVENT),
             )
         else:
             notify_compaction(
@@ -4266,6 +4328,10 @@ class TurnRunner:
                 reason="empty_summary",
                 tokens_before=total_tokens,
                 context_window_tokens=context_window_tokens,
+                **compaction_lifecycle_payload(
+                    compaction_id,
+                    COMPACTION_TRIGGERED_EVENT,
+                ),
             )
 
     def _pre_compaction_flush_enabled(self) -> bool:
@@ -4282,6 +4348,9 @@ class TurnRunner:
         if isinstance(raw_enabled, str):
             return raw_enabled.strip().lower() not in {"0", "false", "no", "off"}
         return bool(raw_enabled)
+
+    def _pre_compaction_flush_requires_safe_receipt(self) -> bool:
+        return pre_compaction_flush_requires_safe_receipt(self._config)
 
     def _pre_compaction_flush_timeout_seconds(self) -> float:
         memory_cfg = getattr(self._config, "memory", None)
@@ -4652,9 +4721,7 @@ class TurnRunner:
             if not isinstance(att, dict):
                 continue
             media_type = att.get("type") or att.get("mime") or att.get("media_type")
-            if not (
-                isinstance(media_type, str) and media_type in _ALLOWED_ENGINE_MEDIA_TYPES
-            ):
+            if not (isinstance(media_type, str) and media_type in _ALLOWED_ENGINE_MEDIA_TYPES):
                 continue
             # Persisted attachment envelope: ``sha256_ref`` indicates the bytes live on
             # disk under media/transcripts/<session>/<sha>; for replay we
@@ -4663,7 +4730,8 @@ class TurnRunner:
             sha_ref = att.get("sha256_ref")
             missing_reason = att.get("missing_reason")
             if not (
-                (isinstance(data, str) and data) or (isinstance(sha_ref, str) and sha_ref)
+                (isinstance(data, str) and data)
+                or (isinstance(sha_ref, str) and sha_ref)
                 or (isinstance(missing_reason, str) and missing_reason)
             ):
                 continue
@@ -4690,9 +4758,7 @@ class TurnRunner:
         if not isinstance(text, str) or not isinstance(artifacts, list):
             return content
         markers = [
-            artifact_marker(artifact)
-            for artifact in artifacts
-            if isinstance(artifact, dict)
+            artifact_marker(artifact) for artifact in artifacts if isinstance(artifact, dict)
         ]
         if not markers:
             return text
@@ -4746,9 +4812,7 @@ class TurnRunner:
                 if isinstance(mime, str) and mime in _ALLOWED_ENGINE_MEDIA_TYPES:
                     media_type = mime
             if media_type is None or media_type not in _ALLOWED_ENGINE_MEDIA_TYPES:
-                raise ValueError(
-                    f"attachments[{index}] media type {att_type!r} is not allowed"
-                )
+                raise ValueError(f"attachments[{index}] media type {att_type!r} is not allowed")
             if is_attachment_ref(att):
                 missing_ref_marker = ""
                 if media_root is None:
@@ -4779,9 +4843,7 @@ class TurnRunner:
             else:
                 max_bytes = _MAX_ATTACHMENT_BYTES
             if len(raw_bytes) > max_bytes:
-                raise ValueError(
-                    f"attachments[{index}] exceeds the {max_bytes} byte limit"
-                )
+                raise ValueError(f"attachments[{index}] exceeds the {max_bytes} byte limit")
 
             name_raw = att.get("name")
             filename = _sanitize_attachment_filename(name_raw)
@@ -4791,16 +4853,13 @@ class TurnRunner:
                 continue
 
             if media_type.startswith("image/"):
-                attachment_blocks.append(
-                    ContentBlockImage(media_type=media_type, data=data)
-                )
+                attachment_blocks.append(ContentBlockImage(media_type=media_type, data=data))
             elif media_type == "application/pdf":
                 try:
                     extracted_pdf_text = _extract_pdf_attachment_text(raw_bytes, filename)
                 except ValueError as exc:
                     extracted_pdf_text = (
-                        "[attachment unavailable: PDF text could not be extracted: "
-                        f"{exc}]"
+                        f"[attachment unavailable: PDF text could not be extracted: {exc}]"
                     )
                 wrapped = _render_file_context_block(filename, media_type, extracted_pdf_text)
                 attachment_blocks.append(ContentBlockText(text=wrapped))
@@ -4817,9 +4876,7 @@ class TurnRunner:
                 wrapped = _render_file_context_block(filename, media_type, decoded_text)
                 attachment_blocks.append(ContentBlockText(text=wrapped))
             else:  # pragma: no cover - guarded by allow-list above
-                raise ValueError(
-                    f"attachments[{index}] media type {media_type!r} is not handled"
-                )
+                raise ValueError(f"attachments[{index}] media type {media_type!r} is not handled")
 
         return [
             Message(

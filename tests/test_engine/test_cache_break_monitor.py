@@ -60,7 +60,43 @@ def test_cache_break_monitor_initializes_then_detects_attributed_drop() -> None:
     log_payload = report.to_log_dict()
     assert "forensics" in log_payload
     assert log_payload["forensics"]["previous"]["messages_prefix_item_hashes"]
+    assert log_payload["forensics"]["previous"]["messages_prefix_item_kinds"] == ["history"]
     assert log_payload["forensics"]["current"]["cache_control_field_hashes"]
+
+
+def test_cache_break_monitor_forensics_labels_request_context_prefix_items() -> None:
+    monitor = CacheBreakMonitor(min_drop_tokens=10, min_drop_ratio=0.05)
+    first = monitor.record_prompt_state(
+        messages=[
+            Message(role="user", content="[Request context for this turn]\nvolatile one"),
+            Message(role="user", content="old question"),
+            Message(role="assistant", content="old answer"),
+            Message(role="user", content="current question"),
+        ],
+        tools=None,
+        config=ChatConfig(system="stable system"),
+        model="model-a",
+    )
+    monitor.check_response_for_cache_break("agent:main:s1", first, 5000)
+
+    second = monitor.record_prompt_state(
+        messages=[
+            Message(role="user", content="[Request context for this turn]\nvolatile two"),
+            Message(role="user", content="old question"),
+            Message(role="assistant", content="old answer"),
+            Message(role="user", content="current question"),
+        ],
+        tools=None,
+        config=ChatConfig(system="stable system"),
+        model="model-a",
+    )
+
+    report = monitor.check_response_for_cache_break("agent:main:s1", second, 100)
+
+    assert report.break_detected is True
+    payload = report.to_log_dict()
+    assert payload["forensics"]["previous"]["messages_prefix_item_kinds"][0] == "request_context"
+    assert payload["forensics"]["current"]["messages_prefix_item_kinds"][0] == "request_context"
 
 
 def test_cache_break_monitor_resets_baseline_after_compaction() -> None:
