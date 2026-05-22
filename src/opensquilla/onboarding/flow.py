@@ -926,18 +926,16 @@ def _warn_channel_dependency_gaps(spec: ChannelSetupSpec, answers: dict[str, Any
         if importlib.util.find_spec("lark_oapi") is None:
             console.print(
                 warning_panel(
-                    "Feishu websocket mode requires the optional feishu extra "
+                    "Feishu websocket mode requires the base lark-oapi dependency "
                     "(lark-oapi).\n\n"
                     "[bold]Portable zip:[/]\n"
                     "  Use the latest recommended portable package, then restart.\n\n"
                     "[bold]Installed command:[/]\n"
-                    "  $env:OPENSQUILLA_INSTALL_EXTRAS=\"feishu\"; "
-                    "irm https://opensquilla.ai/install.ps1 | iex\n"
-                    "  OPENSQUILLA_INSTALL_EXTRAS=feishu "
-                    "curl -LsSf https://opensquilla.ai/install.sh | bash -s --\n"
+                    "  irm https://opensquilla.ai/install.ps1 | iex\n"
+                    "  curl -LsSf https://opensquilla.ai/install.sh | bash -s --\n"
                     "  opensquilla gateway restart\n\n"
                     "[bold]Development checkout:[/]\n"
-                    "  uv sync --extra recommended --extra feishu\n"
+                    "  uv sync --extra recommended\n"
                     "  uv run opensquilla gateway restart --json\n\n"
                     "[bold yellow]Restarting alone will not install Python packages.[/]",
                     title="Channel dependency missing",

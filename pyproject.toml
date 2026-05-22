@@ -78,13 +78,6 @@ recommended = [
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
 ]
-# Legacy aliases — channels are now part of base dependencies.
-# Kept as empty lists so existing scripts that pass `[feishu]` etc. keep resolving.
-feishu = []
-telegram = []
-dingtalk = []
-wecom = []
-qq = []
 matrix = ["matrix-nio>=0.25,<0.26", "markdown>=3.0"]
 matrix-e2e = ["matrix-nio[e2e]>=0.25,<0.26", "markdown>=3.0"]
 document-extras = [

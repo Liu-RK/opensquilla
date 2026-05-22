@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Channel install extras now expose only real optional packages; Feishu,
+  Telegram, DingTalk, WeCom, and QQ are included in the base install instead
+  of being accepted as no-op extras.
+
 ### Fixed
 
 ## [0.2.1] - 2026-05-21

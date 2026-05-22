@@ -74,7 +74,7 @@ is_release_version() {
     [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]
 }
 
-valid_extras=" feishu telegram dingtalk wecom qq matrix matrix-e2e document-extras "
+valid_extras=" matrix matrix-e2e document-extras "
 extras_csv="${OPENSQUILLA_INSTALL_EXTRAS:-}"
 if [[ -n "${cli_extras}" ]]; then
     extras_csv="${extras_csv}${extras_csv:+,}${cli_extras}"

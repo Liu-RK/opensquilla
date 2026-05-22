@@ -1287,14 +1287,15 @@ def test_interactive_feishu_websocket_prompts_only_core_fields(tmp_path, monkeyp
 
     out = console_output.getvalue()
     normalized_out = " ".join(out.split())
-    assert "Feishu websocket mode requires the optional feishu extra" in out
+    assert "Feishu websocket mode requires the base lark-oapi dependency" in out
     assert "Portable zip:" in out
     assert "latest recommended portable package" in out
-    assert "OPENSQUILLA_INSTALL_EXTRAS" in normalized_out
+    assert "OPENSQUILLA_INSTALL_EXTRAS" not in normalized_out
     assert "https://opensquilla.ai/install.ps1" in normalized_out
     assert "https://opensquilla.ai/install.sh" in normalized_out
     assert "bash -s --" in normalized_out
-    assert "uv sync --extra recommended --extra feishu" in normalized_out
+    assert "uv sync --extra recommended" in normalized_out
+    assert "--extra feishu" not in normalized_out
     assert "Restarting alone will not install Python packages." in out
     assert calls == ["Channel type", "Channel name", "App id", "App secret", "Connection mode"]
     data = target.read_text()

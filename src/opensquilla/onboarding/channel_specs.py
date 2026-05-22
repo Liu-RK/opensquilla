@@ -89,7 +89,7 @@ def _feishu_spec() -> ChannelSetupSpec:
         description="Feishu (or Lark) bot — webhook or websocket connection.",
         transport="mixed",
         requires_public_url=False,
-        dependency_extra="feishu",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://open.feishu.cn/document/",
         help=(
@@ -174,7 +174,7 @@ def _dingtalk_spec() -> ChannelSetupSpec:
         description="DingTalk corp robot via stream connection.",
         transport="websocket",
         requires_public_url=False,
-        dependency_extra="dingtalk",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://open.dingtalk.com/document/",
         fields=(
@@ -193,7 +193,7 @@ def _wecom_spec() -> ChannelSetupSpec:
         description="Enterprise WeChat (WeCom) corp app via webhook.",
         transport="webhook",
         requires_public_url=True,
-        dependency_extra="wecom",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://developer.work.weixin.qq.com/document/",
         help="WeCom webhook mode requires a public URL reachable by WeCom.",
@@ -224,7 +224,7 @@ def _qq_spec() -> ChannelSetupSpec:
         description="Tencent QQ Bot via websocket.",
         transport="websocket",
         requires_public_url=False,
-        dependency_extra="qq",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://bot.q.qq.com/wiki/",
         fields=(
@@ -243,7 +243,7 @@ def _msteams_spec() -> ChannelSetupSpec:
         description="Microsoft Teams via Bot Framework webhook.",
         transport="webhook",
         requires_public_url=True,
-        dependency_extra="msteams",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://learn.microsoft.com/microsoftteams/platform/",
         help="Microsoft Teams Bot Framework webhooks require a public HTTPS URL.",
@@ -294,7 +294,7 @@ def _telegram_spec() -> ChannelSetupSpec:
         description="Telegram Bot API — polling or webhook transport.",
         transport="mixed",
         requires_public_url=False,
-        dependency_extra="telegram",
+        dependency_extra=None,
         restart_required=True,
         docs_hint="https://core.telegram.org/bots/api",
         fields=(

@@ -68,8 +68,7 @@ def test_default_recommended_install_contract_covers_router_and_channels() -> No
         "websockets",  # Discord gateway and Feishu SDK transport
     } <= dependencies
     for alias in ("feishu", "telegram", "dingtalk", "wecom", "qq"):
-        assert alias in extras
-        assert extras[alias] == []
+        assert alias not in extras
 
     assert "matrix-nio" in "\n".join(extras["matrix"])
 

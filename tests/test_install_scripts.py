@@ -109,7 +109,9 @@ def test_install_scripts_support_optional_extras() -> None:
 
     for script in scripts:
         assert "OPENSQUILLA_INSTALL_EXTRAS" in script
-        assert "feishu" in script
+        for legacy_extra in ("feishu", "telegram", "dingtalk", "wecom", "qq"):
+            assert legacy_extra not in script
+        assert "matrix" in script
         assert "matrix-e2e" in script
         assert "document-extras" in script
         assert "msteams" not in script

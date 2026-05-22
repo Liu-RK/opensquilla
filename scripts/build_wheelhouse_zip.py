@@ -325,10 +325,9 @@ def build_wheelhouse_command(
     target_platform_tag: str,
     python_major: int,
     python_minor: int,
-    extra_extras: tuple[str, ...] = (),
 ) -> list[str]:
     validate_wheelhouse_target_platform(target_platform_tag)
-    extras = tuple(extra for extra in (profile, *extra_extras) if extra != "core")
+    extras = () if profile == "core" else (profile,)
     target = str(wheel_path if not extras else f"{wheel_path}[{','.join(extras)}]")
     return pip_command(
         python_major,
@@ -360,7 +359,6 @@ def download_wheelhouse(
     target_platform_tag: str,
     python_major: int,
     python_minor: int,
-    extra_extras: tuple[str, ...] = (),
 ) -> None:
     validate_wheelhouse_target_platform(target_platform_tag)
     run(
@@ -371,7 +369,6 @@ def download_wheelhouse(
             target_platform_tag=target_platform_tag,
             python_major=python_major,
             python_minor=python_minor,
-            extra_extras=extra_extras,
         ),
         cwd=wheel_path.parent,
         env=env,
@@ -708,19 +705,13 @@ Write-Host "  http://127.0.0.1:18791/control/"
 """
 
 
-def _install_target(base: str, profile: str, extra_extras: tuple[str, ...] = ()) -> str:
-    extras = tuple(extra for extra in (profile, *extra_extras) if extra != "core")
+def _install_target(base: str, profile: str) -> str:
+    extras = () if profile == "core" else (profile,)
     return base if not extras else f"{base}[{','.join(extras)}]"
 
 
-def _portable_profile_extras(profile: str) -> tuple[str, ...]:
-    if profile == "recommended":
-        return ("feishu",)
-    return ()
-
-
 def render_start_sh(profile: str = "recommended") -> str:
-    target = _install_target("opensquilla", profile, _portable_profile_extras(profile))
+    target = _install_target("opensquilla", profile)
     script = """#!/bin/sh
 if [ -z "${BASH_VERSION:-}" ]; then
   exec /usr/bin/env bash "$0" "$@"
@@ -862,7 +853,7 @@ fi
 
 
 def render_start_ps1(profile: str = "recommended") -> str:
-    target = _install_target("opensquilla", profile, _portable_profile_extras(profile))
+    target = _install_target("opensquilla", profile)
     requires_router_runtime = "$true" if profile == "recommended" else "$false"
     script = """param(
     [switch]$Cli,
@@ -1791,9 +1782,6 @@ def main(argv: list[str] | None = None) -> int:
             target_platform_tag=tag,
             python_major=sys.version_info.major,
             python_minor=sys.version_info.minor,
-            extra_extras=(
-                _portable_profile_extras(args.profile) if args.bundle_python_runtime else ()
-            ),
         )
     write_manifest(
         release_root / "manifest.json",
