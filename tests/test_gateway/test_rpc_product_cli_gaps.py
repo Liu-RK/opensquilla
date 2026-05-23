@@ -105,6 +105,9 @@ async def test_memory_admin_rpc_methods_are_classified_admin_scope_and_deny_read
         "memory.index",
         "memory.raw_fallbacks.list",
         "memory.raw_fallbacks.show",
+        "memory.repair.list",
+        "memory.repair.run",
+        "memory.repair.show",
     ):
         assert METHOD_SCOPES[method] == ADMIN_SCOPE
         entry = dispatcher.get_entry(method)
@@ -536,6 +539,202 @@ async def test_raw_fallback_admin_list_show_is_sidecar_only(tmp_path):
     assert "secret transcript" in shown.payload["content"]
     assert traversal.error is not None
     assert traversal.error.code == "INVALID_REQUEST"
+
+
+class FakeRepairSessionManager:
+    def __init__(self) -> None:
+        self.summary = SimpleNamespace(
+            id=7,
+            session_id="session-1",
+            session_key="agent:main:thread-1",
+            compaction_id="cmp-1",
+            trigger_reason="gateway_auto_summarize",
+            flush_receipt_status="degraded_forensic",
+            removed_count=2,
+            covered_through_id=9,
+            created_at=123,
+        )
+        self.entries = [
+            SimpleNamespace(
+                id=1,
+                message_id="m1",
+                role="user",
+                content="preimage fact",
+                token_count=3,
+                created_at=111,
+            )
+        ]
+        self.status_updates: list[tuple[int | None, str]] = []
+
+    async def list_degraded_compactions(
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int = 50,
+    ) -> list[Any]:
+        assert agent_id == "main"
+        assert limit > 0
+        return [self.summary]
+
+    async def get_compaction_preimage(self, summary: Any) -> list[Any]:
+        assert summary is self.summary
+        return list(self.entries)
+
+    async def mark_compaction_repair_status(self, summary: Any, status: str) -> None:
+        self.status_updates.append((getattr(summary, "id", None), status))
+
+
+class FakeEmptyRepairSessionManager(FakeRepairSessionManager):
+    async def list_degraded_compactions(
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int = 50,
+    ) -> list[Any]:
+        assert agent_id == "main"
+        assert limit > 0
+        return []
+
+
+class FakeRepairFlushService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Any], str, dict[str, Any]]] = []
+
+    async def execute(self, transcript: list[Any], session_key: str, **kwargs: Any) -> Any:
+        self.calls.append((list(transcript), session_key, dict(kwargs)))
+        return SimpleNamespace(
+            mode="llm",
+            indexed_chunk_count=1,
+            integrity_status="ok",
+            output_coverage_status="ok",
+            invalid_candidate_count=0,
+            candidate_missing_ids=[],
+            obligation_status="ok",
+            obligation_missing_ids=[],
+            to_dict=lambda: {
+                "mode": "llm",
+                "indexed_chunk_count": 1,
+                "integrity_status": "ok",
+                "output_coverage_status": "ok",
+                "invalid_candidate_count": 0,
+                "candidate_missing_ids": [],
+                "obligation_status": "ok",
+                "obligation_missing_ids": [],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_repair_admin_lists_shows_and_runs_preimage():
+    session_manager = FakeRepairSessionManager()
+    flush_service = FakeRepairFlushService()
+    ctx = _ctx(session_manager=session_manager, flush_service=flush_service)
+
+    listed = await get_dispatcher().dispatch(
+        "r1",
+        "memory.repair.list",
+        {"agentId": "main"},
+        ctx,
+    )
+    shown = await get_dispatcher().dispatch(
+        "r2",
+        "memory.repair.show",
+        {"agentId": "main", "sessionKey": "agent:main:thread-1", "compactionId": "cmp-1"},
+        ctx,
+    )
+    repaired = await get_dispatcher().dispatch(
+        "r3",
+        "memory.repair.run",
+        {"agentId": "main", "sessionKey": "agent:main:thread-1", "compactionId": "cmp-1"},
+        ctx,
+    )
+
+    assert listed.error is None, listed.error
+    assert listed.payload["items"][0]["flushReceiptStatus"] == "degraded_forensic"
+    assert shown.error is None, shown.error
+    assert shown.payload["entries"][0]["content"] == "preimage fact"
+    assert shown.payload["preimageHash"]
+    assert shown.payload["entryIdRange"] == [1, 1]
+    assert repaired.error is None, repaired.error
+    assert repaired.payload["results"][0]["status"] == "repaired"
+    assert repaired.payload["results"][0]["preimageHash"] == shown.payload["preimageHash"]
+    assert flush_service.calls[0][1] == "agent:main:thread-1"
+    assert flush_service.calls[0][2]["message_window"] == 0
+    assert session_manager.status_updates == [(7, "repaired")]
+
+
+@pytest.mark.asyncio
+async def test_memory_repair_admin_lists_shows_and_runs_raw_fallback(tmp_path):
+    raw_dir = tmp_path / "memory" / ".raw_fallbacks"
+    raw_dir.mkdir(parents=True)
+    raw_path = raw_dir / "raw.md"
+    raw_path.write_text(
+        "# Raw flush (timeout)\n\n"
+        "user: remember raw repair marker RR-1\n"
+        "assistant: acknowledged\n",
+        encoding="utf-8",
+    )
+    session_manager = FakeEmptyRepairSessionManager()
+    flush_service = FakeRepairFlushService()
+    memory_manager = FakeMemoryManager(workspace_dir=tmp_path)
+    ctx = _ctx(
+        session_manager=session_manager,
+        flush_service=flush_service,
+        memory_managers={"main": memory_manager},
+    )
+
+    listed = await get_dispatcher().dispatch(
+        "rr1",
+        "memory.repair.list",
+        {"agentId": "main"},
+        ctx,
+    )
+    shown = await get_dispatcher().dispatch(
+        "rr2",
+        "memory.repair.show",
+        {"agentId": "main", "path": "memory/.raw_fallbacks/raw.md"},
+        ctx,
+    )
+    repaired = await get_dispatcher().dispatch(
+        "rr3",
+        "memory.repair.run",
+        {"agentId": "main", "path": "memory/.raw_fallbacks/raw.md"},
+        ctx,
+    )
+
+    assert listed.error is None, listed.error
+    assert listed.payload["items"][0]["sourceType"] == "raw_fallback"
+    assert listed.payload["items"][0]["path"] == "memory/.raw_fallbacks/raw.md"
+    assert shown.error is None, shown.error
+    assert shown.payload["sourceType"] == "raw_fallback"
+    assert shown.payload["entries"][0]["content"] == "remember raw repair marker RR-1"
+    assert repaired.error is None, repaired.error
+    assert repaired.payload["results"][0]["sourceType"] == "raw_fallback"
+    assert repaired.payload["results"][0]["status"] == "repaired"
+    assert flush_service.calls[0][0][0].content == "remember raw repair marker RR-1"
+    assert flush_service.calls[0][2]["message_window"] == 0
+
+
+@pytest.mark.asyncio
+async def test_doctor_memory_status_deep_surfaces_repair_and_raw_sidecars(tmp_path):
+    raw_dir = tmp_path / "memory" / ".raw_fallbacks"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "raw.md").write_text("# Raw flush (timeout)\npreimage\n", encoding="utf-8")
+    manager = FakeMemoryManager(workspace_dir=tmp_path)
+    session_manager = FakeRepairSessionManager()
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "doctor.memory.status",
+        {"agentId": "main", "deep": True},
+        _ctx(memory_managers={"main": manager}, session_manager=session_manager),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["pendingRepairCount"] == 1
+    assert res.payload["recentPreimages"][0]["compactionId"] == "cmp-1"
+    assert res.payload["rawFallbackCount"] == 1
+    assert res.payload["recentRawFallbacks"][0]["path"] == "memory/.raw_fallbacks/raw.md"
 
 
 @pytest.mark.asyncio

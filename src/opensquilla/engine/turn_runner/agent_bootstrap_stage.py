@@ -20,7 +20,7 @@ future AgentConfig-validation early-yield branch.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from opensquilla.engine.agent import Agent, ToolHandler
@@ -77,6 +77,7 @@ class _AgentConfigAuxiliaries:
     flush_backoff_max_seconds: float
     flush_archive_max_bytes: int
     flush_compaction_requires_safe_receipt: bool
+    flush_compaction_safety_mode: Literal["protect", "best_effort", "block", "off"]
     # Agent-token-cfg-derived
     tool_result_compression_enabled: bool
     tool_result_compression_max_share: float
@@ -438,6 +439,7 @@ class AgentBootstrapStage:
             flush_compaction_requires_safe_receipt=(
                 aux.flush_compaction_requires_safe_receipt
             ),
+            flush_compaction_safety_mode=aux.flush_compaction_safety_mode,
             flush_workspace_dir=aux.flush_workspace_dir,
             model_capabilities=catalog.capabilities,
             thinking=aux.thinking,

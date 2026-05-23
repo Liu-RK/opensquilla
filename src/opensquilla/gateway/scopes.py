@@ -184,6 +184,9 @@ METHOD_SCOPES: dict[str, str] = {
     "memory.index": ADMIN_SCOPE,
     "memory.raw_fallbacks.list": ADMIN_SCOPE,
     "memory.raw_fallbacks.show": ADMIN_SCOPE,
+    "memory.repair.list": ADMIN_SCOPE,
+    "memory.repair.run": ADMIN_SCOPE,
+    "memory.repair.show": ADMIN_SCOPE,
     # OpenSquilla-only — onboarding mutations require admin scope.
     "onboarding.provider.configure": ADMIN_SCOPE,
     "onboarding.router.configure": ADMIN_SCOPE,

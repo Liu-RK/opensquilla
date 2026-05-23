@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final, Literal, SupportsInt, TypeGuard, cast
 
 import structlog
@@ -146,6 +147,7 @@ from opensquilla.session.compaction_lifecycle import (
     compaction_lifecycle_payload,
     compaction_result_payload,
     flush_receipt_allows_destructive_compaction,
+    flush_receipt_status_for_compaction,
     new_compaction_id,
     pre_compaction_flush_requires_safe_receipt,
 )
@@ -188,10 +190,6 @@ _T3_NOT_APPLICABLE: Final[str] = "not_applicable"
 _T3_HANDLED: Final[str] = "handled"
 _T3_FLUSH_FAILED: Final[str] = "flush_failed"
 _T3_COMPACT_FAILED: Final[str] = "compact_failed"
-_SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok", "unverifiable"})
-_SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
-    {"ok", "backfilled", "unverifiable"}
-)
 _IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset({"image_generate"})
 _ARTIFACT_DELIVERY_FAILURE_MARKER: Final[str] = "File delivery failed:"
 _ARTIFACT_DELIVERY_TOOL_NAME: Final[str] = "publish_artifact"
@@ -355,6 +353,14 @@ class _ComprehensiveTurnSavings:
 class _CompactionFailureState:
     count: int = 0
     opened_at: float | None = None
+
+
+@dataclass
+class _EmergencyCompactionOverride:
+    summary: str
+    kept_entries: list[Any]
+    reason: str
+    compaction_id: str
 
 
 def _non_negative_int(value: object) -> int:
@@ -1305,6 +1311,7 @@ class TurnRunner:
         self._compaction_failures: dict[str, _CompactionFailureState] = {}
         self._turn_compacted_sessions: set[str] = set()
         self._active_pre_compaction_flush_tasks: dict[str, asyncio.Task] = {}
+        self._emergency_compaction_overrides: dict[str, _EmergencyCompactionOverride] = {}
         # TurnRunner stage decomposition InputStage instance. Holds no per-turn state;
         # constructed once. Active unconditionally as of.
         self._input_stage = InputStage(extra_ctx=_TurnRunnerExtraContextAdapter())
@@ -4041,13 +4048,15 @@ class TurnRunner:
 
         flush_receipt_status = "not_required"
         if self._pre_compaction_flush_enabled():
-            flush_safe = await self._await_pre_compaction_flush_grace(
+            flush_receipt_status = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="t3_upgrade_compaction",
             )
-            flush_receipt_status = "safe" if flush_safe else "unsafe"
-            if self._pre_compaction_flush_requires_safe_receipt() and not flush_safe:
+            if (
+                self._pre_compaction_flush_requires_safe_receipt()
+                and flush_receipt_status != "safe"
+            ):
                 log.warning(
                     "t3_upgrade_compaction.skipped",
                     session_key=session_key,
@@ -4122,6 +4131,7 @@ class TurnRunner:
                         phase="t3_upgrade",
                         status="observed",
                         context_window_tokens=context_window_tokens,
+                        flush_receipt_status=flush_receipt_status,
                         **observed_payload,
                     )
             self.mark_compacted_this_turn(session_key)
@@ -4136,6 +4146,7 @@ class TurnRunner:
                     phase="t3_upgrade",
                     status="completed",
                     context_window_tokens=context_window_tokens,
+                    flush_receipt_status=flush_receipt_status,
                     **completed_payload,
                     **compaction_lifecycle_payload(compaction_id, COMPACTION_PERSISTED_EVENT),
                 )
@@ -4147,6 +4158,7 @@ class TurnRunner:
                     status="skipped",
                     reason="empty_summary",
                     context_window_tokens=context_window_tokens,
+                    flush_receipt_status=flush_receipt_status,
                     **compaction_lifecycle_payload(
                         compaction_id,
                         COMPACTION_TRIGGERED_EVENT,
@@ -4167,6 +4179,14 @@ class TurnRunner:
                 error=str(exc),
             )
             self._record_compaction_failure(session_key)
+            await self._record_emergency_ephemeral_compaction(
+                session_key,
+                transcript,
+                context_window_tokens,
+                compaction_id=compaction_id,
+                phase="t3_upgrade",
+                reason="compact_failed",
+            )
             notify_compaction(
                 session_key,
                 source="automatic",
@@ -4174,6 +4194,7 @@ class TurnRunner:
                 status="failed",
                 message=str(exc),
                 context_window_tokens=context_window_tokens,
+                flush_receipt_status=flush_receipt_status,
                 **compaction_lifecycle_payload(
                     compaction_id,
                     COMPACTION_TRIGGERED_EVENT,
@@ -4245,13 +4266,15 @@ class TurnRunner:
         )
         flush_receipt_status = "not_required"
         if self._pre_compaction_flush_enabled():
-            flush_safe = await self._await_pre_compaction_flush_grace(
+            flush_receipt_status = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="preflight_compaction",
             )
-            flush_receipt_status = "safe" if flush_safe else "unsafe"
-            if self._pre_compaction_flush_requires_safe_receipt() and not flush_safe:
+            if (
+                self._pre_compaction_flush_requires_safe_receipt()
+                and flush_receipt_status != "safe"
+            ):
                 log.warning(
                     "preflight_compaction.skipped",
                     session_key=session_key,
@@ -4331,6 +4354,7 @@ class TurnRunner:
                         phase="preflight",
                         status="observed",
                         context_window_tokens=context_window_tokens,
+                        flush_receipt_status=flush_receipt_status,
                         **observed_payload,
                     )
             self.mark_compacted_this_turn(session_key)
@@ -4343,6 +4367,14 @@ class TurnRunner:
                 error=str(exc),
             )
             self._record_compaction_failure(session_key)
+            await self._record_emergency_ephemeral_compaction(
+                session_key,
+                transcript,
+                context_window_tokens,
+                compaction_id=compaction_id,
+                phase="preflight",
+                reason="compact_failed",
+            )
             notify_compaction(
                 session_key,
                 source="automatic",
@@ -4351,6 +4383,7 @@ class TurnRunner:
                 message=str(exc),
                 tokens_before=total_tokens,
                 context_window_tokens=context_window_tokens,
+                flush_receipt_status=flush_receipt_status,
                 **compaction_lifecycle_payload(
                     compaction_id,
                     COMPACTION_TRIGGERED_EVENT,
@@ -4373,6 +4406,7 @@ class TurnRunner:
                 phase="preflight",
                 status="completed",
                 context_window_tokens=context_window_tokens,
+                flush_receipt_status=flush_receipt_status,
                 **completed_payload,
                 **compaction_lifecycle_payload(compaction_id, COMPACTION_PERSISTED_EVENT),
             )
@@ -4385,6 +4419,7 @@ class TurnRunner:
                 reason="empty_summary",
                 tokens_before=total_tokens,
                 context_window_tokens=context_window_tokens,
+                flush_receipt_status=flush_receipt_status,
                 **compaction_lifecycle_payload(
                     compaction_id,
                     COMPACTION_TRIGGERED_EVENT,
@@ -4433,14 +4468,14 @@ class TurnRunner:
         session_key: str,
         *,
         event_prefix: str,
-    ) -> bool:
+    ) -> str:
         if self._session_flush_service is None:
             log.warning(
                 f"{event_prefix}.flush_unavailable",
                 session_key=session_key,
                 error="flush_service_unavailable",
             )
-            return False
+            return flush_receipt_status_for_compaction(None, self._config)
 
         task = self._active_pre_compaction_flush_tasks.get(session_key)
         if task is not None:
@@ -4449,23 +4484,23 @@ class TurnRunner:
                     receipt = task.result()
                 except asyncio.CancelledError:
                     log.debug(f"{event_prefix}.flush_cancelled", session_key=session_key)
-                    return False
+                    return flush_receipt_status_for_compaction(None, self._config)
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
                         f"{event_prefix}.flush_failed",
                         session_key=session_key,
                         error=str(exc),
                     )
-                    return False
+                    return flush_receipt_status_for_compaction(None, self._config)
                 self._consume_pre_compaction_flush_task(session_key, task, event_prefix)
-                return self._flush_receipt_allows_destructive_compaction(receipt)
+                return flush_receipt_status_for_compaction(receipt, self._config)
             else:
                 log.debug(
                     f"{event_prefix}.flush_skipped",
                     session_key=session_key,
                     reason="already_running",
                 )
-                return False
+                return flush_receipt_status_for_compaction(None, self._config)
 
         from opensquilla.session.keys import parse_agent_id
 
@@ -4501,7 +4536,7 @@ class TurnRunner:
                 timeout_seconds=grace_timeout,
                 background_timeout_seconds=background_timeout,
             )
-            return False
+            return flush_receipt_status_for_compaction(None, self._config)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -4512,7 +4547,7 @@ class TurnRunner:
                 session_key=session_key,
                 error=str(exc),
             )
-            return False
+            return flush_receipt_status_for_compaction(None, self._config)
 
         if self._active_pre_compaction_flush_tasks.get(session_key) is task:
             self._active_pre_compaction_flush_tasks.pop(session_key, None)
@@ -4523,7 +4558,7 @@ class TurnRunner:
             duration_ms=int((time.monotonic() - flush_t0) * 1000),
             background=False,
         )
-        return self._flush_receipt_allows_destructive_compaction(receipt)
+        return flush_receipt_status_for_compaction(receipt, self._config)
 
     def _consume_pre_compaction_flush_task(
         self,
@@ -4644,6 +4679,102 @@ class TurnRunner:
             self._compaction_failures = {}
         self._compaction_failures.pop(session_key, None)
 
+    @staticmethod
+    def _entry_for_emergency_compaction(entry: Any) -> dict[str, Any]:
+        return {
+            "role": getattr(entry, "role", "user"),
+            "content": getattr(entry, "content", "") or "",
+            "token_count": getattr(entry, "token_count", None),
+            "tool_calls": getattr(entry, "tool_calls", None),
+            "tool_call_id": getattr(entry, "tool_call_id", None),
+            "reasoning_content": getattr(entry, "reasoning_content", None),
+            "turn_usage": getattr(entry, "turn_usage", None),
+        }
+
+    @staticmethod
+    def _emergency_replay_entry(raw: Mapping[str, Any]) -> Any:
+        return SimpleNamespace(
+            role=str(raw.get("role") or "user"),
+            content=str(raw.get("content") or ""),
+            token_count=raw.get("token_count"),
+            tool_calls=raw.get("tool_calls"),
+            tool_call_id=raw.get("tool_call_id"),
+            reasoning_content=raw.get("reasoning_content"),
+            turn_usage=raw.get("turn_usage"),
+        )
+
+    async def _record_emergency_ephemeral_compaction(
+        self,
+        session_key: str,
+        transcript: Sequence[Any],
+        context_window_tokens: int,
+        *,
+        compaction_id: str,
+        phase: str,
+        reason: str,
+    ) -> bool:
+        if not transcript:
+            return False
+        try:
+            from opensquilla.session.compaction import (
+                CompactionConfig,
+                CompactionRequest,
+                compact_context,
+            )
+
+            raw_entries = [self._entry_for_emergency_compaction(entry) for entry in transcript]
+            session_id = str(getattr(transcript[0], "session_id", "") or session_key)
+            result = await compact_context(
+                CompactionRequest(
+                    session_id=session_id,
+                    entries=raw_entries,
+                    context_window_tokens=context_window_tokens,
+                    config=CompactionConfig(model=None, api_key=""),
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "compaction.emergency_ephemeral_failed",
+                session_key=session_key,
+                phase=phase,
+                error=str(exc),
+            )
+            return False
+
+        if not result.summary or result.removed_count <= 0:
+            return False
+        kept_entries = [self._emergency_replay_entry(raw) for raw in result.kept_entries]
+        if not kept_entries or len(kept_entries) >= len(transcript):
+            return False
+        summary = (
+            "Emergency request-scoped compaction\n"
+            f"Reason: {reason}\n\n"
+            f"{result.summary}"
+        )
+        self._emergency_compaction_overrides[session_key] = _EmergencyCompactionOverride(
+            summary=summary,
+            kept_entries=kept_entries,
+            reason=reason,
+            compaction_id=compaction_id,
+        )
+        self.mark_compacted_this_turn(session_key)
+        notify_compaction(
+            session_key,
+            source="automatic",
+            phase=phase,
+            status="emergency_ephemeral",
+            reason=reason,
+            removed_count=result.removed_count,
+            kept_count=len(kept_entries),
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+            flush_receipt_status="emergency_ephemeral",
+            **compaction_lifecycle_payload(compaction_id, COMPACTION_TRIGGERED_EVENT),
+        )
+        return True
+
     def _preflight_compact_ratio(self) -> float:
         raw_ratio = getattr(self._config, "preflight_compact_ratio", None)
         if raw_ratio is None:
@@ -4674,6 +4805,13 @@ class TurnRunner:
 
         history: list[Message] = []
         summary_markers: list[str] = []
+        emergency_override = getattr(self, "_emergency_compaction_overrides", {}).pop(
+            session_key,
+            None,
+        )
+        if emergency_override is not None:
+            transcript = list(emergency_override.kept_entries)
+            summary_markers.append(emergency_override.summary)
         last_entry_was_user = False
         for entry in transcript:
             if (
@@ -4710,9 +4848,10 @@ class TurnRunner:
         if trim_last_user and last_entry_was_user and history and history[-1].role == "user":
             history.pop()
         context_states = await self._load_context_states(session_key)
+        provider = getattr(agent, "provider", None)
         provider_context = build_provider_compaction_context(
             context_states=context_states,
-            provider_kind=str(getattr(agent.provider, "provider_name", "")),
+            provider_kind=str(getattr(provider, "provider_name", "")),
         )
         if provider_context.messages:
             history = provider_context.messages + history

@@ -76,6 +76,7 @@ def _default_aux(
         flush_backoff_max_seconds=300.0,
         flush_archive_max_bytes=800_000,
         flush_compaction_requires_safe_receipt=flush_compaction_requires_safe_receipt,
+        flush_compaction_safety_mode="protect",
         tool_result_compression_enabled=True,
         tool_result_compression_max_share=0.25,
         tool_result_compression_summary_max_tokens=1024,

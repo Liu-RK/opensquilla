@@ -460,6 +460,11 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
                 "flush_compaction_requires_safe_receipt",
                 False,
             ),
+            flush_compaction_safety_mode=getattr(
+                mem_cfg,
+                "flush_compaction_safety_mode",
+                "protect",
+            ),
             tool_result_compression_enabled=getattr(
                 agent_token_cfg,
                 "tool_result_compression_enabled",

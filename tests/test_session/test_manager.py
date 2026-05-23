@@ -702,6 +702,60 @@ async def test_compact_with_result_returns_source_and_persists(manager):
 
 
 @pytest.mark.asyncio
+async def test_compact_with_result_marks_unsafe_receipt_as_degraded_forensic(manager):
+    await manager.create("agent:main:main")
+    for i in range(20):
+        await manager.append_message(
+            "agent:main:main",
+            "user",
+            f"unsafe msg {i} " + ("x" * 500),
+            token_count=200,
+        )
+    original_contents = [entry.content for entry in await manager.get_transcript("agent:main:main")]
+
+    result = await manager.compact_with_result(
+        "agent:main:main",
+        context_window_tokens=1000,
+        flush_receipt_status="unsafe",
+    )
+
+    assert result.removed_count > 0
+    summaries = await manager.get_summaries("agent:main:main")
+    assert summaries[0].flush_receipt_status == "degraded_forensic"
+    canonical_contents = [
+        entry.content for entry in await manager.get_canonical_transcript("agent:main:main")
+    ]
+    assert canonical_contents == original_contents
+
+
+@pytest.mark.asyncio
+async def test_degraded_compaction_preimage_can_be_listed_for_repair(manager):
+    await manager.create("agent:main:main")
+    for i in range(20):
+        await manager.append_message(
+            "agent:main:main",
+            "user",
+            f"repair msg {i} " + ("x" * 500),
+            token_count=200,
+        )
+
+    await manager.compact_with_result(
+        "agent:main:main",
+        context_window_tokens=1000,
+        flush_receipt_status="degraded_forensic",
+    )
+
+    pending = await manager.list_degraded_compactions(agent_id="main")
+    assert len(pending) == 1
+    assert pending[0].flush_receipt_status == "degraded_forensic"
+    preimage = await manager.get_compaction_preimage(pending[0])
+    assert preimage
+    assert preimage[0].content.startswith("repair msg 0")
+    await manager.mark_compaction_repair_status(pending[0], "repaired")
+    assert await manager.list_degraded_compactions(agent_id="main") == []
+
+
+@pytest.mark.asyncio
 async def test_compact_with_result_reports_and_backfills_missing_obligations(manager):
     await manager.create("agent:main:main")
     await manager.append_message(

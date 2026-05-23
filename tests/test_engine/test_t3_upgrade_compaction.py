@@ -498,3 +498,49 @@ async def test_compact_raises_continues() -> None:
 
     assert result == "compact_failed"
     assert len(fs.execute_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_t3_compact_failure_uses_emergency_ephemeral_history_trim() -> None:
+    session_key = "agent:main:webchat:t3-emergency"
+    transcript = [
+        TranscriptEntry(
+            session_id="s1",
+            session_key=session_key,
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"historic t3 message {index} " + ("x" * 500),
+            token_count=300,
+        )
+        for index in range(8)
+    ]
+    sm = _FakeSessionManager(transcript)
+
+    async def _boom(session_key: str, context_window_tokens: int, **kw: Any) -> str:
+        raise RuntimeError("compact boom")
+
+    sm.compact = _boom  # type: ignore[assignment]
+    runner = _make_runner(session_manager=sm, flush_service=_FakeFlushService())
+
+    result = await runner._maybe_compact_on_t3_upgrade(
+        session_key,
+        _make_turn(routed_tier="t3", previous_tier="t2"),
+        1000,
+    )
+
+    class _HistoryCapture:
+        provider = SimpleNamespace(provider_name="test")
+
+        def __init__(self) -> None:
+            self.history: list[Any] = []
+
+        def set_history(self, history: list[Any]) -> None:
+            self.history = history
+
+    agent = _HistoryCapture()
+    summary_context = await runner._load_history(agent, session_key, trim_last_user=False)
+
+    assert result == "compact_failed"
+    assert len(await sm.get_transcript(session_key)) == len(transcript)
+    assert 0 < len(agent.history) < len(transcript)
+    assert summary_context is not None
+    assert "emergency request-scoped compaction" in summary_context.lower()

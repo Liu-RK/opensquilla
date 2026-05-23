@@ -4617,6 +4617,7 @@ class Agent:
             flush_compaction_requires_safe_receipt=(
                 self.config.flush_compaction_requires_safe_receipt
             ),
+            flush_compaction_safety_mode=self.config.flush_compaction_safety_mode,
             tool_result_compression_enabled=self.config.tool_result_compression_enabled,
             tool_result_compression_mode=self.config.tool_result_compression_mode,
             tool_result_compression_max_share=self.config.tool_result_compression_max_share,

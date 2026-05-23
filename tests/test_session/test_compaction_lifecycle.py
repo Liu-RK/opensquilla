@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from opensquilla.session.compaction_lifecycle import (
+    flush_compaction_decision,
+    flush_receipt_allows_destructive_compaction,
+)
+
+
+def _receipt(**overrides):
+    payload = {
+        "mode": "llm",
+        "indexed_chunk_count": 1,
+        "integrity_status": "ok",
+        "output_coverage_status": "ok",
+        "invalid_candidate_count": 0,
+        "candidate_missing_ids": [],
+        "obligation_status": "ok",
+        "obligation_missing_ids": [],
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
+
+
+def test_unverifiable_flush_receipt_is_not_destructive_safe() -> None:
+    receipt = _receipt(output_coverage_status="unverifiable")
+
+    assert flush_receipt_allows_destructive_compaction(receipt) is False
+    assert flush_compaction_decision(receipt, safety_mode="protect") == "degraded_forensic"
+
+
+def test_backfilled_obligations_remain_destructive_safe() -> None:
+    receipt = _receipt(obligation_status="backfilled")
+
+    assert flush_receipt_allows_destructive_compaction(receipt) is True
+    assert flush_compaction_decision(receipt, safety_mode="protect") == "safe_destructive"
+
+
+def test_missing_or_raw_receipt_enters_degraded_forensic_in_protect_mode() -> None:
+    assert flush_compaction_decision(None, safety_mode="protect") == "degraded_forensic"
+    assert (
+        flush_compaction_decision(
+            _receipt(mode="raw", indexed_chunk_count=0),
+            safety_mode="protect",
+        )
+        == "degraded_forensic"
+    )
+
+
+def test_disabled_flush_decision_is_explicit() -> None:
+    assert flush_compaction_decision(None, safety_mode="off") == "disabled"

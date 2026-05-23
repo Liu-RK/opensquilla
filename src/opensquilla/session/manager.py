@@ -90,6 +90,14 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _compaction_flush_status_for_persistence(status: str | None) -> str:
+    if not status:
+        return "unknown"
+    if status == "unsafe":
+        return "degraded_forensic"
+    return status
+
+
 def _archive_dir() -> Path:
     return Path(
         os.environ.get(
@@ -758,6 +766,35 @@ class SessionManager:
             raise KeyError(f"Session not found: {session_key}")
         return await self._storage.get_all_summaries(node.session_id)
 
+    async def list_degraded_compactions(
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int = 50,
+    ) -> list[SessionSummary]:
+        prefix = f"agent:{normalize_agent_id(agent_id)}:" if agent_id else None
+        return await self._storage.list_degraded_summaries(
+            session_key_prefix=prefix,
+            limit=limit,
+        )
+
+    async def get_compaction_preimage(self, summary: SessionSummary) -> list[TranscriptEntry]:
+        if not summary.compaction_id:
+            return []
+        return await self._storage.get_compacted_transcript_entries(
+            session_id=summary.session_id,
+            compaction_id=summary.compaction_id,
+        )
+
+    async def mark_compaction_repair_status(
+        self,
+        summary: SessionSummary,
+        status: str,
+    ) -> None:
+        if summary.id is None:
+            return
+        await self._storage.update_summary_flush_receipt_status(summary.id, status)
+
     async def save_context_state(self, state: SessionContextState) -> SessionContextState:
         """Persist portable or provider-specific context state."""
         return await self._storage.save_context_state(state)
@@ -912,7 +949,9 @@ class SessionManager:
             removed_count=result.removed_count,
             kept_count=len(kept_entries),
             chunk_count=result.chunks_processed,
-            flush_receipt_status=flush_receipt_status or "unknown",
+            flush_receipt_status=_compaction_flush_status_for_persistence(
+                flush_receipt_status
+            ),
             covered_through_id=max((entry.id or 0) for entry in removed_entries)
             if removed_entries
             else 0,
@@ -998,7 +1037,9 @@ class SessionManager:
                 critical_carry_forward=coverage.critical_carry_forward,
                 removed_count=len(removed_entries),
                 kept_count=len(kept_entries),
-                flush_receipt_status=flush_receipt_status or "unknown",
+                flush_receipt_status=_compaction_flush_status_for_persistence(
+                    flush_receipt_status
+                ),
                 covered_through_id=max((entry.id or 0) for entry in removed_entries)
                 if removed_entries
                 else 0,

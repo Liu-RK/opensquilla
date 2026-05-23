@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import uuid4
 
-SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok", "unverifiable"})
+FlushCompactionDecision = Literal[
+    "safe_destructive",
+    "degraded_forensic",
+    "emergency_ephemeral",
+    "disabled",
+]
+FlushCompactionSafetyMode = Literal["protect", "best_effort", "block", "off"]
+
+SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok"})
 SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
-    {"ok", "backfilled", "unverifiable"}
+    {"ok", "backfilled"}
 )
 COMPACTION_TRIGGERED_EVENT: Final[str] = "compaction.triggered"
 COMPACTION_CHUNK_SUMMARIZED_EVENT: Final[str] = "compaction.chunk_summarized"
@@ -120,6 +128,70 @@ def flush_receipt_status(receipt: Any) -> str:
     return "safe" if flush_receipt_allows_destructive_compaction(receipt) else "unsafe"
 
 
+def normalize_flush_compaction_safety_mode(
+    value: Any,
+    *,
+    legacy_requires_safe_receipt: bool = False,
+) -> FlushCompactionSafetyMode:
+    if value is None:
+        return "block" if legacy_requires_safe_receipt else "protect"
+    raw = str(value).strip().lower().replace("-", "_")
+    if raw in {"", "protect", "protected"}:
+        return "protect"
+    if raw in {"best_effort", "besteffort", "legacy"}:
+        return "best_effort"
+    if raw in {"block", "strict", "require_safe_receipt"}:
+        return "block"
+    if raw in {"off", "disabled", "none", "false", "0"}:
+        return "off"
+    return "protect"
+
+
+def flush_compaction_safety_mode(config: Any) -> FlushCompactionSafetyMode:
+    memory_cfg = getattr(config, "memory", None)
+    if memory_cfg is None:
+        return "protect"
+    legacy_requires_safe_receipt = bool(
+        getattr(memory_cfg, "flush_compaction_requires_safe_receipt", False)
+    )
+    mode = normalize_flush_compaction_safety_mode(
+        getattr(memory_cfg, "flush_compaction_safety_mode", None),
+        legacy_requires_safe_receipt=legacy_requires_safe_receipt,
+    )
+    if legacy_requires_safe_receipt and mode == "protect":
+        return "block"
+    return mode
+
+
+def flush_compaction_decision(
+    receipt: Any,
+    *,
+    safety_mode: Any = "protect",
+) -> FlushCompactionDecision:
+    mode = normalize_flush_compaction_safety_mode(safety_mode)
+    if mode == "off":
+        return "disabled"
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return "safe_destructive"
+    if mode == "block":
+        return "emergency_ephemeral"
+    return "degraded_forensic"
+
+
+def flush_receipt_status_for_compaction(receipt: Any, config: Any) -> str:
+    decision = flush_compaction_decision(
+        receipt,
+        safety_mode=flush_compaction_safety_mode(config),
+    )
+    if decision == "disabled":
+        return "not_required"
+    if decision == "safe_destructive":
+        return "safe"
+    if decision == "degraded_forensic":
+        return "degraded_forensic"
+    return "unsafe"
+
+
 def _receipt_value(receipt: Any, name: str, default: Any) -> Any:
     if isinstance(receipt, Mapping):
         return receipt.get(name, default)
@@ -170,10 +242,7 @@ def pre_compaction_flush_enabled(config: Any) -> bool:
 
 
 def pre_compaction_flush_requires_safe_receipt(config: Any) -> bool:
-    memory_cfg = getattr(config, "memory", None)
-    if memory_cfg is None:
-        return False
-    return bool(getattr(memory_cfg, "flush_compaction_requires_safe_receipt", False))
+    return flush_compaction_safety_mode(config) == "block"
 
 
 def flush_receipt_to_dict(receipt: Any) -> dict[str, Any]:

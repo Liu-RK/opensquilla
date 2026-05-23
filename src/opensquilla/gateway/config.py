@@ -494,6 +494,10 @@ class MemoryConfig(BaseSettings):
     flush_backoff_max_seconds: float = 300.0
     flush_archive_max_bytes: int = 800_000
     flush_compaction_requires_safe_receipt: bool = False
+    flush_compaction_safety_mode: Literal["protect", "best_effort", "block", "off"] = "protect"
+    repair_enabled: bool = True
+    repair_interval_seconds: float = Field(default=60.0, ge=0.0)
+    repair_max_items_per_tick: int = Field(default=5, ge=1)
 
     # Per-turn auto capture / recall
     auto_capture_enabled: bool = True

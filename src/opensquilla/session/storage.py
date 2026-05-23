@@ -1194,6 +1194,72 @@ class SessionStorage:
             rows = await cur.fetchall()
         return [SessionSummary(**_deserialize_row(dict(r))) for r in rows]
 
+    async def list_degraded_summaries(
+        self,
+        *,
+        session_key_prefix: str | None = None,
+        limit: int = 50,
+    ) -> list[SessionSummary]:
+        clauses = ["flush_receipt_status IN ('degraded_forensic', 'failed_retryable')"]
+        params: list[Any] = []
+        if session_key_prefix:
+            clauses.append("session_key LIKE ?")
+            params.append(f"{session_key_prefix}%")
+        params.append(limit)
+        sql = (
+            "SELECT * FROM session_summaries "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at ASC LIMIT ?"
+        )
+        async with self.conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [SessionSummary(**_deserialize_row(dict(r))) for r in rows]
+
+    async def get_compacted_transcript_entries(
+        self,
+        *,
+        session_id: str,
+        compaction_id: str,
+    ) -> list[TranscriptEntry]:
+        sql = """
+            SELECT
+                original_entry_id AS id,
+                session_id,
+                session_key,
+                message_id,
+                role,
+                content,
+                tool_calls,
+                tool_call_id,
+                reasoning_content,
+                turn_usage,
+                created_at,
+                token_count,
+                provenance_kind,
+                provenance_origin_session_id,
+                provenance_source_session_key,
+                provenance_source_channel,
+                provenance_source_tool,
+                schema_version
+            FROM compacted_transcript_entries
+            WHERE session_id = ? AND compaction_id = ?
+            ORDER BY created_at ASC, original_entry_id ASC, id ASC
+        """
+        async with self.conn.execute(sql, (session_id, compaction_id)) as cur:
+            rows = await cur.fetchall()
+        return [TranscriptEntry(**_deserialize_row(dict(r))) for r in rows]
+
+    async def update_summary_flush_receipt_status(
+        self,
+        summary_id: int,
+        status: str,
+    ) -> None:
+        await self.conn.execute(
+            "UPDATE session_summaries SET flush_receipt_status = ? WHERE id = ?",
+            (status, summary_id),
+        )
+        await self.conn.commit()
+
     # ── SessionContextState CRUD ─────────────────────────────────────────────
 
     async def save_context_state(

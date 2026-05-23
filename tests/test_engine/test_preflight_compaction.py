@@ -141,6 +141,7 @@ class _ResultCompactionSessionManager:
     def __init__(self, transcript: list[TranscriptEntry]) -> None:
         self._transcript = transcript
         self.compact_with_result_calls: list[tuple[str, int, object | None]] = []
+        self.compact_with_result_kwargs: list[dict[str, object | None]] = []
 
     async def get_transcript(self, session_key: str) -> list[TranscriptEntry]:
         return list(self._transcript)
@@ -150,8 +151,10 @@ class _ResultCompactionSessionManager:
         session_key: str,
         context_window_tokens: int,
         config: object | None = None,
+        **kwargs,
     ) -> SimpleNamespace:
         self.compact_with_result_calls.append((session_key, context_window_tokens, config))
+        self.compact_with_result_kwargs.append(dict(kwargs))
         return SimpleNamespace(
             summary="summary text",
             kept_entries=[{"role": "assistant", "content": "tail"}],
@@ -162,6 +165,19 @@ class _ResultCompactionSessionManager:
             tokens_after=200,
             remaining_budget_tokens=800,
         )
+
+
+class _FailingResultCompactionSessionManager(_ResultCompactionSessionManager):
+    async def compact_with_result(
+        self,
+        session_key: str,
+        context_window_tokens: int,
+        config: object | None = None,
+        **kwargs,
+    ) -> SimpleNamespace:
+        self.compact_with_result_calls.append((session_key, context_window_tokens, config))
+        self.compact_with_result_kwargs.append(dict(kwargs))
+        raise RuntimeError("preimage write failed")
 
 
 @pytest.fixture
@@ -518,6 +534,89 @@ async def test_preflight_strict_flush_receipt_skips_destructive_compaction() -> 
 
     flush_service.execute.assert_awaited_once()
     mock_sm.compact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preflight_protect_flush_receipt_marks_degraded_forensic() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    sm = _ResultCompactionSessionManager(entries)
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(
+        return_value=_flush_receipt(integrity_status="missing_chunks")
+    )
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(
+                flush_enabled=True,
+                flush_timeout_seconds=0.25,
+                flush_background_timeout_seconds=42.0,
+                flush_compaction_safety_mode="protect",
+            )
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_awaited_once()
+    assert sm.compact_with_result_calls == [("agent:ops:long-session", context_window, None)]
+    assert sm.compact_with_result_kwargs[0]["flush_receipt_status"] == "degraded_forensic"
+
+
+@pytest.mark.asyncio
+async def test_preflight_compact_failure_uses_emergency_ephemeral_history_trim() -> None:
+    session_key = "agent:ops:preflight-emergency"
+    context_window = 1000
+    entries = [
+        TranscriptEntry(
+            session_id="test-session-id",
+            session_key=session_key,
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"historic message {index} " + ("x" * 500),
+            token_count=300,
+        )
+        for index in range(8)
+    ]
+    sm = _FailingResultCompactionSessionManager(entries)
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=_flush_receipt(mode="raw"))
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(
+                flush_enabled=True,
+                flush_timeout_seconds=0.25,
+                flush_background_timeout_seconds=42.0,
+                flush_compaction_safety_mode="protect",
+            )
+        ),
+    )
+
+    await runner._maybe_preflight_compact(session_key, context_window)
+
+    class _HistoryCapture:
+        provider = SimpleNamespace(provider_name="test")
+
+        def __init__(self) -> None:
+            self.history: list[Any] = []
+
+        def set_history(self, history: list[Any]) -> None:
+            self.history = history
+
+    agent = _HistoryCapture()
+    summary_context = await runner._load_history(agent, session_key, trim_last_user=False)
+
+    assert sm.compact_with_result_calls == [(session_key, context_window, None)]
+    assert len(await sm.get_transcript(session_key)) == len(entries)
+    assert 0 < len(agent.history) < len(entries)
+    assert summary_context is not None
+    assert "emergency request-scoped compaction" in summary_context.lower()
 
 
 @pytest.mark.asyncio
