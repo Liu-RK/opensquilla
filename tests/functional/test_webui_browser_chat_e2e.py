@@ -414,17 +414,23 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
             r"""
             const { chromium } = require("playwright");
 
-            async function emitCompaction(page, payload, meta = {}) {
+            async function emitEvent(page, event, payload, meta = {}) {
               await page.evaluate(
-                ({ payload, meta }) => {
+                ({ event, payload, meta }) => {
                   const rpc = App.getRpc();
-                  const handlers = rpc._listeners.get("session.event.compaction");
+                  const handlers = rpc._listeners.get(event);
                   if (handlers) {
                     handlers.forEach(h => h(payload, meta));
                   }
+                  const wild = rpc._listeners.get("*");
+                  if (wild) wild.forEach(h => h(event, payload, meta));
                 },
-                { payload, meta }
+                { event, payload, meta }
               );
+            }
+
+            async function emitCompaction(page, payload, meta = {}) {
+              return emitEvent(page, "session.event.compaction", payload, meta);
             }
 
             (async () => {
@@ -445,10 +451,28 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                   App.getRpc()?.state === "connected",
                 { timeout: 15000 }
               );
+              await page.evaluate(() => {
+                const rpc = App.getRpc();
+                const originalCall = rpc.call.bind(rpc);
+                window.__compactUx = { chatCalls: [] };
+                rpc.call = (method, params = {}) => {
+                  if (method === "chat.send") {
+                    window.__compactUx.chatCalls.push({ method, params });
+                    return Promise.resolve({
+                      task_id: "compact-ux-" + window.__compactUx.chatCalls.length,
+                    });
+                  }
+                  return originalCall(method, params);
+                };
+              });
 
               await emitCompaction(page, { status: "started", source: "manual" });
+              await page.waitForSelector(".chat-compact-status:not(.hidden)", { timeout: 5000 });
+              await page.waitForTimeout(600);
+              const startedStatusVisible = await page.locator("#chat-compact-status").innerText();
               await emitCompaction(page, { status: "skipped", source: "manual" });
               await page.waitForTimeout(250);
+              const skippedStatusVisible = await page.locator("#chat-compact-status").innerText();
 
               await emitCompaction(page, {
                 status: "completed",
@@ -468,12 +492,66 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
               );
               await page.waitForTimeout(250);
 
+              await emitCompaction(page, { status: "started", source: "manual" });
+              await page.fill("#chat-textarea", "queued during compact");
+              await page.click("#chat-btn-send");
+              await page.waitForTimeout(150);
+              const queuedBeforeSkipped = await page.evaluate(
+                () => window.__compactUx.chatCalls.length
+              );
+              await emitCompaction(page, { status: "skipped", source: "manual" });
+              await page.waitForFunction(
+                () =>
+                  window.__compactUx.chatCalls
+                    .some(c => c.params.message === "queued during compact"),
+                { timeout: 5000 }
+              );
+              await emitEvent(page, "session.event.done", { text: "compact queued answer" });
+              await page.waitForTimeout(150);
+
+              await emitCompaction(page, { status: "started", source: "manual" });
+              await page.fill("#chat-textarea", "queued after blocking compact failure");
+              await page.click("#chat-btn-send");
+              await page.waitForTimeout(150);
+              await emitCompaction(page, {
+                status: "failed",
+                source: "manual",
+                reason: "compaction_insufficient",
+                message: "still over budget",
+                refused: true,
+              });
+              await page.waitForTimeout(250);
+              const failedStatusVisible = await page.locator("#chat-compact-status").innerText();
+
               const bodyText = await page.locator("body").innerText();
               const result = {
-                hasStartedToast: bodyText.includes("Checking whether compaction is needed..."),
-                hasSkippedToast: bodyText.includes("No compaction needed"),
+                hasStartedToast: bodyText.includes("Compacting context..."),
+                hasSkippedToast: bodyText.includes(
+                  "Already within context budget; no compact was applied."
+                ),
                 hasCompletedToast: bodyText.includes("Context compacted"),
                 hasReplayedFailureToast: bodyText.includes("old replay"),
+                startedStatusVisible: startedStatusVisible.includes("Compacting context..."),
+                skippedStatusVisible: skippedStatusVisible.includes(
+                  "Already within context budget; no compact was applied."
+                ),
+                failedStatusVisible: failedStatusVisible.includes(
+                  "Compact failed: still over budget; pending message preserved"
+                ),
+                queuedBeforeSkipped,
+                skippedDrainedQueuedSend: await page.evaluate(
+                  () => window.__compactUx.chatCalls
+                    .some(c => c.params.message === "queued during compact")
+                ),
+                blockingFailureKeptPending:
+                  (await page.locator("#chat-pending").innerText())
+                    .includes("queued after blocking compact"),
+                blockingFailureDidNotDrain: await page.evaluate(
+                  () => !window.__compactUx.chatCalls
+                    .some(c => c.params.message === "queued after blocking compact failure")
+                ),
+                blockingFailureDidNotRecoverComposer:
+                  (await page.locator("#chat-textarea").inputValue()) === "",
                 pageErrors: errors,
               };
               await browser.close();
@@ -518,10 +596,18 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
         _stop_process(server)
 
     assert payload == {
-        "hasStartedToast": False,
-        "hasSkippedToast": False,
+        "hasStartedToast": True,
+        "hasSkippedToast": True,
         "hasCompletedToast": True,
         "hasReplayedFailureToast": False,
+        "startedStatusVisible": True,
+        "skippedStatusVisible": True,
+        "failedStatusVisible": True,
+        "queuedBeforeSkipped": 0,
+        "skippedDrainedQueuedSend": True,
+        "blockingFailureKeptPending": True,
+        "blockingFailureDidNotDrain": True,
+        "blockingFailureDidNotRecoverComposer": True,
         "pageErrors": [],
     }
 
@@ -734,6 +820,21 @@ def test_webui_hotfix_flows_in_real_browser(tmp_path: Path) -> None:
                 { timeout: 5000 }
               );
               const draftAfterQueueDrain = await page.locator("#chat-textarea").inputValue();
+
+              await page.fill("#chat-textarea", "queued from terminal session change");
+              await page.click("#chat-btn-send");
+              await emit(page, "sessions.changed", {
+                key: sessionKey,
+                run_status: "idle",
+                last_task: { status: "succeeded" },
+                reason: "turn_complete",
+              });
+              await page.waitForFunction(
+                () =>
+                  window.__hotfix.chatCalls
+                    .some(c => c.params.message === "queued from terminal session change"),
+                { timeout: 5000 }
+              );
 
               await page.evaluate(() => Router.navigate("/config"));
               await page.waitForSelector("#cfg-yaml-area", { state: "attached", timeout: 15000 });

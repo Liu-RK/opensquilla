@@ -1139,6 +1139,7 @@ async def _standalone_repl(
                     )
                     if not safe_to_compact:
                         return True
+                    console.print(f"[{ACCENT}]compacting context...[/]")
                     context_window = (
                         getattr(svc.config, "context_budget_tokens", 100_000)
                         if svc.config is not None
@@ -1152,27 +1153,31 @@ async def _standalone_repl(
                     compact_with_result = getattr(
                         svc.session_manager, "compact_with_result", None
                     )
-                    if callable(compact_with_result):
-                        result = await compact_with_result(
-                            active_session_key,
-                            context_window,
-                            compaction_config,
-                        )
-                        summary = getattr(result, "summary", "") or ""
-                        token_stats = (
-                            f"{getattr(result, 'tokens_before', 0)} -> "
-                            f"{getattr(result, 'tokens_after', 0)} tokens, "
-                            f"{getattr(result, 'remaining_budget_tokens', 0)} remaining, "
-                            f"{getattr(result, 'summary_source', 'unknown')}"
-                        )
-                    else:
-                        summary = await call_compact_with_optional_config(
-                            svc.session_manager.compact,
-                            active_session_key,
-                            context_window,
-                            compaction_config,
-                        )
-                        token_stats = f"summary {len(summary)} chars"
+                    try:
+                        if callable(compact_with_result):
+                            result = await compact_with_result(
+                                active_session_key,
+                                context_window,
+                                compaction_config,
+                            )
+                            summary = getattr(result, "summary", "") or ""
+                            token_stats = (
+                                f"{getattr(result, 'tokens_before', 0)} -> "
+                                f"{getattr(result, 'tokens_after', 0)} tokens, "
+                                f"{getattr(result, 'remaining_budget_tokens', 0)} remaining, "
+                                f"{getattr(result, 'summary_source', 'unknown')}"
+                            )
+                        else:
+                            summary = await call_compact_with_optional_config(
+                                svc.session_manager.compact,
+                                active_session_key,
+                                context_window,
+                                compaction_config,
+                            )
+                            token_stats = f"summary {len(summary)} chars"
+                    except Exception as exc:  # noqa: BLE001 - keep chat command recoverable.
+                        console.print(f"[red]compact failed: {exc}[/red]")
+                        return True
                     if summary:
                         console.print(
                             f"[{ACCENT}]compacted[/] "
@@ -1181,7 +1186,7 @@ async def _standalone_repl(
                     else:
                         console.print(
                             f"[{ACCENT}]compact skipped[/] "
-                            "[dim]context already within budget[/dim]"
+                            "[dim]already within context budget; no compact was applied[/dim]"
                         )
                 else:
                     console.print("[yellow]No session manager available.[/yellow]")
@@ -1477,7 +1482,12 @@ async def _handle_gateway_slash_command(
         return True
 
     if cmd == "/compact":
-        payload = await client.compact_session(state.session_key)
+        console.print(f"[{ACCENT}]compacting context...[/]")
+        try:
+            payload = await client.compact_session(state.session_key)
+        except Exception as exc:  # noqa: BLE001 - keep interactive chat alive.
+            console.print(f"[red]compact failed: {exc}[/red]")
+            return True
         if payload.get("compacted"):
             before = int(payload.get("tokens_before") or 0)
             after = int(payload.get("tokens_after") or 0)
@@ -1495,7 +1505,7 @@ async def _handle_gateway_slash_command(
         else:
             console.print(
                 f"[{ACCENT}]compact skipped[/] "
-                "[dim]context already within budget[/dim]"
+                "[dim]already within context budget; no compact was applied[/dim]"
             )
         return True
 

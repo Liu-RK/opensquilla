@@ -1674,6 +1674,62 @@ async def test_gateway_slash_compact_calls_session_rpc(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_slash_compact_skipped_uses_context_budget_wording(monkeypatch) -> None:
+    _FakeGatewayClient.instances.clear()
+    monkeypatch.setattr("opensquilla.cli.gateway_client.GatewayClient", _FakeGatewayClient)
+    fake = _FakeGatewayClient()
+
+    async def compact_skipped(session_key: str) -> dict[str, object]:
+        fake.compact_calls.append({"session_key": session_key})
+        return {"key": session_key, "compacted": False}
+
+    fake.compact_session = compact_skipped
+    state = ChatSessionState(session_key="agent:main:abc123", model="openai/test")
+    buffer = io.StringIO()
+    monkeypatch.setattr(
+        chat_cmd,
+        "console",
+        Console(file=buffer, force_terminal=False, width=100, highlight=False),
+    )
+
+    handled = await chat_cmd._handle_gateway_slash_command("/compact", state, fake, {"mode": None})
+
+    assert handled is True
+    assert fake.compact_calls == [{"session_key": "agent:main:abc123"}]
+    output = buffer.getvalue()
+    assert "compact skipped" in output
+    assert "already within context budget; no compact was applied" in output
+
+
+@pytest.mark.asyncio
+async def test_gateway_slash_compact_reports_started_and_failure(monkeypatch) -> None:
+    _FakeGatewayClient.instances.clear()
+    monkeypatch.setattr("opensquilla.cli.gateway_client.GatewayClient", _FakeGatewayClient)
+    fake = _FakeGatewayClient()
+
+    async def compact_failed(session_key: str) -> dict[str, object]:
+        fake.compact_calls.append({"session_key": session_key})
+        raise RuntimeError("provider down")
+
+    fake.compact_session = compact_failed
+    state = ChatSessionState(session_key="agent:main:abc123", model="openai/test")
+    buffer = io.StringIO()
+    monkeypatch.setattr(
+        chat_cmd,
+        "console",
+        Console(file=buffer, force_terminal=False, width=100, highlight=False),
+    )
+
+    handled = await chat_cmd._handle_gateway_slash_command("/compact", state, fake, {"mode": None})
+
+    assert handled is True
+    assert fake.compact_calls == [{"session_key": "agent:main:abc123"}]
+    output = buffer.getvalue()
+    assert "compacting context" in output
+    assert "compact failed: provider down" in output
+
+
+@pytest.mark.asyncio
 async def test_gateway_slash_tool_compress_toggles_config(monkeypatch) -> None:
     _FakeGatewayClient.instances.clear()
     monkeypatch.setattr("opensquilla.cli.gateway_client.GatewayClient", _FakeGatewayClient)

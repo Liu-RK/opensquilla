@@ -327,6 +327,11 @@ def test_chat_js_has_history_navigation_and_alt_pending_shortcuts() -> None:
     assert "function _cycleHistory" in source
     assert "function _setTextareaProgrammatic" in source
     assert "function _enqueueCurrentInput" in source
+    enqueue_start = source.index("function _enqueueCurrentInput")
+    enqueue_end = source.index("  function _updateStopButton", enqueue_start)
+    enqueue_body = source[enqueue_start:enqueue_end]
+    assert "return _enqueuePendingInput(text);" in enqueue_body
+    assert "_pendingQueue.push" not in enqueue_body
     assert "_inputHistoryIdx" in source
     assert "_inputHistoryDraft" in source
     assert "_suppressHistoryReset" in source

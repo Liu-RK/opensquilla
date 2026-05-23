@@ -258,7 +258,9 @@ def test_chat_slash_commands_are_blocked_while_streaming_after_literal_escape() 
     flag_idx = send_prefix.index("let isLiteralSlash = false;")
     literal_idx = send_prefix.index("if (text.startsWith('//')) {")
     flag_set_idx = send_prefix.index("isLiteralSlash = true;")
-    streaming_idx = send_prefix.index("if (_isStreaming) {")
+    streaming_idx = send_prefix.index(
+        "if (_isStreaming || _isCompactInFlightForCurrentSession()) {"
+    )
     execute_idx = send_prefix.index("await _executeSlashCommand(text)")
     real_slash_guard = "if (!isLiteralSlash && text.startsWith('/')) {"
     streaming_block_end = send_prefix.index(f"\n\n    {real_slash_guard}", streaming_idx)
@@ -268,7 +270,8 @@ def test_chat_slash_commands_are_blocked_while_streaming_after_literal_escape() 
     assert literal_idx < flag_set_idx < streaming_idx
     assert "text = text.slice(1);" in send_prefix[literal_idx:streaming_idx]
     assert real_slash_guard in streaming_block
-    assert "Wait for the current response before running" in streaming_block
+    assert "const waitReason = _isCompactInFlightForCurrentSession()" in streaming_block
+    assert "Wait for ${waitReason} before running" in streaming_block
     assert "_executeSlashCommand" not in streaming_block
     assert streaming_idx < execute_idx
     assert real_slash_guard in send_prefix[streaming_idx:execute_idx]
@@ -513,7 +516,7 @@ def test_chat_tracks_background_task_groups_as_active_run_state() -> None:
     assert "_activeTaskGroups.size > 0" in source
 
 
-def test_chat_surfaces_compaction_outcome_toasts_without_noop_chatter() -> None:
+def test_chat_surfaces_compaction_lifecycle_toasts() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     compact_block = source[
         source.index("case 'compact_context':") : source.index("case 'usage_status':")
@@ -523,13 +526,43 @@ def test_chat_surfaces_compaction_outcome_toasts_without_noop_chatter() -> None:
     body = source[start:end]
 
     assert "function _showCompactionToast(payload, meta = {})" in source
-    assert "Checking whether compaction is needed..." not in compact_block
-    assert "Checking whether compaction is needed..." not in body
-    assert "No compaction needed" not in body
-    assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
+    assert "_setCompactInFlight(true, compactKey);" in compact_block
+    assert "Compacting context..." in body
+    assert "Already within context budget; no compact was applied." in body
+    assert "if (compactKey !== _sessionKey) return;" in compact_block
+    assert (
+        "_showCompactionToast({ ...(result || {}), key: compactKey, source: 'manual'"
+        in compact_block
+    )
     assert "session.event.compaction" in source
     assert "Context compacted older messages to keep this session within budget" in source
     assert "Compact cancelled" in source
+
+
+def test_chat_surfaces_persistent_compaction_status_row() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    css = CHAT_CSS.read_text(encoding="utf-8")
+    start = source.index("function _showCompactionToast(payload, meta = {})")
+    end = source.index("  /* ── RPC Event Subscriptions", start)
+    body = source[start:end]
+
+    assert 'id="chat-compact-status"' in source
+    assert "let _compactStatusEl = null;" in source
+    assert "let _compactStatusTimer = null;" in source
+    assert "function _setCompactStatus(status, message, options = {})" in source
+    assert "function _hideCompactStatus()" in source
+    assert "_compactStatusEl = _el.querySelector('#chat-compact-status');" in source
+    assert "_setCompactStatus('started', 'Compacting context...'" in body
+    assert (
+        "_setCompactStatus('skipped', 'Already within context budget; no compact was applied.'"
+        in body
+    )
+    assert "_setCompactStatus('completed', 'Context compacted' + details" in body
+    assert "_setCompactStatus('failed', 'Compact failed' + msg + pendingSuffix" in body
+    assert "_setCompactStatus('cancelled', 'Compact cancelled'" in body
+    assert "_hideCompactStatus();" in source[source.index("function destroy()") :]
+    assert ".chat-compact-status" in css
+    assert ".chat-compact-status__spinner" in css
 
 
 def test_chat_compaction_token_details_are_success_only() -> None:
@@ -544,12 +577,65 @@ def test_chat_compaction_token_details_are_success_only() -> None:
     skipped_end = body.index("if (status === 'failed'", skipped_start)
     skipped_block = body[skipped_start:skipped_end]
 
-    assert "UI.toast(" not in skipped_block
-    assert "No compaction needed' + details" not in skipped_block
+    assert "UI.toast('Already within context budget; no compact was applied.'" in skipped_block
+    assert "_compactionTokenStats" not in skipped_block
     assert "payload && payload.tokens_after || 0" not in stats_body
     assert body.index("_compactionTokenStats(payload || {})") > body.index(
         "if (status === 'cancelled')"
     )
+
+
+def test_chat_compact_inflight_uses_pending_queue_and_safe_terminal_drain() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    send_start = source.index("async function _onSend()")
+    send_end = source.index("  /* ── Streaming", send_start)
+    send_body = source[send_start:send_end]
+    toast_start = source.index("function _showCompactionToast(payload, meta = {})")
+    toast_end = source.index("  /* ── RPC Event Subscriptions", toast_start)
+    toast_body = source[toast_start:toast_end]
+
+    assert "let _compactInFlight = false;" in source
+    assert "function _isCompactInFlightForCurrentSession()" in source
+    assert "if (_isStreaming || _isCompactInFlightForCurrentSession())" in send_body
+    assert "const waitReason = _isCompactInFlightForCurrentSession()" in send_body
+    assert "_enqueuePendingInput(" in send_body
+    assert "'Message queued until compaction finishes'" in send_body
+    assert "'context compaction'" in send_body
+    assert "Wait for ${waitReason} or clear." in source
+    assert "_settleCompactInFlight(payload || {});" in toast_body
+    assert "status === 'completed'" in source
+    assert "status === 'skipped'" in source
+    assert "_schedulePendingDrainAfterTerminal();" in source
+    assert "status === 'failed' || status === 'error'" in toast_body
+    assert "status === 'cancelled'" in toast_body
+    assert "_settleCompactInFlight(payload || {}, { recoverPending: true })" in toast_body
+    assert "_schedulePendingDrainAfterTerminal();" not in toast_body[
+        toast_body.index("if (status === 'failed' || status === 'error')") :
+        toast_body.index("if (status === 'cancelled')")
+    ]
+    assert "_schedulePendingDrainAfterTerminal();" not in toast_body[
+        toast_body.index("if (status === 'cancelled')") :
+        toast_body.index("if (status !== 'completed')")
+    ]
+
+
+def test_chat_compact_blocking_failure_preserves_pending_queue() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    toast_start = source.index("function _showCompactionToast(payload, meta = {})")
+    toast_end = source.index("  /* ── RPC Event Subscriptions", toast_start)
+    toast_body = source[toast_start:toast_end]
+    settle_start = source.index("function _settleCompactInFlight(payload = {}, options = {})")
+    settle_end = source.index("  // Programmatic textarea write", settle_start)
+    settle_body = source[settle_start:settle_end]
+
+    assert "function _compactFailureBlocksPending(payload)" in source
+    assert "compaction_insufficient" in source
+    assert "compaction_flush_failed" in source
+    assert "const preservePending = _compactFailureBlocksPending(payload || {});" in toast_body
+    assert "preservePending," in toast_body
+    assert "options && options.preservePending" in settle_body
+    assert "_popAllPendingIntoComposer();" in settle_body
+    assert "recovered = _pendingQueue.length > 0;" in settle_body
 
 
 def test_chat_clears_background_task_groups_on_state_reset_paths() -> None:
@@ -695,6 +781,34 @@ def test_chat_turn_complete_event_schedules_history_sync() -> None:
     assert "_scheduleHistorySync();" in helper
 
 
+def test_chat_turn_complete_event_schedules_pending_queue_drain_fallback() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    helper = source[
+        source.index("function _syncTerminalSessionChange(payload = {})") :
+        source.index(
+            "  function _activeTaskGroupRunState",
+            source.index("function _syncTerminalSessionChange(payload = {})"),
+        )
+    ]
+    scheduler = source[
+        source.index("function _schedulePendingDrainAfterTerminal()") :
+        source.index(
+            "  // Programmatic textarea write",
+            source.index("function _schedulePendingDrainAfterTerminal()"),
+        )
+    ]
+
+    assert "_schedulePendingDrainAfterTerminal();" in helper
+    assert "if (interrupted)" in helper
+    assert "_popAllPendingIntoComposer();" in helper
+    assert (
+        "if (_isStreaming || _isCompactInFlightForCurrentSession() || "
+        "_pendingQueue.length === 0) return;"
+        in scheduler
+    )
+    assert "_drainQueueHead();" in scheduler
+
+
 def test_chat_ignores_replayed_compaction_toasts() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     start = source.index("function _showCompactionToast(payload, meta = {})")
@@ -703,7 +817,7 @@ def test_chat_ignores_replayed_compaction_toasts() -> None:
 
     assert "function _showCompactionToast(payload, meta = {})" in source
     assert "if (meta && meta.replayed) return;" in body
-    assert body.index("meta.replayed") < body.index("UI.toast('Compact failed'")
+    assert body.index("meta.replayed") < body.index("'Compact failed'")
 
 
 def test_rpc_client_passes_event_meta_without_polluting_payload() -> None:

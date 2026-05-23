@@ -522,6 +522,11 @@ def _create_session_key(agent_id: str, kind: object = None) -> str:
     return f"agent:{agent_id}:{short_id}"
 
 
+def _is_ephemeral_webchat_session_key(key: str) -> bool:
+    parts = key.split(":")
+    return len(parts) == 4 and parts[0] == "agent" and parts[2] == "webchat" and bool(parts[3])
+
+
 def _derive_source_metadata(session: Any) -> dict[str, Any]:
     key = str(getattr(session, "session_key", "") or "")
     origin = getattr(session, "origin", None)
@@ -1596,10 +1601,54 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
         compaction_id = new_compaction_id()
         storage = get_session_storage(ctx.session_manager)
         session = None
-        if storage is not None and await storage.get_session(key) is None:
-            raise KeyError(f"Session not found: {key}")
         if storage is not None:
             session = await storage.get_session(key)
+            if session is None:
+                if _is_ephemeral_webchat_session_key(key):
+                    notify_compaction(
+                        key,
+                        source="manual",
+                        phase="manual",
+                        status="started",
+                        context_window_tokens=context_window_tokens,
+                        **compaction_lifecycle_payload(
+                            compaction_id,
+                            COMPACTION_TRIGGERED_EVENT,
+                        ),
+                    )
+                    notify_compaction(
+                        key,
+                        source="manual",
+                        phase="manual",
+                        status="skipped",
+                        context_window_tokens=context_window_tokens,
+                        reason="empty_ephemeral_webchat_session",
+                        **compaction_lifecycle_payload(
+                            compaction_id,
+                            COMPACTION_TRIGGERED_EVENT,
+                        ),
+                    )
+                    return {
+                        "key": key,
+                        "compacted": False,
+                        "status": "skipped",
+                        "reason": "empty_ephemeral_webchat_session",
+                        "mode": "summary",
+                        "summary_len": 0,
+                        "summary_source": "none",
+                        "context_window_tokens": context_window_tokens,
+                        "tokens_before": 0,
+                        "tokens_after": 0,
+                        "remaining_budget_tokens": context_window_tokens,
+                        "removed_count": 0,
+                        "kept_count": 0,
+                        "chunk_count": 0,
+                        "coverage_status": "unknown",
+                        "missing_obligation_count": 0,
+                        "critical_carry_forward_count": 0,
+                        "state_kind": "text",
+                    }
+                raise KeyError(f"Session not found: {key}")
         notify_compaction(
             key,
             source="manual",

@@ -122,6 +122,13 @@ const ChatView = (() => {
   //   - in-memory only; localStorage + cross-tab sync are follow-ups
   const _MAX_PENDING = 5;
   let _pendingQueue = []; // [{text, attachments, intent}]
+  let _pendingDrainAfterTerminalTimer = null;
+  let _compactInFlight = false;
+  let _compactInFlightKey = '';
+  let _lastCompactionToastSig = '';
+  let _lastCompactionToastAt = 0;
+  let _compactStatusEl = null;
+  let _compactStatusTimer = null;
   let _stopRequestedByUser = false;
   let _pendingArea = null;
   let _stopBtn = null;
@@ -952,6 +959,7 @@ const ChatView = (() => {
           </div>
         </div>
         <div class="chat-pending hidden" id="chat-pending"></div>
+        <div class="chat-compact-status hidden" id="chat-compact-status" role="status" aria-live="polite"></div>
         <div class="chat-slash hidden" id="chat-slash"></div>
         <div class="chat-composer" id="chat-composer">
           <div class="chat-attachments hidden" id="chat-attach-preview"></div>
@@ -1014,6 +1022,7 @@ const ChatView = (() => {
     _sessionChip  = _el.querySelector('#chat-session-chip');
     _attachPreview = _el.querySelector('#chat-attach-preview');
     _pendingArea  = _el.querySelector('#chat-pending');
+    _compactStatusEl = _el.querySelector('#chat-compact-status');
     _stopBtn      = _el.querySelector('#chat-btn-stop');
     _slashEl      = _el.querySelector('#chat-slash');
     _ctxWarn      = _el.querySelector('#chat-ctx-warn');
@@ -1260,6 +1269,12 @@ const ChatView = (() => {
     if (_isStreaming) _endStreaming(interrupted ? { reason: 'aborted' } : undefined);
     _applySessionRunState(payload);
     _scheduleHistorySync();
+    if (interrupted) {
+      _stopRequestedByUser = false;
+      _popAllPendingIntoComposer();
+    } else {
+      _schedulePendingDrainAfterTerminal();
+    }
     return true;
   }
 
@@ -1339,6 +1354,9 @@ const ChatView = (() => {
     _persistSession(key);
     _messages = [];
     _pendingSessionIntent = null;
+    _clearPendingDrainAfterTerminalTimer();
+    _setCompactInFlight(false);
+    _hideCompactStatus();
     _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
     _applySessionRunState({ run_status: 'idle' });
     _clearContextStatus();
@@ -1882,6 +1900,9 @@ const ChatView = (() => {
       const key = _genKey();
       _updateSessionChip(key);
       _persistSession(key);
+      _clearPendingDrainAfterTerminalTimer();
+      _setCompactInFlight(false);
+      _hideCompactStatus();
       _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
       _messages = [];
       _clearContextStatus();
@@ -2196,6 +2217,9 @@ const ChatView = (() => {
         const key = _genKey();
         _updateSessionChip(key);
         _persistSession(key);
+        _clearPendingDrainAfterTerminalTimer();
+        _setCompactInFlight(false);
+        _hideCompactStatus();
         _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
         _messages = [];
         _clearContextStatus();
@@ -2219,6 +2243,9 @@ const ChatView = (() => {
         _rpc.call('sessions.reset', { key: _sessionKey })
           .then(() => {
             _messages = [];
+            _clearPendingDrainAfterTerminalTimer();
+            _setCompactInFlight(false);
+            _hideCompactStatus();
             _pendingQueue = [];
             if (_pendingArea) _renderPendingQueue();
             _clearContextStatus();
@@ -2230,15 +2257,26 @@ const ChatView = (() => {
         break;
       case 'compact_context':
       case 'sessions.contextCompact':
-      case '/compact':
-        _rpc.call('sessions.contextCompact', { key: _sessionKey })
-          .then(() => {})
-          .catch((err) => _showCompactionToast({
-            source: 'manual',
-            status: 'failed',
-            message: err && err.message || 'unknown error',
-          }));
+      case '/compact': {
+        const compactKey = _sessionKey;
+        _setCompactInFlight(true, compactKey);
+        _showCompactionToast({ key: compactKey, source: 'manual', status: 'started' });
+        _rpc.call('sessions.contextCompact', { key: compactKey })
+          .then((result) => {
+            if (compactKey !== _sessionKey) return;
+            _showCompactionToast({ ...(result || {}), key: compactKey, source: 'manual' });
+          })
+          .catch((err) => {
+            if (compactKey !== _sessionKey) return;
+            _showCompactionToast({
+              key: compactKey,
+              source: 'manual',
+              status: 'failed',
+              message: err && err.message || 'unknown error',
+            });
+          });
         break;
+      }
       case 'usage_status':
       case 'usage.status':
       case '/usage': {
@@ -2340,28 +2378,143 @@ const ChatView = (() => {
     return '';
   }
 
+  function _suppressDuplicateCompactionToast(payload, status, source) {
+    const key = String(payload && payload.key || _sessionKey || '');
+    const sig = `${key}|${source || ''}|${status || ''}`;
+    const now = Date.now();
+    if (sig === _lastCompactionToastSig && now - _lastCompactionToastAt < 1500) {
+      return true;
+    }
+    _lastCompactionToastSig = sig;
+    _lastCompactionToastAt = now;
+    return false;
+  }
+
+  function _clearCompactStatusTimer() {
+    if (_compactStatusTimer) {
+      clearTimeout(_compactStatusTimer);
+      _compactStatusTimer = null;
+    }
+  }
+
+  function _hideCompactStatus() {
+    _clearCompactStatusTimer();
+    if (!_compactStatusEl) return;
+    _compactStatusEl.className = 'chat-compact-status hidden';
+    _compactStatusEl.innerHTML = '';
+  }
+
+  function _setCompactStatus(status, message, options = {}) {
+    if (!_compactStatusEl) return;
+    _clearCompactStatusTimer();
+    const tone = options && options.tone || 'info';
+    const detail = options && options.detail ? String(options.detail) : '';
+    const dismissMs = Number(options && options.dismissMs || 0);
+    const isBusy = status === 'started';
+    const glyphClass = isBusy ? 'chat-compact-status__spinner' : 'chat-compact-status__dot';
+    _compactStatusEl.className = `chat-compact-status chat-compact-status--${tone}`;
+    _compactStatusEl.innerHTML = ''
+      + `<span class="${glyphClass}" aria-hidden="true"></span>`
+      + `<span class="chat-compact-status__text">${_esc(message)}</span>`
+      + (detail ? `<span class="chat-compact-status__detail">${_esc(detail)}</span>` : '');
+    if (dismissMs > 0) {
+      _compactStatusTimer = setTimeout(_hideCompactStatus, dismissMs);
+    }
+  }
+
+  function _compactFailureBlocksPending(payload) {
+    if (!payload) return false;
+    if (payload.refused === true || payload.safe_to_send === false || payload.safeToSend === false) {
+      return true;
+    }
+    const reason = String(
+      payload.reason ||
+      payload.error_reason ||
+      payload.errorClass ||
+      payload.error_class ||
+      payload.error && payload.error.reason ||
+      payload.error && payload.error.code ||
+      ''
+    ).toLowerCase();
+    return [
+      'compaction_insufficient',
+      'compaction_flush_failed',
+      'context_overflow',
+      'unsafe_flush_receipt',
+    ].includes(reason);
+  }
+
   function _showCompactionToast(payload, meta = {}) {
     if (meta && meta.replayed) return;
-    const status = String(payload && payload.status || '').toLowerCase();
+    let status = String(payload && payload.status || '').toLowerCase();
+    if (!status && payload && Object.prototype.hasOwnProperty.call(payload, 'compacted')) {
+      status = payload.compacted ? 'completed' : 'skipped';
+    }
     const source = String(payload && payload.source || '').toLowerCase();
+    if (_suppressDuplicateCompactionToast(payload || {}, status, source)) return;
     if (status === 'started') {
+      if (source === 'manual') _setCompactInFlight(true, payload && payload.key || _sessionKey);
+      if (source === 'manual') _setCompactStatus('started', 'Compacting context...', { tone: 'info' });
+      UI.toast('Compacting context...', 'info', 2500);
       return;
     }
     if (status === 'skipped') {
+      _settleCompactInFlight(payload || {});
+      if (source === 'manual') {
+        _setCompactStatus('skipped', 'Already within context budget; no compact was applied.', {
+          tone: 'info',
+          dismissMs: 5000,
+        });
+      }
+      UI.toast('Already within context budget; no compact was applied.', 'info', 3500);
       return;
     }
     if (status === 'failed' || status === 'error') {
+      const preservePending = _compactFailureBlocksPending(payload || {});
+      const recovered = _settleCompactInFlight(payload || {}, {
+        recoverPending: true,
+        preservePending,
+      });
       const msg = payload && payload.message ? ': ' + payload.message : '';
-      UI.toast('Compact failed' + msg, 'err', 5000);
+      const pendingSuffix = preservePending
+        ? '; pending message preserved'
+        : (recovered ? '; pending message recovered to input' : '');
+      if (source === 'manual') {
+        _setCompactStatus('failed', 'Compact failed' + msg + pendingSuffix, {
+          tone: 'err',
+          dismissMs: 10000,
+        });
+      }
+      UI.toast(
+        'Compact failed' + msg + pendingSuffix,
+        'err',
+        5000,
+      );
       return;
     }
     if (status === 'cancelled') {
-      UI.toast('Compact cancelled', 'info', 4500);
+      const recovered = _settleCompactInFlight(payload || {}, { recoverPending: true });
+      if (source === 'manual') {
+        _setCompactStatus('cancelled', 'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''), {
+          tone: 'warn',
+          dismissMs: 8000,
+        });
+      }
+      UI.toast(
+        'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''),
+        'info',
+        4500,
+      );
       return;
     }
     if (status !== 'completed') return;
+    _settleCompactInFlight(payload || {});
     const details = _compactionTokenStats(payload || {});
     if (source === 'manual') {
+      _setCompactStatus('completed', 'Context compacted' + details, {
+        tone: 'ok',
+        dismissMs: 5000,
+      });
       UI.toast('Context compacted' + details, 'info', 4500);
       return;
     }
@@ -3118,34 +3271,28 @@ const ChatView = (() => {
       hasPayload = text || _pendingAttachments.length > 0;
     }
 
-    // While a turn is streaming, Send enqueues (Proposal C). Use ESC or the
-    // Stop button to actually halt the current response.
-    if (_isStreaming) {
+    // While a turn is streaming, Send enqueues. Use ESC or the
+    // Stop button to actually halt the current response. Manual compaction uses
+    // the same queue: users may keep typing, but the next turn must wait until
+    // the transcript maintenance action reaches a terminal state.
+    if (_isStreaming || _isCompactInFlightForCurrentSession()) {
       if (!isLiteralSlash && text.startsWith('/')) {
-        UI.toast(`Wait for the current response before running ${text.split(/\s+/, 1)[0]}.`, 'warn', 2500);
+        const waitReason = _isCompactInFlightForCurrentSession()
+          ? 'context compaction'
+          : 'the current response';
+        UI.toast(`Wait for ${waitReason} before running ${text.split(/\s+/, 1)[0]}.`, 'warn', 2500);
         return;
       }
-      if (!hasPayload) return; // empty + streaming = no-op
-      if (_pendingQueue.length >= _MAX_PENDING) {
-        UI.toast(
-          `Pending queue full (${_MAX_PENDING}). Wait for the current response or clear.`,
-          'warning',
-          3000,
-        );
-        return;
-      }
-      _pendingQueue.push({
+      if (!hasPayload) return; // empty + busy = no-op
+      _enqueuePendingInput(
         text,
-        attachments: _pendingAttachments.map((a) => ({ ...a })),
-        intent: _pendingSessionIntent,
-      });
-      _textarea.value = '';
-      _pendingAttachments = [];
-      _pendingSessionIntent = null;
-      _renderAttachmentPreview();
-      _renderPendingQueue();
-      _autoResizeTextarea();
-      UI.toast(`Queued (${_pendingQueue.length}/${_MAX_PENDING})`, 'info', 1500);
+        _isCompactInFlightForCurrentSession()
+          ? 'Message queued until compaction finishes'
+          : null,
+        _isCompactInFlightForCurrentSession()
+          ? 'context compaction'
+          : 'the current response',
+      );
       return;
     }
 
@@ -3666,9 +3813,11 @@ const ChatView = (() => {
     _sendBtn.innerHTML = icons.send();
     _sendBtn.classList.remove('btn--danger');
     _sendBtn.classList.add('primary');
-    _sendBtn.title = _isStreaming
-      ? 'Send (queues for after current response)'
-      : 'Send';
+    _sendBtn.title = _isCompactInFlightForCurrentSession()
+      ? 'Send (queues until compaction finishes)'
+      : _isStreaming
+        ? 'Send (queues for after current response)'
+        : 'Send';
     _updateStopButton();
   }
 
@@ -4620,7 +4769,7 @@ const ChatView = (() => {
     }
   }
 
-  /* ── Pending Queue (Proposal C) ─────────────────────────────────────── */
+  /* ── Pending Queue ──────────────────────────────────────────────────── */
 
   function _onStop() {
     if (!_isStreaming) return;
@@ -4650,6 +4799,7 @@ const ChatView = (() => {
     }
     const clearBtn = ev.target.closest('[data-action="clear-all"]');
     if (clearBtn) {
+      _clearPendingDrainAfterTerminalTimer();
       _pendingQueue = [];
       _renderPendingQueue();
     }
@@ -4686,8 +4836,33 @@ const ChatView = (() => {
     _pendingArea.innerHTML = html;
   }
 
+  function _enqueuePendingInput(text, toastMessage = null, waitReason = 'the current response') {
+    if (_pendingQueue.length >= _MAX_PENDING) {
+      UI.toast(
+        `Pending queue full (${_MAX_PENDING}). Wait for ${waitReason} or clear.`,
+        'warning',
+        3000,
+      );
+      return false;
+    }
+    _pendingQueue.push({
+      text,
+      attachments: _pendingAttachments.map((a) => ({ ...a })),
+      intent: _pendingSessionIntent,
+    });
+    _textarea.value = '';
+    _pendingAttachments = [];
+    _pendingSessionIntent = null;
+    _renderAttachmentPreview();
+    _renderPendingQueue();
+    _autoResizeTextarea();
+    UI.toast(toastMessage || `Queued (${_pendingQueue.length}/${_MAX_PENDING})`, 'info', 1500);
+    return true;
+  }
+
   function _drainQueueHead() {
     // Only called on natural (non-aborted) turn completion.
+    _clearPendingDrainAfterTerminalTimer();
     if (_pendingQueue.length === 0) return;
     const head = _pendingQueue.shift();
     _renderPendingQueue();
@@ -4747,6 +4922,7 @@ const ChatView = (() => {
   // whether to send — recovery never auto-fires. Returns true when the
   // queue had something to recover.
   function _popAllPendingIntoComposer() {
+    _clearPendingDrainAfterTerminalTimer();
     if (!_textarea || _pendingQueue.length === 0) return false;
     const queuedTexts = _pendingQueue
       .map((p) => (typeof p.text === 'string' ? p.text : ''))
@@ -4775,6 +4951,59 @@ const ChatView = (() => {
     _inputHistoryIdx = null;
     _inputHistoryDraft = '';
     return true;
+  }
+
+  function _clearPendingDrainAfterTerminalTimer() {
+    if (_pendingDrainAfterTerminalTimer) {
+      clearTimeout(_pendingDrainAfterTerminalTimer);
+      _pendingDrainAfterTerminalTimer = null;
+    }
+  }
+
+  function _schedulePendingDrainAfterTerminal() {
+    if (_pendingQueue.length === 0) return;
+    _clearPendingDrainAfterTerminalTimer();
+    _pendingDrainAfterTerminalTimer = setTimeout(() => {
+      _pendingDrainAfterTerminalTimer = null;
+      if (_isStreaming || _isCompactInFlightForCurrentSession() || _pendingQueue.length === 0) return;
+      _drainQueueHead();
+    }, 50);
+  }
+
+  function _setCompactInFlight(active, key = _sessionKey) {
+    _compactInFlight = !!active;
+    _compactInFlightKey = active ? String(key || _sessionKey || '') : '';
+    _updateSendButton();
+  }
+
+  function _isCompactInFlightForCurrentSession() {
+    if (!_compactInFlight) return false;
+    return !_compactInFlightKey || _compactInFlightKey === _sessionKey;
+  }
+
+  function _settleCompactInFlight(payload = {}, options = {}) {
+    const key = String(payload && payload.key || _compactInFlightKey || _sessionKey || '');
+    if (!_compactInFlight || (_compactInFlightKey && key && key !== _compactInFlightKey)) {
+      return false;
+    }
+    _setCompactInFlight(false);
+    const status = String(payload && payload.status || '').toLowerCase();
+    const compactedFlag = payload && Object.prototype.hasOwnProperty.call(payload, 'compacted')
+      ? !!payload.compacted
+      : null;
+    let recovered = false;
+    if (
+      status === 'completed' ||
+      status === 'skipped' ||
+      (status === '' && compactedFlag !== null)
+    ) {
+      _schedulePendingDrainAfterTerminal();
+    } else if (options && options.preservePending) {
+      recovered = _pendingQueue.length > 0;
+    } else if (options && options.recoverPending) {
+      recovered = _popAllPendingIntoComposer();
+    }
+    return recovered;
   }
 
   // Programmatic textarea write that suppresses the input listener's
@@ -4836,23 +5065,7 @@ const ChatView = (() => {
     const text = _textarea.value.trim();
     const hasPayload = text || _pendingAttachments.length > 0;
     if (!hasPayload) return false;
-    if (_pendingQueue.length >= _MAX_PENDING) {
-      UI.toast(`Pending queue full (${_MAX_PENDING})`, 'warn', 2000);
-      return false;
-    }
-    _pendingQueue.push({
-      text,
-      attachments: _pendingAttachments.map((a) => ({ ...a })),
-      intent: _pendingSessionIntent,
-    });
-    _textarea.value = '';
-    _pendingAttachments = [];
-    _pendingSessionIntent = null;
-    _renderAttachmentPreview();
-    _renderPendingQueue();
-    _autoResizeTextarea();
-    UI.toast(`Queued (${_pendingQueue.length}/${_MAX_PENDING})`, 'info', 1200);
-    return true;
+    return _enqueuePendingInput(text);
   }
 
   function _updateStopButton() {
@@ -4878,6 +5091,9 @@ const ChatView = (() => {
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
     _closeSlashMenu();
+    _clearPendingDrainAfterTerminalTimer();
+    _setCompactInFlight(false);
+    _hideCompactStatus();
     _pendingAttachments = [];
     _pendingQueue = [];
     _stopRequestedByUser = false;

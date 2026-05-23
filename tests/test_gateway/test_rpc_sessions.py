@@ -1606,6 +1606,36 @@ class TestSessionsContextCompact:
         assert manager.compact_calls == [(session.session_key, 1234)]
 
     @pytest.mark.asyncio
+    async def test_context_compact_missing_ephemeral_webchat_session_skips(
+        self,
+        dispatcher,
+        ctx_with_sessions,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        key = "agent:main:webchat:58x01oc0"
+        res = await dispatcher.dispatch(
+            "r1", "sessions.contextCompact", {"key": key}, ctx_with_sessions
+        )
+
+        assert res.ok is True
+        assert res.payload["key"] == key
+        assert res.payload["compacted"] is False
+        assert res.payload["status"] == "skipped"
+        assert res.payload["reason"] == "empty_ephemeral_webchat_session"
+        assert ctx_with_sessions.session_manager.compact_calls == []
+        assert [(event_key, payload["status"]) for event_key, payload in events] == [
+            (key, "started"),
+            (key, "skipped"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_context_compact_not_found(self, dispatcher, ctx_with_sessions):
         res = await dispatcher.dispatch(
             "r1", "sessions.contextCompact", {"key": "nonexistent"}, ctx_with_sessions
