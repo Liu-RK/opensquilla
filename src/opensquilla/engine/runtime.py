@@ -1217,7 +1217,7 @@ def _claims_image_without_tool_use(
 class TurnRunner:
     """Orchestrates a complete agent turn: provider → tools → prompt → pipeline → Agent.
 
-    Owns per-session locking and transcript persistence.
+    Uses supplied per-session locking and owns transcript persistence.
     All entry points (Web RPC, CLI, Channel) converge here.
 
     Lock ordering invariant:
@@ -1234,8 +1234,9 @@ class TurnRunner:
         CLI / standalone path: provider = ``_standalone_lock_provider`` from
         ``build_turn_runner_from_services``, which maintains its own dict.
 
-        The two-level OUTER→INNER hierarchy from Stories #5/#7a is eliminated.
-        No reverse-acquire risk remains since there is only one lock per session.
+        The old two-level OUTER/INNER hierarchy is eliminated on the gateway
+        path. No reverse-acquire risk remains there because there is only one
+        shared lock per session.
     """
 
     def __init__(

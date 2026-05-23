@@ -1,22 +1,20 @@
 """In-process task runtime for agent turns.
 
 Lock ordering invariant:
-    Two independent per-session lock dictionaries exist in this process:
+    TaskRuntime owns the per-session locks used by gateway-dispatched turns.
+    Gateway construction injects ``TaskRuntime._get_session_lock_for_turn`` as
+    TurnRunner's ``session_lock_provider``, so both layers share one
+    ``asyncio.Lock`` per ``session_key``.
 
-    1. ``TaskRuntime._session_locks`` (this module, line ~183)
-       OUTER lock — serializes task dispatch within a session.  Acquired by
-       ``_execute()`` before the turn handler is called.
+    ``TaskRuntime._execute()`` acquires the shared session lock before calling
+    the turn handler. ``TurnRunner.run()`` detects that the same lock is already
+    held and skips a second acquire. There is no separate TurnRunner lock
+    hierarchy on the gateway path.
 
-    2. ``TurnRunner._session_locks`` (engine/runtime.py, ~line 900)
-       INNER lock — serializes transcript writes and memory capture within a
-       session.  Acquired by ``TurnRunner.run()`` which is invoked *inside*
-       ``_execute()`` via the ``_turn_handler`` callback.
-
-    Required acquire order: OUTER (TaskRuntime) then INNER (TurnRunner).
-    DO NOT acquire ``TaskRuntime._session_locks[*]`` while already holding
-    ``TurnRunner._session_locks[*]``; that reverse order would deadlock under
-    contention.  The two locks protect disjoint concerns and must never be
-    acquired in the wrong direction.
+    CLI or standalone TurnRunner instances may use a different provider, but
+    they are not nested inside TaskRuntime execution. Do not introduce a second
+    per-session lock around gateway turn execution without re-auditing this
+    invariant.
 """
 
 from __future__ import annotations
@@ -234,18 +232,16 @@ class _TurnHardDeadlineExceeded(TimeoutError):  # noqa: N818
 class TaskRuntime:
     """Serialize same-session turns while allowing cross-session concurrency.
 
-    Lock ordering invariant:
-        This class owns ``self._session_locks`` (the OUTER lock dict) to gate
-        task dispatch: ``_execute()`` acquires the lock before invoking the
-        turn handler, which eventually calls ``TurnRunner.run()`` and acquires
-        the INNER lock (``TurnRunner._session_locks``).
+    Gateway lock invariant:
+        ``self._session_locks`` stores the per-session locks shared with
+        TurnRunner through ``_get_session_lock_for_turn``. ``_execute()``
+        acquires the lock before invoking the turn handler, and
+        ``TurnRunner.run()`` skips a second acquire when that shared lock is
+        already held.
 
-        Required acquire order: OUTER (this class) → INNER (TurnRunner).
-        DO NOT acquire ``self._session_locks[*]`` while holding
-        ``TurnRunner._session_locks[*]``; reverse order deadlocks under
-        contention.  The two dicts protect different scopes: this dict
-        serializes queued-task dispatch; TurnRunner's dict serializes
-        transcript writes and memory capture.
+        The shared lock serializes task dispatch, transcript writes, and memory
+        capture for one ``session_key`` while still allowing cross-session
+        concurrency.
     """
 
     def __init__(
@@ -305,10 +301,8 @@ class TaskRuntime:
         self._turn_hard_deadline_s = turn_hard_deadline_s
         self._running_heartbeat_interval_s = running_heartbeat_interval_s
         self._pending_overflow_policy = pending_overflow_policy
-        # OUTER per-session lock dict (see Lock ordering invariant in class docstring).
-        # Protects: task dispatch serialization within a session — ensures at most
-        # one task runs at a time per session_key.  Acquire order: always BEFORE
-        # TurnRunner._session_locks when both are needed in the same call path.
+        # Per-session locks shared with TurnRunner on gateway-dispatched turns.
+        # Ensures at most one task mutates a session transcript and memory state.
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._tasks: dict[str, _RuntimeTask] = {}
         self._pending_by_session: dict[str, list[_RuntimeTask]] = {}
