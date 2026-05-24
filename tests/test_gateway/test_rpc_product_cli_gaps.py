@@ -219,6 +219,25 @@ async def test_memory_search_defaults_to_bundled_query_shape(tmp_path):
     opts = manager.search_calls[0][1]
     assert opts.max_results == 6
     assert opts.min_score == 0.35
+    assert opts.source is MemorySource.memory
+
+
+@pytest.mark.asyncio
+async def test_memory_search_blank_or_null_source_uses_curated_default(tmp_path):
+    manager = FakeMemoryManager(workspace_dir=tmp_path)
+
+    for source in (None, ""):
+        res = await get_dispatcher().dispatch(
+            "r1",
+            "memory.search",
+            {"query": "alpha", "agentId": "main", "source": source},
+            _ctx(memory_managers={"main": manager}),
+        )
+        assert res.error is None, res.error
+
+    assert manager.search_calls is not None
+    assert manager.search_calls[0][1].source is MemorySource.memory
+    assert manager.search_calls[1][1].source is MemorySource.memory
 
 
 @pytest.mark.asyncio

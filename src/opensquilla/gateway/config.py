@@ -471,6 +471,7 @@ class MemoryConfig(BaseSettings):
     retrieval_mode: Literal["hybrid", "fts_only"] = "hybrid"
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     sync_interval_minutes: float = Field(default=0.0, ge=0.0)
+    session_source_enabled: bool = False
 
     # Passive injection
     inject_limit: int = 4000  # max chars for passive memory injection into system prompt

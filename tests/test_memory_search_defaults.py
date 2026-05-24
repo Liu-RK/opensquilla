@@ -85,6 +85,27 @@ async def test_memory_search_tool_uses_bundled_defaults(tmp_path):
     assert intent is SearchIntent.TOOL
     assert opts.max_results == 6
     assert opts.min_score == 0.35
+    assert opts.source is MemorySource.memory
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_blank_or_null_source_uses_curated_default(tmp_path):
+    registry = ToolRegistry()
+    retriever = _FakeRetriever()
+    create_memory_tools(
+        stores=SimpleNamespace(),
+        retrievers=retriever,
+        memory_dir=str(tmp_path),
+        registry=registry,
+    )
+
+    registered = registry.get("memory_search")
+    assert registered is not None
+    await registered.handler(query="alpha", source="")
+    await registered.handler(query="beta", source=None)
+
+    assert retriever.calls[0][1].source is MemorySource.memory
+    assert retriever.calls[1][1].source is MemorySource.memory
 
 
 @pytest.mark.asyncio
@@ -204,8 +225,9 @@ def test_memory_tool_descriptions_name_nested_memory_sources(tmp_path):
 
     assert memory_search is not None
     assert memory_get is not None
+    assert "By default, searches curated memory source files" in memory_search.spec.description
     assert "MEMORY.md + memory/**/*.md" in memory_search.spec.description
-    assert "indexed sessions source" in memory_search.spec.description
+    assert "source=sessions for indexed transcript snippets" in memory_search.spec.description
     assert "exact transcript full-text search" in memory_search.spec.description
     assert "MEMORY.md or memory/**/*.md" in memory_get.spec.description
     assert "sessions source results are virtual snippets" in memory_get.spec.description

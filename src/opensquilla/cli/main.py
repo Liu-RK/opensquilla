@@ -215,9 +215,9 @@ def memory_search_cmd(
     agent_id: str = typer.Option("main", "--agent", help="Agent id (default: main)"),
     limit: int = typer.Option(10, "--limit", "-n", help="Maximum results"),
     source: str = typer.Option(
-        "all",
+        "memory",
         "--source",
-        help="Search source: all, memory, or sessions",
+        help="Search source: memory, sessions, or all",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:

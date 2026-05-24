@@ -509,11 +509,10 @@ async def test_build_services_registers_session_search_tool(
         assert "Full-text search across persisted session transcripts" in (
             session_search.spec.description
         )
-        assert (
-            "source-aware memory_search, which searches curated memory source files plus "
-            "indexed session snippets"
-            in session_search.spec.description
+        assert "defaults to curated memory source files" in (
+            session_search.spec.description
         )
+        assert "use source=sessions or source=all" in session_search.spec.description
         owner_names = {
             tool["name"]
             for tool in await registry.list_tools(

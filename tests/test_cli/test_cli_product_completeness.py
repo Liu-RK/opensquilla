@@ -561,6 +561,10 @@ def test_memory_search_and_show_use_gateway_rpcs(monkeypatch):
         },
     }
 
+    search_default = runner.invoke(
+        app,
+        ["memory", "search", "alpha", "--limit", "3", "--json"],
+    )
     search = runner.invoke(
         app,
         ["memory", "search", "alpha", "--limit", "3", "--source", "sessions", "--json"],
@@ -583,12 +587,17 @@ def test_memory_search_and_show_use_gateway_rpcs(monkeypatch):
         ],
     )
 
+    assert search_default.exit_code == 0, search_default.stdout
     assert search.exit_code == 0, search.stdout
     assert search_table.exit_code == 0, search_table.stdout
     assert show.exit_code == 0, show.stdout
     assert "Source" in search_table.stdout
     assert "sessions" in search_table.stdout
     assert json.loads(show.stdout)["content"] == "line"
+    assert (
+        "memory.search",
+        {"query": "alpha", "agentId": "main", "limit": 3, "source": "memory"},
+    ) in fake.calls
     assert (
         "memory.search",
         {"query": "alpha", "agentId": "main", "limit": 3, "source": "sessions"},

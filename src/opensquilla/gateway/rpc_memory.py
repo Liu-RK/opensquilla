@@ -264,7 +264,7 @@ async def _handle_memory_search(params: dict | None, ctx: RpcContext) -> dict[st
     except (TypeError, ValueError) as exc:
         raise ValueError("params.minScore must be a number") from exc
     try:
-        source = normalize_memory_source_filter(params.get("source", "all"))
+        source = normalize_memory_source_filter(params.get("source") or "memory")
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
 
