@@ -203,6 +203,8 @@ async def test_pattern_at_threshold_creates_proposal_with_provenance(
 
     match = orch.run.call_args.args[0]
     assert match.inputs["user_message"].startswith("auto-proposal:")
+    assert "FULL_GATED validation" in match.inputs["user_message"]
+    assert "runtime E2E comparison" in match.inputs["user_message"]
     assert match.inputs["system_prompt"].startswith("Unattended meta-skill auto-propose run.")
 
 

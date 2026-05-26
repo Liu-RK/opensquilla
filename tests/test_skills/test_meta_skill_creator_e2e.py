@@ -135,6 +135,59 @@ composition:
     assert (home / "skills" / "synth-manual-auto-enable" / "SKILL.md").is_file()
 
 
+def test_auto_propose_persist_can_defer_manual_auto_enable(tmp_path) -> None:
+    """Cron/dream auto-propose must own provenance and auto-enable decisions.
+
+    The persist tool supports manual auto-enable for user-active creator runs,
+    but auto-propose injects ``auto_enable_manual=False`` so it can patch
+    auto_cron/auto_dream provenance before attempting promotion.
+    """
+    home = tmp_path / ".opensquilla"
+
+    from opensquilla.skills import proposals_lib
+    from opensquilla.skills.creator import proposer
+
+    proposals_lib.write_auto_propose_settings(
+        home,
+        {"auto_enable": True, "auto_enable_max_risk": "low"},
+    )
+    skill_md = """---
+name: synth-deferred-auto-enable
+description: "Safe creator output whose promotion is deferred to auto_propose."
+kind: meta
+meta_priority: 50
+triggers:
+  - "deferred auto enable"
+composition:
+  steps:
+    - id: explore
+      skill: history-explorer
+      with:
+        query: "{{ inputs.user_message | xml_escape | truncate(512) }}"
+    - id: digest
+      skill: summarize
+      depends_on: [explore]
+      with:
+        text: "{{ outputs.explore | truncate(2000) }}"
+---
+"""
+    lint_result = {"G1": {"passed": True}, "G2": {"passed": True}}
+    smoke_result = {"G3": {"passed": True}, "G4": {"passed": True}}
+
+    out = json.loads(proposer.meta_skill_persist_proposal(
+        skill_md,
+        json.dumps(lint_result),
+        json.dumps(smoke_result),
+        home=str(home),
+        auto_enable_manual=False,
+    ))
+
+    assert out["status"] == "ok"
+    assert "auto_enable" not in out
+    assert (home / "proposals" / out["proposal_id"] / "SKILL.md").is_file()
+    assert not (home / "skills" / "synth-deferred-auto-enable").exists()
+
+
 async def test_orchestrator_drives_creator_dag_end_to_end(tmp_path, monkeypatch) -> None:
     """Full DAG through MetaOrchestrator with stubbed downstream runners."""
     home = tmp_path / ".opensquilla"

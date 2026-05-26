@@ -651,6 +651,7 @@ def meta_skill_persist_proposal(
     creator_mode: str = "",
     acceptance_result: str = "",
     runtime_e2e_result: str = "",
+    auto_enable_manual: bool = True,
 ) -> str:
     """Write a proposal candidate to ~/.opensquilla/proposals/<id>/. Returns JSON."""
     home_path = Path(home).expanduser() if home else None
@@ -675,7 +676,12 @@ def meta_skill_persist_proposal(
         out = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return proc.stdout
-    if out.get("status") == "ok" and out.get("proposal_id") and home_path is not None:
+    if (
+        auto_enable_manual
+        and out.get("status") == "ok"
+        and out.get("proposal_id")
+        and home_path is not None
+    ):
         _maybe_auto_enable_manual_proposal(home_path, str(out["proposal_id"]), out)
     return json.dumps(out, ensure_ascii=False)
 
@@ -854,6 +860,7 @@ async def meta_skill_runtime_e2e_run_tool(
         "creator_mode": {"type": "string"},
         "acceptance_result": {"type": "string"},
         "runtime_e2e_result": {"type": "string"},
+        "auto_enable_manual": {"type": "boolean"},
         "home": {"type": "string"},
     },
     required=["skill_md", "lint_result", "smoke_result"],
@@ -867,6 +874,7 @@ async def meta_skill_persist_proposal_tool(
     creator_mode: str = "",
     acceptance_result: str = "",
     runtime_e2e_result: str = "",
+    auto_enable_manual: bool = True,
 ) -> str:
     import asyncio
     return await asyncio.to_thread(
@@ -878,6 +886,7 @@ async def meta_skill_persist_proposal_tool(
         creator_mode=creator_mode,
         acceptance_result=acceptance_result,
         runtime_e2e_result=runtime_e2e_result,
+        auto_enable_manual=auto_enable_manual,
     )
 
 

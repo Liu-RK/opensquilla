@@ -2411,6 +2411,7 @@ async def start_gateway_server(
                 if tool_name == "meta_skill_persist_proposal":
                     args = dict(args)
                     args.setdefault("home", str(auto_home))
+                    args.setdefault("auto_enable_manual", False)
                 token = set_runtime_e2e_context(runtime_e2e_ctx)
                 try:
                     return await base_tool_invoker(tool_name, args)

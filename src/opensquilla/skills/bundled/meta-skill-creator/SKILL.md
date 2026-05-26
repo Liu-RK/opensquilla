@@ -49,6 +49,9 @@ composition:
           User request:
           {{ inputs.user_message | xml_escape | truncate(1200) }}
 
+          Outer system / activation context:
+          {{ inputs.system_prompt | default("") | xml_escape | truncate(1200) }}
+
           Clarified intent:
           {{ outputs.clarify_intent | truncate(1200) }}
 
@@ -59,6 +62,9 @@ composition:
             meta-skill but does not ask for exhaustive smoke testing.
           - FULL_GATED: user asks for a production-ready, accepted, tested,
             validated, or fully gated meta-skill.
+          - FULL_GATED: unattended auto-propose, dream, or cron activation
+            requires preserving all creator gates before any auto-enable
+            decision.
 
     - id: harvest
       kind: skill_exec

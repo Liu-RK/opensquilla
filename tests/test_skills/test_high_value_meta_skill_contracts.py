@@ -195,6 +195,11 @@ def test_pdf_intelligence_has_inline_fallback_and_final_synthesis(
 
     assert plan.final_text_mode == "step:cross_document_synthesis"
     assert steps["extract"].on_failure == "inline_excerpt_extract"
+    assert "inline_excerpts_only" in steps["extract"].when
+    assert "reference_without_content" in steps["extract"].when
+    assert "pdf upload handy" in steps["extract"].when
+    assert "page " in steps["extract"].when
+    assert " says " in steps["extract"].when
     assert steps["inline_excerpt_extract"].kind == "llm_chat"
     for step_id in ("intake", "cross_document_synthesis", "traceable_index"):
         assert steps[step_id].kind == "llm_chat"
@@ -205,8 +210,17 @@ def test_pdf_intelligence_has_inline_fallback_and_final_synthesis(
     assert "Direct Evidence" in synthesis_prompt
     assert "Inferences" in synthesis_prompt
     assert "EXCERPT-ONLY" in synthesis_prompt
+    assert "Source Excerpts table" in synthesis_prompt
+    assert "source hierarchy" in synthesis_prompt
+    assert "extraction anomaly" in synthesis_prompt
+    assert "page 3 says" in synthesis_prompt
+    assert "never claim page count" in synthesis_prompt
     assert "Reusable Memory Index" in synthesis_prompt
     assert "evidence_ids" in synthesis_prompt
+    intake_prompt = str(steps["intake"].with_args)
+    assert "SOURCE_STATUS" in intake_prompt
+    assert "USER_EXCERPTS" in intake_prompt
+    assert "inline_excerpts_only" in intake_prompt
 
 
 def test_stack_trace_investigator_supports_language_routing_and_degraded_output(
@@ -236,10 +250,25 @@ def test_stack_trace_final_report_requires_patch_target_checklist(
 
     assert "## Patch Target Checklist" in raw
     assert "## Exception Semantics" in raw
+    assert "## Trace Facts" in raw
+    assert "First line must be exactly: ## Trace Facts" in raw
     assert "## Ranked Root Cause Matrix" in raw
     assert "Reject payload shapes" in raw
+    assert "json.loads(raw) succeeded" in raw
+    assert "top-level key \"result\" was absent" in raw
+    assert "Use the same language as the original user request" in raw
+    assert "raw errors from repository/history tools as private diagnostic" in raw
+    assert "Do not quote raw lookup errors" in raw
+    assert "list/string/null payloads would cause" in raw
     assert "static sweeps" in raw
     assert "producer, consumer, schema/types, tests, and" in raw
+    assert "streaming/control frames" in raw
+    assert "provider/transport rewraps" in raw
+    assert "git log/blame" in raw
+    assert "rg -nF \"parse_tool_result\"" in raw
+    assert "Verification Commands must contain only commands/checks" in raw
+    assert "Do not include the words \"meta-skill\"" in raw
+    assert "not executed" in raw
     assert "Assumptions / Constraints" in raw
     assert "git-diff" in _orchestrated_skill_names(loader, "meta-stack-trace-investigator")
     assert "history-explorer" in _orchestrated_skill_names(
@@ -326,6 +355,11 @@ def test_meta_skill_creator_supports_preview_only_branch(tmp_path: Path) -> None
         "PERSISTED_PROPOSAL",
         "FULL_GATED",
     }
+    creator_mode_text = str(steps["creator_mode"].with_args)
+    assert "inputs.system_prompt" in creator_mode_text
+    assert "unattended auto-propose" in creator_mode_text
+    assert "dream" in creator_mode_text
+    assert "cron" in creator_mode_text
     assert steps["smoke"].when == "outputs.creator_mode != 'PREVIEW_ONLY'"
     assert steps["persist"].when == "outputs.creator_mode != 'PREVIEW_ONLY'"
 
