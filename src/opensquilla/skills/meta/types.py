@@ -79,6 +79,27 @@ class MetaStep:
 
 
 @dataclass(frozen=True)
+class ClarifyField:
+    """One field in a user_input step's collection schema.
+
+    See docs/superpowers/specs/2026-05-26-meta-skill-user-input-design.md §6.
+    The validator semantics (min/max for int, max_chars for string, choices
+    for enum) are enforced by parser.py and at field-value-collection time;
+    this dataclass is the static declaration only.
+    """
+
+    name: str
+    type: str  # "string" | "enum" | "int" | "bool"
+    required: bool = False
+    prompt: str = ""
+    choices: tuple[str, ...] = ()
+    default: Any = None
+    min: int | None = None
+    max: int | None = None
+    max_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class MetaPlan:
     """Parsed composition plan for a Meta-Skill."""
 
