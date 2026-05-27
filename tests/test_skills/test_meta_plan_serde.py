@@ -81,3 +81,44 @@ def test_from_jsonable_tolerates_legacy_envelope():
     restored = from_jsonable(legacy_dict)
     assert restored.name == original.name
     assert restored.priority == original.priority
+
+
+def test_future_version_rejected():
+    import pytest
+    with pytest.raises(ValueError, match="not supported"):
+        from_jsonable({"v": 999, "plan": {}})
+
+
+def test_all_bundled_meta_skills_round_trip():
+    """Every bundled `kind: meta` SKILL.md must round-trip without loss.
+
+    Catches schema drift between MetaPlan dataclass fields and the
+    serializer / deserializer.
+    """
+    from pathlib import Path
+
+    from opensquilla.skills.loader import SkillLoader
+    from opensquilla.skills.meta.parser import parse_meta_plan
+
+    bundled = Path("src/opensquilla/skills/bundled").resolve()
+    loader = SkillLoader(bundled_dir=bundled)
+    specs = [s for s in loader.load_all() if getattr(s, "kind", "") == "meta"]
+
+    assert specs, "expected ≥1 bundled meta-skill"
+    failures: list[str] = []
+    for spec in specs:
+        try:
+            plan = parse_meta_plan(spec)
+        except Exception as exc:
+            failures.append(f"{spec.name}: parse failed: {exc}")
+            continue
+        if plan is None:
+            continue
+        try:
+            restored = from_jsonable(to_jsonable(plan))
+        except Exception as exc:
+            failures.append(f"{spec.name}: round-trip raised: {exc}")
+            continue
+        if restored != plan:
+            failures.append(f"{spec.name}: round-trip mismatch")
+    assert not failures, "\n".join(failures)
