@@ -1104,7 +1104,7 @@ composition:
           - <short note about figure/reference assumptions>
     - id: citation_map
       kind: llm_chat
-      depends_on: [final_manuscript_package, refbib]
+      depends_on: [final_manuscript_package, consistency_pass, assemble_manuscript_tex, refbib]
       when: "inputs.collected.paper_collect.paper_mode != 'COMPILE_ONLY'"
       with:
         system: "You audit citation provenance. You read manuscript LaTeX and a BibTeX file and emit a strict markdown table. NEVER invent titles or URLs — copy fields verbatim from the BibTeX block."
@@ -1114,7 +1114,7 @@ composition:
           audit table.
 
           Manuscript:
-          {% if outputs.consistency_pass %}{{ outputs.consistency_pass | truncate(12000) }}{% elif outputs.assemble_manuscript_tex %}{{ outputs.assemble_manuscript_tex | truncate(12000) }}{% else %}{{ outputs.final_manuscript_package | truncate(12000) }}{% endif %}
+          {{ (outputs.get('consistency_pass') or outputs.get('assemble_manuscript_tex') or outputs.get('final_manuscript_package', '')) | truncate(12000) }}
 
           References bib (authoritative source for title/url/eprint/doi):
           {{ outputs.refbib | truncate(8000) }}
@@ -1151,7 +1151,7 @@ composition:
           SUMMARY: total_cite_keys=<N>, strong=<n>, ok=<n>, weak=<n>, invalid=<n>, unused=<n>
     - id: paper_length_gate
       kind: llm_chat
-      depends_on: [final_manuscript_package, citation_plan, refbib]
+      depends_on: [final_manuscript_package, consistency_pass, assemble_manuscript_tex, citation_plan, refbib]
       when: "inputs.collected.paper_collect.paper_mode == 'FULL_MANUSCRIPT'"
       with:
         system: "You verify manuscript length requirements without rewriting the paper."
@@ -1168,13 +1168,13 @@ composition:
             also empty)
 
           Manuscript:
-          {% if outputs.consistency_pass %}{{ outputs.consistency_pass | truncate(12000) }}{% elif outputs.assemble_manuscript_tex %}{{ outputs.assemble_manuscript_tex | truncate(12000) }}{% else %}{{ outputs.final_manuscript_package | truncate(12000) }}{% endif %}
+          {{ (outputs.get('consistency_pass') or outputs.get('assemble_manuscript_tex') or outputs.get('final_manuscript_package', '')) | truncate(12000) }}
 
           Citation plan:
           {{ outputs.citation_plan | truncate(4000) }}
     - id: citation_integrity_gate
       kind: llm_chat
-      depends_on: [final_manuscript_package, citation_plan, refbib, citation_map]
+      depends_on: [final_manuscript_package, consistency_pass, assemble_manuscript_tex, citation_plan, refbib, citation_map]
       when: "inputs.collected.paper_collect.paper_mode in ('FULL_MANUSCRIPT', 'COMPACT_SKELETON', 'REPAIR_EXISTING')"
       with:
         system: "You verify LaTeX/BibTeX citation integrity."
@@ -1202,7 +1202,7 @@ composition:
           {{ outputs.refbib | truncate(8000) }}
 
           Manuscript:
-          {% if outputs.consistency_pass %}{{ outputs.consistency_pass | truncate(12000) }}{% elif outputs.assemble_manuscript_tex %}{{ outputs.assemble_manuscript_tex | truncate(12000) }}{% else %}{{ outputs.final_manuscript_package | truncate(12000) }}{% endif %}
+          {{ (outputs.get('consistency_pass') or outputs.get('assemble_manuscript_tex') or outputs.get('final_manuscript_package', '')) | truncate(12000) }}
 
           Citation audit table (read this — do NOT re-derive):
           {{ outputs.citation_map | truncate(4000) }}
@@ -1258,7 +1258,7 @@ composition:
       kind: tool_call
       tool: exec_command
       tool_allowlist: [exec_command]
-      depends_on: [latex_sanitizer]
+      depends_on: [latex_sanitizer, consistency_pass, assemble_manuscript_tex, final_manuscript_package]
       when: "inputs.collected.paper_collect.paper_mode in ('FULL_MANUSCRIPT', 'COMPACT_SKELETON', 'REPAIR_EXISTING')"
       tool_args:
         # Runs the actual xelatex × bibtex × xelatex × 2 cycle so the
@@ -1370,7 +1370,7 @@ composition:
         workdir: "{{ inputs.workspace_dir }}"
         timeout: 120
         env:
-          MANUSCRIPT_PKG: "{% if outputs.consistency_pass %}{{ outputs.consistency_pass }}{% elif outputs.assemble_manuscript_tex %}{{ outputs.assemble_manuscript_tex }}{% else %}{{ outputs.final_manuscript_package }}{% endif %}"
+          MANUSCRIPT_PKG: "{{ outputs.get('consistency_pass') or outputs.get('assemble_manuscript_tex') or outputs.get('final_manuscript_package', '') }}"
     - id: publish_pdf
       kind: tool_call
       tool: publish_artifact
