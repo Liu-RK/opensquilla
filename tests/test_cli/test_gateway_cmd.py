@@ -80,6 +80,46 @@ def test_gateway_startup_guidance_shows_operator_next_steps() -> None:
     assert "[dim]Keep this terminal open. Press Ctrl+C to stop.[/dim]" in guidance
 
 
+def test_gateway_run_turns_missing_onboarding_env_into_recovery_hint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "custom.toml"
+    target.write_text(
+        '[llm]\n'
+        'provider = "openrouter"\n'
+        'model = "deepseek/deepseek-v4-flash"\n'
+        'api_key = "sk-or"\n'
+        '\n'
+        '[memory.embedding]\n'
+        'provider = "openai"\n'
+        '\n'
+        '[memory.embedding.remote]\n'
+        'api_key_env = "OPENAI_EMBEDDINGS_API_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENSQUILLA_STATE_DIR", str(tmp_path / "home"))
+    monkeypatch.delenv("OPENAI_EMBEDDINGS_API_KEY", raising=False)
+
+    async def fail_start_gateway_server(**_kwargs):
+        raise ValueError(
+            "memory.embedding.provider='openai' requires "
+            "memory.embedding.remote.api_key"
+        )
+
+    monkeypatch.setattr(gateway_cmd, "start_gateway_server", fail_start_gateway_server)
+
+    result = runner.invoke(app, ["gateway", "run", "--config", str(target)])
+
+    assert result.exit_code == 1
+    output = result.stdout + (result.stderr or "")
+    compact = "".join(output.split())
+    assert "Gateway could not start" in output
+    assert 'Set memory key: export OPENAI_EMBEDDINGS_API_KEY="<your-key>"' in output
+    assert f"opensquillaonboardstatus--config{target}" in compact
+    assert "Traceback" not in output
+
+
 def test_gateway_lifecycle_paths_use_state_root(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPENSQUILLA_STATE_DIR", str(tmp_path / "home"))
 
@@ -357,6 +397,44 @@ def test_gateway_run_uses_config_host_port_when_flags_are_omitted(
 
     assert captured["config"].host == "127.0.0.2"
     assert captured["config"].port == 19999
+
+
+def test_gateway_run_keeps_missing_explicit_config_path_for_setup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    custom_config = tmp_path / "first-run.toml"
+    captured = {}
+
+    class FakeServer:
+        def __init__(self, task):
+            self._task = task
+
+        async def close(self, _reason):
+            return None
+
+    async def fake_start_gateway_server(*, config, subscription_manager, run):
+        captured["config"] = config
+
+        async def done():
+            return None
+
+        import asyncio
+
+        return FakeServer(asyncio.create_task(done()))
+
+    monkeypatch.setattr(gateway_cmd, "start_gateway_server", fake_start_gateway_server)
+
+    gateway_cmd.run_gateway(
+        port=19876,
+        bind=None,
+        listen="",
+        debug=False,
+        config_path=str(custom_config),
+    )
+
+    assert captured["config"].config_path == str(custom_config)
+    assert not custom_config.exists()
 
 
 def test_gateway_start_waits_for_readiness_after_liveness(tmp_path, monkeypatch) -> None:

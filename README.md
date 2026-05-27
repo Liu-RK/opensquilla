@@ -331,6 +331,7 @@ variables when you pass `--api-key-env`. The router defaults to
 opensquilla onboard                # full interactive wizard
 opensquilla onboard --if-needed    # idempotent: safe for scripts and re-installs
 opensquilla onboard --minimal      # provider only; skip channels and search
+opensquilla onboard status         # inspect every setup section without writing
 ```
 
 In SSH, CI, or any environment without a TTY, use the non-interactive
@@ -366,7 +367,10 @@ opensquilla configure channels
 
 Sections: `provider`, `router`, `channels`, `search`,
 `image-generation`, `memory-embedding`. The Web UI exposes the same
-flow at `/control/setup`.
+catalog and status model at `/control/setup`: Provider and Router are
+the fast path, while Channels, Search, Image generation, and Memory
+embedding sit in the Capability Center and can be configured later.
+Empty channels are treated as an opt-out, not a failed setup.
 
 **Config load order:** `OPENSQUILLA_GATEWAY_CONFIG_PATH` →
 `./opensquilla.toml` → `~/.opensquilla/config.toml` → built-in
