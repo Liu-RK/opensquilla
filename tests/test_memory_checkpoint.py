@@ -4,6 +4,7 @@ import pytest
 
 from opensquilla.memory.checkpoint import (
     CheckpointEvent,
+    append_checkpoint_events,
     checkpoint_event_hash,
     checkpoint_relative_path,
 )
@@ -46,6 +47,38 @@ def test_checkpoint_hash_is_stable_for_normalized_content() -> None:
 
     assert first == second
     assert len(first) == 64
+
+
+async def test_append_checkpoint_events_writes_jsonl_once(tmp_path):
+    event = CheckpointEvent(
+        schema_version=1,
+        event_id="evt-1",
+        session_key="agent:main:webchat:abc",
+        session_id="session-1",
+        turn_id="turn-1",
+        sequence=1,
+        timestamp_ms=123,
+        role="user",
+        content_type="text",
+        content="hello",
+        summary=None,
+        tool_name=None,
+        tool_call_id=None,
+        status="ok",
+        token_estimate=1,
+        source="turn_runner",
+        attachments=[],
+        content_hash="",
+    )
+
+    result = append_checkpoint_events(tmp_path, [event])
+    second = append_checkpoint_events(tmp_path, [event])
+
+    assert result.relative_path == "memory/.checkpoints/agent-main-webchat-abc/turn-1.jsonl"
+    assert result.event_count == 1
+    assert result.content_hash == second.content_hash
+    lines = (tmp_path / result.relative_path).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
 
 
 def test_checkpoint_relative_path_is_sidecar_only() -> None:

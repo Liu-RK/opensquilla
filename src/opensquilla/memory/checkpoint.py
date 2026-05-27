@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -47,6 +48,13 @@ class CheckpointEvent:
         return payload
 
 
+@dataclass(frozen=True)
+class CheckpointWriteResult:
+    relative_path: str
+    event_count: int
+    content_hash: str
+
+
 def checkpoint_event_hash(content: str) -> str:
     normalized = str(content or "").strip().encode("utf-8")
     return hashlib.sha256(normalized).hexdigest()
@@ -70,3 +78,37 @@ def checkpoint_relative_path(*, session_key: str, turn_id: str) -> Path:
 
 def serialize_checkpoint_event(event: CheckpointEvent) -> str:
     return json.dumps(event.to_json_dict(), ensure_ascii=False, sort_keys=True)
+
+
+def append_checkpoint_events(
+    workspace: Path,
+    events: list[CheckpointEvent],
+) -> CheckpointWriteResult:
+    if not events:
+        raise ValueError("checkpoint events cannot be empty")
+
+    relative_path = checkpoint_relative_path(
+        session_key=events[0].session_key,
+        turn_id=events[0].turn_id,
+    )
+    body = "".join(f"{serialize_checkpoint_event(event)}\n" for event in events)
+    body_bytes = body.encode("utf-8")
+    content_hash = hashlib.sha256(body_bytes).hexdigest()
+    result = CheckpointWriteResult(
+        relative_path=relative_path.as_posix(),
+        event_count=len(events),
+        content_hash=content_hash,
+    )
+
+    target_path = workspace / relative_path
+    if (
+        target_path.exists()
+        and hashlib.sha256(target_path.read_bytes()).hexdigest() == content_hash
+    ):
+        return result
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_name(f".{target_path.name}.tmp")
+    temp_path.write_bytes(body_bytes)
+    os.replace(temp_path, target_path)
+    return result
