@@ -75,7 +75,7 @@ from opensquilla.result_budget import (
     compact_tool_result_content,
     resolve_budget_class,
 )
-from opensquilla.router_control import router_control_replay_event_from_payload
+from opensquilla.router_control import router_control_replay_payload
 from opensquilla.session.compaction import (
     CompactionConfig,
     CompactionRequest,
@@ -108,6 +108,7 @@ from .types import (
     CompactionOutcome,
     DoneEvent,
     ErrorEvent,
+    RouterControlReplayEvent,
     RunHeartbeatEvent,
     StateChangeEvent,
     TextDeltaEvent,
@@ -255,6 +256,24 @@ def _pending_approval_payload(content: str) -> dict[str, Any] | None:
     if not isinstance(approval_id, str) or not approval_id:
         return None
     return payload
+
+
+def _router_control_replay_event(
+    content: object,
+    *,
+    replay_depth: int = 0,
+) -> RouterControlReplayEvent | None:
+    payload = router_control_replay_payload(content)
+    if payload is None:
+        return None
+    return RouterControlReplayEvent(
+        action=str(payload.get("action") or ""),
+        target_tier=payload.get("target_tier"),
+        target_model=payload.get("target_model"),
+        target_provider=payload.get("target_provider"),
+        target_id=payload.get("target_id"),
+        replay_depth=replay_depth,
+    )
 
 
 async def _wait_for_pending_approval_resolution(
@@ -3103,7 +3122,7 @@ class Agent:
                 for tc in tool_calls:
                     result = results_by_id[tc.tool_use_id]
                     result_tool_call = tc
-                    replay_event = router_control_replay_event_from_payload(result.content)
+                    replay_event = _router_control_replay_event(result.content)
                     pending_approval = _pending_approval_payload(result.content)
                     if pending_approval is not None and not tc.arguments.get("approval_id"):
                         for artifact in result.artifacts:
@@ -3131,7 +3150,7 @@ class Agent:
                         )
                         result = await _run_one(retry_call)
                         result_tool_call = retry_call
-                        replay_event = router_control_replay_event_from_payload(result.content)
+                        replay_event = _router_control_replay_event(result.content)
 
                     result = await self._canonicalize_tool_result(
                         result,
