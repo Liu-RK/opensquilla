@@ -111,6 +111,11 @@ def test_report_meta_skill_uses_fast_final_report_path(tmp_path: Path) -> None:
     }
     assert steps["research"].when == "outputs.report_mode in ('DEEP_REPORT', 'EXPORT_DOCX')"
     assert steps["export"].when == "outputs.report_mode == 'EXPORT_DOCX'"
+    assert set(steps["final_report"].depends_on) == {
+        "quality_gate",
+        "source_quality",
+        "source_to_claim",
+    }
     for step_id in (
         "preferences",
         "source_quality",
@@ -120,8 +125,39 @@ def test_report_meta_skill_uses_fast_final_report_path(tmp_path: Path) -> None:
     ):
         assert steps[step_id].kind == "llm_chat"
     assert steps["search"].skill == "multi-search-engine"
+    assert set(steps["search"].depends_on) == {"preferences", "report_mode"}
     assert steps["research"].skill == "deep-research"
     assert steps["export"].skill == "docx"
+    final_prompt = str(steps["final_report"].with_args)
+    quality_prompt = str(steps["quality_gate"].with_args)
+    source_prompt = str(steps["source_quality"].with_args)
+    preferences_prompt = str(steps["preferences"].with_args)
+    search_args = str(steps["search"].with_args)
+    assert "SEARCH_QUERY:" in preferences_prompt
+    assert "inputs.user_message" not in search_args
+    assert "outputs.preferences" in search_args
+    assert "Source list" in final_prompt
+    assert "Assumptions / Decision Context" in final_prompt
+    assert "audience, decision being made, scope" in final_prompt
+    assert "under 900 words" in final_prompt
+    assert "exactly five numbered" in final_prompt
+    assert "Source pack below as authoritative evidence input" in final_prompt
+    assert "Never output \"No sources were provided\"" in final_prompt
+    assert "copy title + URL entries from the Source pack" in final_prompt
+    assert "Five Key Findings" in final_prompt
+    assert "Do not cite [S#]" in final_prompt
+    assert "Remove invented cost, latency" in final_prompt
+    assert "Evidence limits" in final_prompt
+    assert "not directly" in final_prompt
+    assert "Do not use Reddit" in final_prompt
+    assert "visible \"Sources\"" in quality_prompt
+    assert "INDIRECT or INFERENCE" in quality_prompt
+    assert "Source" in quality_prompt and "list" in quality_prompt
+    assert "[S#] Title" in source_prompt
+    assert "best 5-8 sources" in source_prompt
+    assert "Avoid Reddit" in source_prompt
+    assert "Evidence type: <direct|indirect|background>" in source_prompt
+    assert "indirect/background" in source_prompt
 
 
 def test_paper_meta_skill_has_pre_compile_quality_gates(tmp_path: Path) -> None:
@@ -144,16 +180,31 @@ def test_paper_meta_skill_uses_compact_default_manuscript_path(
     steps, plan = _steps_by_id(loader, "meta-paper-write")
 
     assert plan.final_text_mode == "step:final_manuscript_package"
-    assert steps["paper_mode"].kind == "llm_classify"
-    assert set(steps["paper_mode"].output_choices) == {
+    # PR8 follow-up migration: paper_mode (llm_classify) was replaced
+    # with paper_collect (user_input) so the user picks the mode rather
+    # than letting the LLM guess from a single sentence.
+    assert steps["paper_collect"].kind == "user_input"
+    paper_collect_cfg = steps["paper_collect"].clarify_config
+    assert paper_collect_cfg is not None
+    mode_field = next(
+        f for f in paper_collect_cfg.fields if f.name == "paper_mode"
+    )
+    assert mode_field.type == "enum"
+    assert set(mode_field.choices) == {
         "FULL_MANUSCRIPT",
         "COMPACT_SKELETON",
         "REPAIR_EXISTING",
         "COMPILE_ONLY",
     }
-    assert steps["experiment"].when == "outputs.paper_mode == 'FULL_MANUSCRIPT'"
-    assert steps["plot"].when == "outputs.paper_mode == 'FULL_MANUSCRIPT'"
-    assert steps["compile_latex"].when == "outputs.paper_mode == 'COMPILE_ONLY'"
+    assert steps["experiment"].when == (
+        "inputs.collected.paper_collect.paper_mode == 'FULL_MANUSCRIPT'"
+    )
+    assert steps["plot"].when == (
+        "inputs.collected.paper_collect.paper_mode == 'FULL_MANUSCRIPT'"
+    )
+    assert steps["compile_latex"].when == (
+        "inputs.collected.paper_collect.paper_mode == 'COMPILE_ONLY'"
+    )
     for step_id in (
         "paper_preferences",
         "source_pack",
@@ -169,6 +220,12 @@ def test_paper_meta_skill_uses_compact_default_manuscript_path(
     for step_id in ("search_papers", "experiment", "refbib", "plot"):
         assert steps[step_id].kind == "skill_exec"
     assert steps["compile_latex"].depends_on == ("latex_sanitizer",)
+    final_prompt = str(steps["final_manuscript_package"].with_args)
+    assert "never omit REFERENCES_BIB" in final_prompt
+    assert "at least 20 reference entries" in final_prompt
+    assert "roughly 1,500 words before REFERENCES_BIB" in final_prompt
+    assert "citation integrity beats prose length" in final_prompt
+    assert "placeholder BibTeX stubs" in final_prompt
 
 
 def test_pdf_intelligence_preserves_traceable_multi_document_structure(
@@ -260,13 +317,47 @@ def test_stack_trace_final_report_requires_patch_target_checklist(
     assert "raw errors from repository/history tools as private diagnostic" in raw
     assert "Do not quote raw lookup errors" in raw
     assert "list/string/null payloads would cause" in raw
+    assert "REPO_GREP: DEGRADED" in raw
+    assert "ISSUE_SEARCH: DEGRADED" in raw
+    assert "GIT_HISTORY: DEGRADED" in raw
+    assert "MEMORY_RECALL: DEGRADED" in raw
     assert "static sweeps" in raw
-    assert "producer, consumer, schema/types, tests, and" in raw
+    assert "producer/wrappers, runtime/streaming" in raw
     assert "streaming/control frames" in raw
     assert "provider/transport rewraps" in raw
+    assert "at least seven ranked hypotheses" in raw
+    assert "schema/version drift" in raw
+    assert "exception serialized as tool output" in raw
+    assert "## Related Checks" in raw
+    assert "non-authoritative search hint" in raw
+    assert "Prior incident" in raw
+    assert "memory path" in raw
+    assert "hypothesis-driven reproducer matrix" in raw
+    assert "tool identity / tool_call_id" in raw
+    assert "streaming/control-frame path" in raw
     assert "git log/blame" in raw
     assert "rg -nF \"parse_tool_result\"" in raw
+    assert "result|data|output|content|error|status|message" in raw
+    assert "json.loads" in raw
+    assert "repo-wide commands first" in raw
     assert "Verification Commands must contain only commands/checks" in raw
+    assert "Never include file-creation or file-edit commands" in raw
+    assert "no `cat >`" in raw
+    assert "no `tee`" in raw
+    assert "no `python - <<`" in raw
+    assert "no `/tmp`" in raw
+    assert "inline snippet" in raw
+    assert "Use only read-only searches/history/log commands" in raw
+    assert "cap root-cause" in raw and "matrix rows at 8" in raw
+    assert "Patch Direction must complete before Related Checks" in raw
+    assert "do not recommend returning a default" in raw
+    assert "typed" in raw and "protocol/execution errors" in raw
+    assert "fixture-driven contract tests" in raw
+    assert "exact import-path" in raw and "reproducer" in raw
+    assert "targeted pytest command" in raw
+    assert "producer-adapter checks and contract tests" in raw
+    assert "parser boundary: decode, type check, error-envelope branch" in raw
+    assert "Explicitly" in raw and "silent default-return behavior" in raw
     assert "Do not include the words \"meta-skill\"" in raw
     assert "not executed" in raw
     assert "Assumptions / Constraints" in raw
@@ -417,17 +508,39 @@ def test_migration_assistant_routes_guides_and_optional_repo_context(
         "multi-search-engine",
     ]
     assert steps["repo_context"].skill == "git-diff"
-    assert "current repo" in steps["repo_context"].when
+    assert "current diff" in steps["repo_context"].when
+    assert "current branch" in steps["repo_context"].when
+    assert "'pr' in" not in steps["repo_context"].when
+    assert "pull request" in steps["repo_context"].when
     assert set(steps["write_plan"].depends_on) == {
         "classify",
         "fetch_guide",
         "repo_context",
     }
+    assert steps["write_plan"].kind == "llm_chat"
     write_plan_prompt = str(steps["write_plan"].with_args)
+    assert "Answer the user's requested" in write_plan_prompt
+    assert "EFFECTIVE_KIND=CJS_TO_ESM" in write_plan_prompt
+    assert "CommonJS to native ES Modules" in write_plan_prompt
+    assert "do not wrap the entire answer in a fenced code block" in write_plan_prompt
     assert "## Evidence boundary" in write_plan_prompt
     assert "## Repository discovery checklist" in write_plan_prompt
     assert "## Rollout and rollback" in write_plan_prompt
+    assert "requested migration kind is authoritative" in write_plan_prompt
+    assert "final-layer classifier override" in write_plan_prompt
+    assert "Do not expose classifier labels" in write_plan_prompt
+    assert "Do not invent repo-specific files" in write_plan_prompt
+    assert "Do not use unverified concrete entrypoint paths" in write_plan_prompt
+    assert "`git commit`" in write_plan_prompt
     assert "CJS_TO_ESM" in write_plan_prompt
+    assert "npm pkg get type main exports scripts" in write_plan_prompt
+    assert "hypothesis-driven" in write_plan_prompt
+    assert "npm pack --dry-run" in write_plan_prompt
+    assert "npx publint" in write_plan_prompt
+    assert "arethetypeswrong" in write_plan_prompt
+    assert "semver-major trigger" in write_plan_prompt
+    assert "canary/internal" in write_plan_prompt
+    assert "Avoid file-creation" in write_plan_prompt
     assert "exports` takes precedence" in write_plan_prompt
     assert "dual-package hazards" in write_plan_prompt
     assert "eslint --fix" in write_plan_prompt

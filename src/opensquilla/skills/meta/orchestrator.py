@@ -457,6 +457,19 @@ class MetaOrchestrator:
             from opensquilla.skills.meta.executors.user_input import (
                 run_user_input_step,
             )
+            # skip_if takes precedence — when it evaluates true the step
+            # is a pure pass-through, no awaiting state is written, so
+            # neither a DAO nor a run_id is required. Tests rely on this
+            # to drive the DAG offline (pre-populated inputs.collected).
+            cfg = step.clarify_config
+            if cfg is not None and cfg.skip_if:
+                from opensquilla.skills.meta.templating import evaluate_when
+                try:
+                    if evaluate_when(cfg.skip_if, inputs=inputs, outputs=outputs):
+                        yield _StepDone(text="")
+                        return
+                except ValueError:
+                    pass
             run_id = self._current_run_id
             if self._dao is None or not run_id:
                 raise RuntimeError(

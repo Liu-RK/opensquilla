@@ -40,8 +40,11 @@ async def test_meta_paper_write_runs_end_to_end(tmp_path: Path) -> None:
     assert plan is not None and len(plan.steps) == 14
     assert plan.final_text_mode == "step:final_manuscript_package"
     steps = {step.id: step for step in plan.steps}
-    assert steps["paper_mode"].kind == "llm_classify"
+    # PR8/follow-up migration: paper_mode (llm_classify) was replaced
+    # with paper_collect (user_input) — the user picks the mode directly.
+    assert steps["paper_collect"].kind == "user_input"
     assert steps["paper_preferences"].kind == "llm_chat"
+    assert steps["paper_preferences"].depends_on == ("paper_collect",)
     assert steps["search_papers"].depends_on == ("paper_preferences",)
     assert steps["experiment"].depends_on == ("paper_preferences",)
     assert steps["search_papers"].kind == "skill_exec"
@@ -201,9 +204,10 @@ async def test_meta_paper_write_runs_end_to_end(tmp_path: Path) -> None:
         yield DoneEvent(text="")
 
     async def llm_chat(system_prompt: str, _user_message: str) -> str:
-        if "deterministic classifier" in system_prompt:
-            return "FULL_MANUSCRIPT"
-        if "academic-paper requirements" in system_prompt:
+        # paper_mode (llm_classify) was removed; the user picks the mode
+        # via paper_collect (user_input) — this fixture pre-populates
+        # inputs.collected so skip_if fires and the pause is bypassed.
+        if "paper requirements" in system_prompt:
             return canned_fragments["paper_preferences"]
         if "curate paper sources" in system_prompt:
             return canned_fragments["source_pack"]
@@ -239,7 +243,22 @@ async def test_meta_paper_write_runs_end_to_end(tmp_path: Path) -> None:
     async for ev in orch.iter_events(
         MetaMatch(
             plan=plan,
-            inputs={"user_message": "RAG in low-resource settings"},
+            # Pre-populate collected.paper_collect so paper_collect's
+            # skip_if ("inputs.collected.paper_collect is defined")
+            # short-circuits the pause and the rest of the DAG runs
+            # exactly as before.
+            inputs={
+                "user_message": "RAG in low-resource settings",
+                "collected": {
+                    "paper_collect": {
+                        "topic": "RAG in low-resource settings",
+                        "paper_mode": "FULL_MANUSCRIPT",
+                        "language": "en",
+                        "target_length_pages": 10,
+                        "audience": "academic",
+                    },
+                },
+            },
         ),
     ):
         if isinstance(ev, MetaResult):
