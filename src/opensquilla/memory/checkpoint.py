@@ -133,8 +133,8 @@ def append_checkpoint_events(
             mode="w",
             encoding="utf-8",
         ) as temp_file:
-            temp_file.write(body)
             temp_path = Path(temp_file.name)
+            temp_file.write(body)
         os.replace(temp_path, target_path)
     except Exception:
         if temp_path is not None:

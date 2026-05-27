@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import opensquilla.memory.checkpoint as checkpoint
 from opensquilla.memory.checkpoint import (
     CheckpointEvent,
     append_checkpoint_events,
@@ -99,6 +100,33 @@ async def test_append_checkpoint_events_writes_jsonl_once(tmp_path):
 def test_append_checkpoint_events_rejects_mixed_turn_batches(tmp_path, event):
     with pytest.raises(ValueError, match="share session_key and turn_id"):
         append_checkpoint_events(tmp_path, [_checkpoint_event(), event])
+
+
+def test_append_checkpoint_events_cleans_temp_file_when_write_fails(
+    tmp_path,
+    monkeypatch,
+):
+    class FailingTempFile:
+        def __init__(self, *, dir, prefix, suffix, **_kwargs):
+            self.name = str(Path(dir) / f"{prefix}forced{suffix}")
+
+        def __enter__(self):
+            Path(self.name).write_text("partial", encoding="utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def write(self, _body):
+            raise OSError("simulated write failure")
+
+    monkeypatch.setattr(checkpoint.tempfile, "NamedTemporaryFile", FailingTempFile)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        append_checkpoint_events(tmp_path, [_checkpoint_event()])
+
+    checkpoint_dir = tmp_path / "memory/.checkpoints/agent-main-webchat-abc"
+    assert not any(path.name.endswith(".tmp") for path in checkpoint_dir.iterdir())
 
 
 def test_checkpoint_relative_path_is_sidecar_only() -> None:
