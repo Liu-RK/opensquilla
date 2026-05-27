@@ -42,6 +42,7 @@ import structlog
 if TYPE_CHECKING:
     from opensquilla.engine.turn_runner.outcome import StageOutcome
     from opensquilla.engine.types import DoneEvent, ErrorEvent
+    from opensquilla.skills.meta.types import MetaResult
     from opensquilla.tools.types import ToolContext
 
 log = structlog.get_logger(__name__)
@@ -84,6 +85,38 @@ def _with_unconfirmed_action_notice(final_text: str, turn_segments: list[dict]) 
     if final_text.strip():
         return f"{final_text.rstrip()}\n\n{notice}"
     return notice
+
+
+# ---------------------------------------------------------------------------
+# Paused MetaResult renderer
+# ---------------------------------------------------------------------------
+
+
+def render_paused_outcome(result: MetaResult) -> str:
+    """Render a paused MetaResult into a plain-text form description.
+
+    PR3 ships a minimal text rendering; PR5/6/7 add per-surface rich
+    renderings (Web card / CLI prompt-toolkit / IM list). This text is
+    the fallback used by any surface that has not yet been upgraded.
+    """
+    if not result.paused or result.paused_payload is None:
+        return result.final_text or ""
+    payload = result.paused_payload
+    schema = payload.schema
+    lines: list[str] = []
+    if payload.intro or schema.intro:
+        lines.append(payload.intro or schema.intro)
+        lines.append("")
+    lines.append("请回复以下字段：")
+    for index, field in enumerate(schema.fields, start=1):
+        flag = "[必填]" if field.required else "[可选]"
+        prompt = field.prompt or field.name
+        lines.append(f"  {index}) {field.name} — {prompt} {flag}")
+    if schema.cancel_keywords:
+        kws = " / ".join(schema.cancel_keywords)
+        lines.append("")
+        lines.append(f"或回复 {kws} 取消。")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
