@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 
 import typer
 
@@ -59,9 +60,8 @@ def run_gateway(
     honoured as the fallback when no CLI flag or env var is supplied,
     matching what the field name promises.
     """
-    config = GatewayConfig.load(
-        config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
-    )
+    effective_config_path = config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
+    config = GatewayConfig.load(effective_config_path)
     host = _resolve_lifecycle_host(
         bind=bind,
         listen=listen,
@@ -78,8 +78,6 @@ def run_gateway(
         f"on {banner_host}:{effective_port}"
     )
     scheme = "https" if (config.tls.keyfile and config.tls.certfile) else "http"
-    for line in gateway_startup_guidance(host, effective_port, scheme=scheme):
-        console.print(line)
     if is_public_bind(host):
         # Use ASCII-only glyphs here so the warning still prints on Windows
         # consoles configured for legacy GBK code pages (where U+26A0 / em-dash
@@ -114,6 +112,8 @@ def run_gateway(
             subscription_manager=subscription_mgr,
             run=True,
         )
+        for line in gateway_startup_guidance(host, effective_port, scheme=scheme):
+            console.print(line)
         assert server._task is not None
         try:
             await server._task
@@ -124,6 +124,51 @@ def run_gateway(
         asyncio.run(_run())
     except KeyboardInterrupt:
         console.print("\n[yellow]Gateway stopped.[/yellow]")
+    except ValueError as exc:
+        _print_gateway_startup_recovery(
+            exc,
+            config=config,
+            config_path=effective_config_path,
+        )
+        raise typer.Exit(1) from exc
+
+
+def _print_gateway_startup_recovery(
+    exc: ValueError,
+    *,
+    config: GatewayConfig,
+    config_path: str | None,
+) -> None:
+    console.print(f"[bold red]Gateway could not start:[/bold red] {exc}")
+    try:
+        from opensquilla.onboarding.next_steps import env_recovery_commands
+        from opensquilla.onboarding.status import get_onboarding_status
+
+        commands = env_recovery_commands(get_onboarding_status(config))
+    except Exception as recovery_exc:
+        console.print(
+            "[dim]Onboarding recovery details unavailable: "
+            f"{recovery_exc}[/dim]"
+        )
+        return
+    if not commands:
+        return
+    config_arg = _gateway_config_cli_arg(config_path)
+    console.print("[bold yellow]Fix onboarding environment first:[/bold yellow]")
+    for entry in commands:
+        label = str(entry.get("label") or "Set key")
+        command = str(entry.get("command") or "").strip()
+        if command:
+            console.print(f"  {label}: {command}")
+    console.print(f"  Check status: opensquilla onboard status{config_arg}")
+    console.print(f"  Guided CLI: opensquilla onboard --if-needed{config_arg}")
+    console.print(f"  Then rerun: opensquilla gateway run{config_arg}")
+
+
+def _gateway_config_cli_arg(config_path: str | None) -> str:
+    if not config_path:
+        return ""
+    return f" --config {shlex.quote(str(config_path))}"
 
 
 def _resolve_lifecycle_host(
