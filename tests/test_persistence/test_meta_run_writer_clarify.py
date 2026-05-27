@@ -71,3 +71,80 @@ def test_peek_awaiting_ignores_non_awaiting_status(writer):
         )
         writer._conn.commit()
     assert writer.peek_awaiting(session_id="S2") is None
+
+
+def test_try_claim_awaiting_succeeds_for_running_run(writer):
+    with writer._lock:
+        writer._conn.execute(
+            "INSERT INTO meta_skill_runs "
+            "(run_id, meta_skill_name, meta_skill_digest, plan_snapshot_json, "
+            " triggered_by, session_key, status, started_at_ms, inputs_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("r1", "t", "d", "{}", "soft_meta_invoke", "S1", "running", 0, "{}"),
+        )
+        writer._conn.commit()
+
+    ok = writer.try_claim_awaiting(
+        run_id="r1",
+        step_id="collect",
+        schema_json='{"mode":"form","fields":[]}',
+        session_id="S1",
+        inputs_json='{"user_message":"hi"}',
+        step_outputs_json='{}',
+        awaiting_since=1700000000.0,
+    )
+    assert ok is True
+
+    peek = writer.peek_awaiting(session_id="S1")
+    assert peek is not None
+    assert peek.run_id == "r1"
+    assert peek.step_id == "collect"
+
+
+def test_try_claim_awaiting_fails_when_run_already_finished(writer):
+    with writer._lock:
+        writer._conn.execute(
+            "INSERT INTO meta_skill_runs "
+            "(run_id, meta_skill_name, meta_skill_digest, plan_snapshot_json, "
+            " triggered_by, session_key, status, started_at_ms, inputs_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("r1", "t", "d", "{}", "soft_meta_invoke", "S1", "ok", 0, "{}"),
+        )
+        writer._conn.commit()
+
+    ok = writer.try_claim_awaiting(
+        run_id="r1",
+        step_id="collect",
+        schema_json="{}",
+        session_id="S1",
+        inputs_json="{}",
+        step_outputs_json="{}",
+        awaiting_since=0.0,
+    )
+    assert ok is False
+    assert writer.peek_awaiting(session_id="S1") is None
+
+
+def test_try_claim_awaiting_partial_unique_index_blocks_double_awaiting(writer):
+    with writer._lock:
+        for run_id in ("r1", "r2"):
+            writer._conn.execute(
+                "INSERT INTO meta_skill_runs "
+                "(run_id, meta_skill_name, meta_skill_digest, plan_snapshot_json, "
+                " triggered_by, session_key, status, started_at_ms, inputs_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (run_id, "t", "d", "{}", "soft_meta_invoke", "S1",
+                 "running", 0, "{}"),
+            )
+        writer._conn.commit()
+
+    assert writer.try_claim_awaiting(
+        run_id="r1", step_id="collect", schema_json="{}",
+        session_id="S1", inputs_json="{}", step_outputs_json="{}",
+        awaiting_since=0.0,
+    ) is True
+    assert writer.try_claim_awaiting(
+        run_id="r2", step_id="collect", schema_json="{}",
+        session_id="S1", inputs_json="{}", step_outputs_json="{}",
+        awaiting_since=0.0,
+    ) is False

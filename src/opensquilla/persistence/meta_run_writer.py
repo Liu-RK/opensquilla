@@ -548,6 +548,70 @@ class MetaRunWriter:
             parse_failure_count=int(row["parse_failure_count"] or 0),
         )
 
+    def try_claim_awaiting(
+        self,
+        *,
+        run_id: str,
+        step_id: str,
+        schema_json: str,
+        session_id: str,
+        inputs_json: str,
+        step_outputs_json: str,
+        awaiting_since: float,
+    ) -> bool:
+        """Atomically transition status running → awaiting_user.
+
+        Returns True on success (rowcount == 1).
+        Returns False if either:
+          (a) the run is no longer 'running' (lost a race to finalize); or
+          (b) another run in the same session is already awaiting_user
+              (partial unique index rejects the write with IntegrityError).
+
+        Callers MUST NOT raise MetaPaused on False — the user_input
+        executor treats False as a normal step failure (design §10).
+        """
+        try:
+            with self._lock:
+                try:
+                    cur = self._conn.execute(
+                        """
+                        UPDATE meta_skill_runs
+                           SET status='awaiting_user',
+                               awaiting_step_id=?,
+                               awaiting_schema_json=?,
+                               awaiting_since=?,
+                               session_key=?,
+                               inputs_json=?,
+                               step_outputs_json=?,
+                               awaiting_filled_json='{}',
+                               parse_failure_count=0
+                         WHERE run_id=? AND status='running'
+                        """,
+                        (
+                            step_id, schema_json, awaiting_since,
+                            session_id, inputs_json, step_outputs_json,
+                            run_id,
+                        ),
+                    )
+                    if cur.rowcount == 0:
+                        self._conn.rollback()
+                        return False
+                    self._conn.commit()
+                    return True
+                except sqlite3.IntegrityError as exc:
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        pass
+                    log.info(
+                        "meta_run_writer.try_claim_awaiting.race_lost run=%s session=%s err=%s",
+                        run_id, session_id, exc,
+                    )
+                    return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("meta_run_writer.try_claim_awaiting_failed: %s", exc)
+            return False
+
     # ------------- cleanup -------------
 
     def purge_for_session(self, session_key: str) -> int:
