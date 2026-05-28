@@ -8,7 +8,7 @@ import logging
 import os
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -1203,6 +1203,7 @@ def build_flush_service(
     provider_selector: Any,
     config: GatewayConfig | None = None,
     session_manager: Any | None = None,
+    memory_managers: Mapping[str, Any] | None = None,
 ) -> Any:
     """Construct a :class:`SessionFlushService` gated by flush config.
 
@@ -1346,6 +1347,19 @@ def build_flush_service(
             )
         )
 
+    def _resolve_archive_workspace(agent_id: str) -> Path | None:
+        if not memory_managers:
+            return None
+        managers = [memory_managers.get(agent_id), memory_managers.get("main")]
+        for attr_name in ("workspace_dir", "memory_dir"):
+            for manager in managers:
+                if manager is None:
+                    continue
+                path_value = getattr(manager, attr_name, None)
+                if path_value is not None:
+                    return Path(path_value).expanduser()
+        return None
+
     service_kwargs: dict[str, Any] = {}
     if memory_cfg is not None:
         service_kwargs["default_timeout"] = getattr(
@@ -1362,6 +1376,7 @@ def build_flush_service(
         provider_selector=_resolve_provider,
         tool_registry=tool_registry,
         tool_handler=tool_handler,
+        archive_workspace_resolver=_resolve_archive_workspace,
         **service_kwargs,
     )
 
@@ -1905,6 +1920,7 @@ async def build_services(
         provider_selector=provider_selector,
         config=config,
         session_manager=session_manager,
+        memory_managers=memory_managers,
     )
     if flush_service is not None:
         log.info("build_services.session_flush_service_ready")

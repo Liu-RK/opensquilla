@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
@@ -573,7 +574,7 @@ async def test_start_gateway_server_wires_meta_skill_auto_propose_routes(
         def __init__(self) -> None:
             self.model = "primary-model"
 
-        def clone(self) -> "FakeProviderSelector":
+        def clone(self) -> FakeProviderSelector:
             captured["provider_selector_cloned"] = True
             return self
 
@@ -662,8 +663,16 @@ async def test_start_gateway_server_wires_meta_skill_auto_propose_routes(
     monkeypatch.setattr(boot, "build_services", fake_build_services)
     monkeypatch.setattr(boot, "_setup_file_logging", lambda config: None)
     monkeypatch.setattr(boot, "emit_skill_filter_banner", lambda config: None)
-    monkeypatch.setattr(auto_handler_mod, "make_auto_propose_handler", fake_make_auto_propose_handler)
-    monkeypatch.setattr(dream_handler_mod, "make_memory_dream_handler", fake_make_memory_dream_handler)
+    monkeypatch.setattr(
+        auto_handler_mod,
+        "make_auto_propose_handler",
+        fake_make_auto_propose_handler,
+    )
+    monkeypatch.setattr(
+        dream_handler_mod,
+        "make_memory_dream_handler",
+        fake_make_memory_dream_handler,
+    )
     monkeypatch.setattr(runtime_e2e_mod, "make_runtime_e2e_context", fake_make_runtime_e2e_context)
     monkeypatch.setattr(proposer_mod, "set_runtime_e2e_context", fake_set_runtime_e2e_context)
     monkeypatch.setattr(proposer_mod, "reset_runtime_e2e_context", fake_reset_runtime_e2e_context)
@@ -753,6 +762,36 @@ def test_build_flush_service_uses_configured_background_memory_timeout() -> None
 
 
 @pytest.mark.asyncio
+async def test_build_flush_service_archive_workspace_falls_back_to_main_workspace(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry()
+    main_workspace = tmp_path / "main-workspace"
+    matching_memory_dir = tmp_path / "matching-memory"
+    service = build_flush_service(
+        tool_registry=registry,
+        provider_selector=SimpleNamespace(resolve=lambda: None),
+        config=GatewayConfig(),
+        memory_managers={
+            "side": SimpleNamespace(workspace_dir=None, memory_dir=matching_memory_dir),
+            "main": SimpleNamespace(
+                workspace_dir=main_workspace,
+                memory_dir=tmp_path / "main-memory",
+            ),
+        },
+    )
+
+    receipt = await service.execute(
+        [Message(role="user", content="temporary transcript")],
+        "agent:side:webchat:s1",
+        agent_id="side",
+    )
+
+    assert receipt.mode == "raw"
+    assert (main_workspace / receipt.flushed_paths[0]).exists()
+    assert not (matching_memory_dir / receipt.flushed_paths[0]).exists()
+
+@pytest.mark.asyncio
 async def test_build_flush_service_wires_durable_receipt_writer(tmp_path: Path) -> None:
     storage = await SessionStorage.open(str(tmp_path / "sessions.sqlite"))
     session_manager = SessionManager(storage)
@@ -784,6 +823,7 @@ async def test_build_flush_service_wires_durable_receipt_writer(tmp_path: Path) 
             provider_selector=SimpleNamespace(resolve=lambda: None),
             config=GatewayConfig(),
             session_manager=session_manager,
+            memory_managers={"main": SimpleNamespace(workspace_dir=tmp_path)},
         )
 
         receipt = await service.execute(
@@ -813,30 +853,27 @@ async def test_build_flush_service_wires_durable_receipt_writer(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_build_flush_service_receipt_uses_session_id_captured_before_rotation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = await SessionStorage.open(str(tmp_path / "sessions.sqlite"))
     session_manager = SessionManager(storage)
     registry = ToolRegistry()
-    save_started = asyncio.Event()
-    allow_save = asyncio.Event()
+    archive_started = Event()
+    allow_archive = Event()
 
-    async def memory_save(path: str, content: str, mode: str) -> str:
-        save_started.set()
-        await allow_save.wait()
-        return f"Saved to {path} (0 chunks indexed)."
+    from opensquilla.memory import session_flush as session_flush_module
 
-    registry.register(
-        ToolSpec(
-            name="memory_save",
-            description="Save memory",
-            parameters={
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-                "mode": {"type": "string"},
-            },
-            required=["path", "content", "mode"],
-        ),
-        memory_save,
+    real_archive_writer = session_flush_module.write_raw_fallback_archive
+
+    def archive_writer(*args: Any, **kwargs: Any) -> Any:
+        archive_started.set()
+        assert allow_archive.wait(timeout=2.0)
+        return real_archive_writer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_flush_module,
+        "write_raw_fallback_archive",
+        archive_writer,
     )
     try:
         session_key = "agent:main:webchat:s1"
@@ -846,6 +883,7 @@ async def test_build_flush_service_receipt_uses_session_id_captured_before_rotat
             provider_selector=SimpleNamespace(resolve=lambda: None),
             config=GatewayConfig(),
             session_manager=session_manager,
+            memory_managers={"main": SimpleNamespace(workspace_dir=tmp_path)},
         )
 
         task = asyncio.create_task(
@@ -855,12 +893,12 @@ async def test_build_flush_service_receipt_uses_session_id_captured_before_rotat
                 agent_id="main",
             )
         )
-        await asyncio.wait_for(save_started.wait(), timeout=2.0)
+        await asyncio.wait_for(asyncio.to_thread(archive_started.wait), timeout=2.0)
         rotated, did_rotate = await session_manager.apply_intent(
             session_key,
             SessionIntent.RESET_SAME_KEY,
         )
-        allow_save.set()
+        allow_archive.set()
         receipt = await task
         rows = await storage.list_memory_durable_receipts(session_key=session_key)
 
@@ -906,6 +944,7 @@ async def test_build_flush_service_receipts_distinguish_same_window_different_co
             provider_selector=SimpleNamespace(resolve=lambda: None),
             config=GatewayConfig(),
             session_manager=session_manager,
+            memory_managers={"main": SimpleNamespace(workspace_dir=tmp_path)},
         )
 
         first = await service.execute(

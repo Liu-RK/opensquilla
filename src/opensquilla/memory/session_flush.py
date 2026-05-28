@@ -15,12 +15,14 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
+from opensquilla.memory.archive import RawArchiveWriteResult, write_raw_fallback_archive
 from opensquilla.memory.flush import (
     build_flush_user_prompt_with_audit,
     dump_transcript_excerpt_with_audit,
@@ -96,6 +98,8 @@ CandidateKind = Literal[
 ]
 OutputCoverageStatus = Literal["ok", "coverage_warning", "unverifiable"]
 ObligationStatus = Literal["ok", "backfilled", "coverage_warning", "unverifiable"]
+ArchiveWorkspaceResolver = Callable[[str], str | Path | Awaitable[str | Path | None] | None]
+ArchiveWriter = Callable[..., RawArchiveWriteResult]
 DEFAULT_SEGMENT_MAX_CHARS = 8_000
 DEFAULT_FLUSH_EXTRACTION_MAX_TOKENS = 3072
 DEFAULT_SEGMENT_EXTRACTION_CONCURRENCY = 4
@@ -1946,6 +1950,8 @@ class SessionFlushService:
         receipt_writer: Callable[..., Any] | None = None,
         session_identity_resolver: Callable[[str], Any] | None = None,
         checkpoint_exists_resolver: Callable[[str, str | None], Any] | None = None,
+        archive_workspace_resolver: ArchiveWorkspaceResolver | None = None,
+        archive_writer: ArchiveWriter | None = None,
     ) -> None:
         self._provider_selector = provider_selector
         self._tool_registry = tool_registry
@@ -1955,9 +1961,22 @@ class SessionFlushService:
         self._receipt_writer = receipt_writer
         self._session_identity_resolver = session_identity_resolver
         self._checkpoint_exists_resolver = checkpoint_exists_resolver
+        self._archive_workspace_resolver = archive_workspace_resolver
+        self._archive_writer = archive_writer or write_raw_fallback_archive
         self._extraction_stats_by_session: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_extraction_stats: dict[str, Any] = {}
         self._raw_fallback_receipts: dict[tuple[str, str, str, str], FlushReceipt] = {}
+
+    async def _archive_workspace_for_agent(self, agent_id: str) -> Path | None:
+        resolver = self._archive_workspace_resolver
+        if resolver is None:
+            return None
+        value = resolver(agent_id)
+        if inspect.isawaitable(value):
+            value = await value
+        if value is None:
+            return None
+        return Path(value).expanduser()
 
     def last_extraction_stats(
         self,
@@ -3163,7 +3182,11 @@ class SessionFlushService:
         checkpoint_exists: bool | None = None,
     ) -> FlushReceipt:
         error_payload = _raw_error_payload(raw_error)
-        archive_status = result_status or _raw_fallback_result_status(reason)
+        archive_status = result_status or (
+            "ok_archive_only"
+            if reason == "timeout" and raw_error is None
+            else _raw_fallback_result_status(reason)
+        )
         self._record_extraction_stats(
             provider=None,
             agent_id=agent_id,
@@ -3181,13 +3204,6 @@ class SessionFlushService:
             },
         )
         t0 = time.monotonic()
-        ts = int(datetime.now(UTC).timestamp())
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        # Write raw-dump fallbacks under a dot-prefix sidecar so the memory
-        # sync_manager / retention scanner skips them automatically. Anything
-        # under ``memory/`` root (no dot-prefix) is indexed and would re-enter
-        # retrieval as a curated fact, contradicting the raw-dump contract.
-        path = f"memory/.raw_fallbacks/{today}-reset-{ts}.md"
         excerpt = dump_transcript_excerpt_with_audit(messages, max_chars=32_000)
         body = excerpt.text
         header = f"# Raw flush ({reason})\n\n"
@@ -3205,28 +3221,16 @@ class SessionFlushService:
                 },
             )
             return cached
-        _ctx_token = current_tool_context.set(_flush_tool_context(agent_id, source_name="raw-dump"))
-        try:
-            result = await self._tool_handler(
-                ToolCall(
-                    tool_use_id=f"flush-raw-{ts}",
-                    tool_name="memory_save",
-                    arguments={"path": path, "content": header + body, "mode": "append"},
-                )
-            )
-        finally:
-            current_tool_context.reset(_ctx_token)
-        if getattr(result, "is_error", False):
-            result_text = str(
-                getattr(result, "content", "memory_save failed") or "memory_save failed"
-            )
+
+        archive_content = header + body
+
+        async def _archive_failed_receipt(result_text: str) -> FlushReceipt:
             logger.error(
-                "session_flush.raw_fallback_save_failed",
+                "session_flush.raw_fallback_archive_failed",
                 extra={
                     "reason": reason,
                     "agent_id": agent_id,
                     "session_key": session_key,
-                    "path": path,
                     "error": result_text,
                 },
             )
@@ -3237,7 +3241,7 @@ class SessionFlushService:
                 message_count=len(messages),
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 raw_reason=None,
-                error=f"raw fallback memory_save failed: {result_text}",
+                error=f"raw fallback archive write failed: {result_text}",
                 result_status="archive_failed",
                 content_hash=fingerprint,
                 **error_payload,
@@ -3256,6 +3260,24 @@ class SessionFlushService:
                     checkpoint_exists=checkpoint_exists,
                 )
             return receipt
+
+        try:
+            workspace = await self._archive_workspace_for_agent(agent_id)
+            if workspace is None:
+                return await _archive_failed_receipt("archive workspace is not configured")
+            archive_result = await asyncio.to_thread(
+                self._archive_writer,
+                workspace,
+                content=archive_content,
+                reason=reason,
+                session_key=session_key,
+            )
+        except Exception as exc:
+            result_text = str(exc) or exc.__class__.__name__
+            return await _archive_failed_receipt(result_text)
+
+        path = archive_result.relative_path
+        fingerprint = archive_result.content_hash
         receipt = FlushReceipt(
             mode="raw",
             flushed_paths=[path],

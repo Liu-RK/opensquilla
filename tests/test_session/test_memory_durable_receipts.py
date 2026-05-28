@@ -372,11 +372,7 @@ async def test_session_flush_repair_receipt_writer_records_raw_fallback_in_ledge
         session_id = "session-1"
 
         async def handler(call: ToolCall) -> ToolResult:
-            return ToolResult(
-                tool_use_id=call.tool_use_id,
-                tool_name=call.tool_name,
-                content="Saved to memory/.raw_fallbacks/raw.md (0 chunks indexed).",
-            )
+            raise AssertionError(f"raw fallback must not call {call.tool_name}")
 
         async def receipt_writer(receipt: FlushReceipt, **row: Any) -> None:
             await storage.upsert_memory_durable_receipt(
@@ -402,6 +398,7 @@ async def test_session_flush_repair_receipt_writer_records_raw_fallback_in_ledge
             ),
             tool_handler=handler,
             receipt_writer=receipt_writer,
+            archive_workspace_resolver=lambda _agent_id: tmp_path,
         )
 
         receipt = await service.execute(
