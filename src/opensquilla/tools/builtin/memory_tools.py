@@ -110,26 +110,6 @@ def _is_memory_source_path(path: str) -> bool:
     return is_memory_source_path(path)
 
 
-def _is_raw_fallback_save_path(path: str) -> bool:
-    """Return True for paths under the ``memory/.raw_fallbacks/`` sidecar.
-
-    Raw-dump fallback files (written by ``SessionFlushService._raw_dump_fallback``
-    when both LLM flush and the curated path fail) live under a dot-prefix
-    sidecar so the memory sync_manager scanner skips them — but the writer
-    itself still goes through ``memory_save`` for unified file-write
-    semantics. This predicate carves a narrow exception in the source-path
-    gate for that single sidecar; nothing else dot-prefixed is writable.
-    """
-    rel = Path(path)
-    return (
-        not rel.is_absolute()
-        and not any(part in {"", ".", ".."} for part in rel.parts)
-        and len(rel.parts) >= 3
-        and rel.parts[:2] == ("memory", ".raw_fallbacks")
-        and rel.suffix == ".md"
-    )
-
-
 def _is_checkpoint_sidecar_path(path: str) -> bool:
     """Return True for durable checkpoint sidecar JSONL paths."""
     rel = Path(path)
@@ -143,14 +123,8 @@ def _is_checkpoint_sidecar_path(path: str) -> bool:
 
 
 def _is_memory_save_path(path: str) -> bool:
-    """Return True for writable memory files.
-
-    Save targets must be readable/searchable memory sources OR the raw-dump
-    fallback sidecar (``memory/.raw_fallbacks/``). Bootstrap profile files
-    such as USER.md and AGENTS.md are edited through agent-file or
-    filesystem surfaces, not memory_save.
-    """
-    return _is_memory_source_path(path) or _is_raw_fallback_save_path(path)
+    """Return True for model-callable writable memory files."""
+    return _is_memory_source_path(path)
 
 
 _MEMORY_SEARCH_DEFAULT_RESULTS: Final[int] = DEFAULT_MEMORY_SEARCH_RESULTS
@@ -442,9 +416,7 @@ def create_memory_tools(
 
     def _validate_memory_save_target(path: str, mode: str) -> None:
         if not _is_memory_save_path(path):
-            raise ToolError(
-                "invalid memory path. Use a memory source file: MEMORY.md or memory/**/*.md."
-            )
+            raise ToolError(f"invalid memory path. {_MEMORY_SOURCE_PATH_HINT}")
         if path == "MEMORY.md" and mode != "replace":
             raise ToolError(
                 "MEMORY.md must use mode='replace'. "
@@ -491,13 +463,7 @@ def create_memory_tools(
                 )
 
         max_files = getattr(memory_config, "max_files", 0)
-        is_raw_fallback = False
-        try:
-            rel_path = mem_path.resolve().relative_to(workspace_dir.resolve()).as_posix()
-            is_raw_fallback = _is_raw_fallback_save_path(rel_path)
-        except ValueError:
-            is_raw_fallback = False
-        if max_files > 0 and not mem_path.exists() and not is_raw_fallback:
+        if max_files > 0 and not mem_path.exists():
             file_count = len(list(workspace_dir.rglob("*.md")))
             if file_count >= max_files:
                 raise ToolError(f"max file count reached ({max_files}).")
@@ -561,12 +527,6 @@ def create_memory_tools(
                 continue
 
             try:
-                if _is_raw_fallback_save_path(snapshot.path):
-                    # Raw-dump sidecar paths are never indexed (F2); rollback
-                    # only needs to restore disk content, which already
-                    # happened above.
-                    statuses.append("restored")
-                    continue
                 if snapshot.existed:
                     await r.store.index_file(
                         path=snapshot.path,
@@ -623,19 +583,11 @@ def create_memory_tools(
                 _write_content(mem_path, content, plan.mode)
                 written_content = mem_path.read_text(encoding="utf-8")
                 touched_paths.add(plan.path)
-                is_raw_fallback = _is_raw_fallback_save_path(plan.path)
-                if is_raw_fallback:
-                    # Raw-dump fallback files live under ``memory/.raw_fallbacks/``
-                    # explicitly to escape retrieval. Skipping inline indexing
-                    # here matches the sync_manager dot-prefix exclusion so the
-                    # file never enters the store at write-time either. (F2)
-                    chunks_by_path[plan.path] = 0
-                else:
-                    chunks_by_path[plan.path] = await r.store.index_file(
-                        path=plan.path,
-                        content=written_content,
-                        source=MemorySource.memory,
-                    )
+                chunks_by_path[plan.path] = await r.store.index_file(
+                    path=plan.path,
+                    content=written_content,
+                    source=MemorySource.memory,
+                )
             return chunks_by_path
         except Exception as exc:
             rollback_status = await _rollback_snapshots(r, snapshots, touched_paths)
