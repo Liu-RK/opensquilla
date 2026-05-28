@@ -52,19 +52,20 @@ class ProgressWatchdog:
             self._reset_progress_sensitive_counts()
             return ProgressDecision("observe", "progress")
 
-        tool_decision = self._record_repeated_tool_error(observation.tool_error_signature)
+        tool_decision = self._record_repeated_tool_error(observation)
         if tool_decision is not None:
             return tool_decision
 
-        provider_decision = self._record_repeated_provider_failure(
-            observation.provider_failure_signature
-        )
+        provider_decision = self._record_repeated_provider_failure(observation)
         if provider_decision is not None:
             return provider_decision
 
         return ProgressDecision("observe", "no_signal")
 
-    def _record_repeated_tool_error(self, signature: str | None) -> ProgressDecision | None:
+    def _record_repeated_tool_error(
+        self, observation: ProgressObservation
+    ) -> ProgressDecision | None:
+        signature = observation.tool_error_signature
         if not signature:
             return None
         if signature == self._last_tool_error:
@@ -76,12 +77,13 @@ class ProgressWatchdog:
             return None
         return self._decision(
             "repeated_tool_error",
-            {"signature": signature, "count": self._tool_error_count},
+            self._decision_details(observation, signature, self._tool_error_count),
         )
 
     def _record_repeated_provider_failure(
-        self, signature: str | None
+        self, observation: ProgressObservation
     ) -> ProgressDecision | None:
+        signature = observation.provider_failure_signature
         if not signature:
             return None
         if signature == self._last_provider_failure:
@@ -93,8 +95,21 @@ class ProgressWatchdog:
             return None
         return self._decision(
             "repeated_provider_failure",
-            {"signature": signature, "count": self._provider_failure_count},
+            self._decision_details(observation, signature, self._provider_failure_count),
         )
+
+    def _decision_details(
+        self,
+        observation: ProgressObservation,
+        signature: str,
+        count: int,
+    ) -> dict[str, Any]:
+        return {
+            "signature": signature,
+            "count": count,
+            "iteration": observation.iteration,
+            "provider_call_count": observation.provider_call_count,
+        }
 
     def _decision(self, reason: str, details: dict[str, Any]) -> ProgressDecision:
         if self.observe_only:

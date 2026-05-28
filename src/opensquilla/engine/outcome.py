@@ -100,13 +100,6 @@ def outcome_from_error(
     )
 
 
-def outcome_from_error_event(event: Any) -> TurnOutcome:
-    return outcome_from_error(
-        code=getattr(event, "code", None),
-        message=getattr(event, "message", None),
-    )
-
-
 def turn_outcome_details(outcome: TurnOutcome) -> dict[str, Any]:
     return {"turn_outcome": outcome.to_dict()}
 

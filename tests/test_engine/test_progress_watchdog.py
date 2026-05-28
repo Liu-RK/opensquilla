@@ -32,6 +32,8 @@ def test_progress_watchdog_warns_in_observe_only_mode() -> None:
     assert decision.action == "warn"
     assert decision.reason == "repeated_tool_error"
     assert decision.details["count"] == 2
+    assert decision.details["iteration"] == 2
+    assert decision.details["provider_call_count"] == 0
 
 
 def test_progress_watchdog_blocks_only_when_enabled() -> None:
