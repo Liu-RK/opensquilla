@@ -986,9 +986,14 @@ def test_router_fx_live_routes_keep_random_chase_animation() -> None:
     handler_start = source.index("async function _handleRouterDecision(payload) {")
     handler_end = source.index("  // History-load entry point", handler_start)
     handler_body = source[handler_start:handler_end]
+    subscription_start = source.index("function _subscribeRpcEvents() {")
+    subscription_end = source.index("    // Text delta: accumulate into streaming bubble", subscription_start)
+    subscription_body = source[subscription_start:subscription_end]
 
     assert "function _routerFxShouldAnimateIdentity" not in source
     assert "shouldAnimate" not in handler_body
+    assert "_rpc.on('session.event.router_decision'" in subscription_body
+    assert "_handleRouterDecision(payload);" in subscription_body
     assert "if (observeMode)" in handler_body
     assert "_animateRouterFx(wrap, winnerIdx)" in handler_body
     assert handler_body.index("if (observeMode)") < handler_body.index(
@@ -998,7 +1003,13 @@ def test_router_fx_live_routes_keep_random_chase_animation() -> None:
 
 def test_router_fx_history_reuses_settled_strip_for_same_turn_identity() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
+    history_start = source.index("async function _loadHistory() {")
+    history_end = source.index("  /* ── Send Message", history_start)
+    history_body = source[history_start:history_end]
 
+    assert "function _routerFxUserMessageForAssistant(referenceAssistant) {" in source
+    assert "const userMsg = _routerFxUserMessageForAssistant(div);" in history_body
+    assert "const userMsg = _routerFxLastUserMessage();" not in history_body
     assert "el.dataset.sessionKey === (_sessionKey || '') && el.dataset.turnIndex" in source
     assert "const routerIdentity = _routerFxUsageIdentity(savedUsage);" in source
     assert "existingStrip.dataset.routerIdentity === routerIdentity" in source

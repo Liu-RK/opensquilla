@@ -3102,23 +3102,25 @@ const ChatView = (() => {
     return null;
   }
 
+  function _routerFxUserMessageForAssistant(referenceAssistant) {
+    if (!referenceAssistant) return null;
+    let prev = referenceAssistant.previousElementSibling;
+    while (prev) {
+      if (prev.classList && (prev.classList.contains('user')
+          || prev.getAttribute('data-history-role') === 'user')) {
+        return prev;
+      }
+      prev = prev.previousElementSibling;
+    }
+    return null;
+  }
+
   function _routerFxInsertAnchored(wrap, referenceAssistant) {
     if (!_thread) return;
     // Prefer the user msg that immediately precedes the assistant
     // turn we're about to render (during history rebuild we have a
     // concrete reference div; live, we don't).
-    let anchor = null;
-    if (referenceAssistant) {
-      let prev = referenceAssistant.previousElementSibling;
-      while (prev) {
-        if (prev.classList && (prev.classList.contains('user')
-            || prev.getAttribute('data-history-role') === 'user')) {
-          anchor = prev;
-          break;
-        }
-        prev = prev.previousElementSibling;
-      }
-    }
+    let anchor = _routerFxUserMessageForAssistant(referenceAssistant);
     if (!anchor) anchor = _routerFxLastUserMessage();
     if (anchor && anchor.parentNode === _thread) {
       if (anchor.nextSibling) {
@@ -3883,7 +3885,7 @@ const ChatView = (() => {
               // circuit rebuild; everything else was already wiped
               // by the cleanup above and needs to be re-inserted
               // with the seed-cached layout.
-              const userMsg = _routerFxLastUserMessage();
+              const userMsg = _routerFxUserMessageForAssistant(div);
               const placed = userMsg && userMsg.nextSibling;
               const existingStrip = (placed && placed.classList
                   && placed.classList.contains('router-fx')) ? placed : null;
