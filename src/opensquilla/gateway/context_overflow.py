@@ -44,8 +44,9 @@ from opensquilla.session.compaction_lifecycle import (
     COMPACTION_TRIGGERED_EVENT,
     CompactionLifecycleResult,
     compaction_lifecycle_payload,
+    compaction_memory_status,
     compaction_result_payload,
-    flush_receipt_allows_destructive_compaction,
+    durable_receipt_allows_destructive_compaction,
     flush_receipt_is_successful_flush,
     flush_receipt_status_for_compaction,
     new_compaction_id,
@@ -117,10 +118,20 @@ def _estimate_payload_tokens(message: str, transcript: list[Any]) -> int:
 
 
 def _build_refusal_envelope(
-    estimated: int, budget: int, reason: str = "context_overflow"
+    estimated: int,
+    budget: int,
+    reason: str = "context_overflow",
+    *,
+    error_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shape the REFUSE error payload the way UI/tool-error callers expect."""
 
+    error = {
+        "code": "context_overflow",
+        "reason": reason,
+    }
+    if error_details:
+        error.update(error_details)
     return {
         "status": "error",
         "error_class": "context_overflow",
@@ -132,10 +143,7 @@ def _build_refusal_envelope(
         "estimated_tokens": estimated,
         "budget_tokens": budget,
         "reason": reason,
-        "error": {
-            "code": "context_overflow",
-            "reason": reason,
-        },
+        "error": error,
     }
 
 
@@ -332,9 +340,9 @@ async def _record_checkpoint_before_compaction(
     *,
     turn_id: str,
     source: str,
-) -> None:
+) -> bool:
     if not transcript:
-        return
+        return False
     method = getattr(type(session_manager), "record_memory_checkpoint", None)
     if method is None:
         method = getattr(
@@ -343,13 +351,14 @@ async def _record_checkpoint_before_compaction(
             lambda *_: None,
         )("record_memory_checkpoint")
     if not callable(method):
-        return
-    await session_manager.record_memory_checkpoint(
+        return False
+    receipt = await session_manager.record_memory_checkpoint(
         session_key,
         list(transcript),
         turn_id=turn_id,
         source=source,
     )
+    return durable_receipt_allows_destructive_compaction(receipt)
 
 
 # Envelope shape note:
@@ -452,6 +461,7 @@ async def apply_context_overflow_policy(
     if session_manager is not None:
         flush_status = "not_required"
         checkpoint_failed = False
+        checkpoint_saved = False
         try:
             marker_has = getattr(compaction_marker, "has_compacted_this_turn", None)
             if callable(marker_has) and marker_has(session_key):
@@ -486,7 +496,7 @@ async def apply_context_overflow_policy(
                 ),
             )
             try:
-                await _record_checkpoint_before_compaction(
+                checkpoint_saved = await _record_checkpoint_before_compaction(
                     session_manager,
                     session_key,
                     list(transcript or []),
@@ -507,10 +517,15 @@ async def apply_context_overflow_policy(
                     outcome.flush_receipt,
                     config,
                 )
+            memory_status = compaction_memory_status(
+                outcome.flush_receipt,
+                deterministic_receipt_safe=checkpoint_saved,
+                required=pre_compaction_flush_enabled(config),
+            )
             if (
                 pre_compaction_flush_enabled(config)
                 and pre_compaction_flush_requires_safe_receipt(config)
-                and not flush_receipt_allows_destructive_compaction(outcome.flush_receipt)
+                and not memory_status.allows_destructive_compaction
             ):
                 outcome.reason = "compaction_flush_failed"
                 outcome.tokens_after = estimated
@@ -519,6 +534,10 @@ async def apply_context_overflow_policy(
                     estimated,
                     budget,
                     outcome.reason,
+                    error_details={
+                        "memory_safety_status": memory_status.safety_status,
+                        "semantic_memory_status": memory_status.semantic_status,
+                    },
                 )
                 outcome.lifecycle = CompactionLifecycleResult(
                     compacted=False,
@@ -545,6 +564,8 @@ async def apply_context_overflow_policy(
                     remaining_budget_tokens=outcome.remaining_budget_tokens,
                     context_window_tokens=budget,
                     flush_receipt_status=flush_status,
+                    memory_safety_status=memory_status.safety_status,
+                    semantic_memory_status=memory_status.semantic_status,
                     **compaction_lifecycle_payload(
                         compaction_id,
                         COMPACTION_TRIGGERED_EVENT,

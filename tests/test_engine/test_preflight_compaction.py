@@ -64,6 +64,15 @@ def _make_assistant_reasoning_entry(content: str, reasoning_content: str) -> Tra
     )
 
 
+def _checkpoint_receipt() -> SimpleNamespace:
+    return SimpleNamespace(
+        scope="checkpoint",
+        status="checkpoint_saved",
+        source_path="memory/.checkpoints/s/turn.jsonl",
+        content_hash="h1",
+    )
+
+
 def _flush_receipt(**overrides):
     payload = {
         "mode": "llm",
@@ -329,6 +338,7 @@ async def test_preflight_checkpoint_runs_before_compact() -> None:
     )
     mock_sm.record_memory_checkpoint = AsyncMock(
         side_effect=lambda *args, **kwargs: calls.append("checkpoint")
+        or _checkpoint_receipt()
     )
 
     runner = TurnRunner(provider_selector=MagicMock(), session_manager=mock_sm)
@@ -349,6 +359,7 @@ async def test_preflight_compacts_when_distill_fails_after_checkpoint() -> None:
     mock_sm.get_transcript = AsyncMock(return_value=entries)
     mock_sm.record_memory_checkpoint = AsyncMock(
         side_effect=lambda *args, **kwargs: calls.append("checkpoint")
+        or _checkpoint_receipt()
     )
     mock_sm.compact = AsyncMock(
         side_effect=lambda *args, **kwargs: calls.append("compact") or "summary text"
