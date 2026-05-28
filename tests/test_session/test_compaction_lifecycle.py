@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from opensquilla.session.compaction_lifecycle import (
+    durable_receipt_allows_destructive_compaction,
     flush_compaction_decision,
     flush_receipt_allows_destructive_compaction,
     flush_receipt_status_for_compaction,
@@ -36,6 +37,23 @@ def test_backfilled_obligations_remain_destructive_safe() -> None:
 
     assert flush_receipt_allows_destructive_compaction(receipt) is True
     assert flush_compaction_decision(receipt, safety_mode="protect") == "safe_destructive"
+
+
+def test_checkpoint_receipt_allows_destructive_compaction() -> None:
+    receipt = {
+        "scope": "checkpoint",
+        "status": "checkpoint_saved",
+        "source_path": "memory/.checkpoints/agent-main-webchat-abc/turn-1.jsonl",
+        "content_hash": "h1",
+    }
+
+    assert durable_receipt_allows_destructive_compaction(receipt) is True
+
+
+def test_orphaned_checkpoint_receipt_is_not_destructive_safe() -> None:
+    receipt = {"scope": "checkpoint", "status": "receipt_orphaned"}
+
+    assert durable_receipt_allows_destructive_compaction(receipt) is False
 
 
 def test_missing_or_raw_receipt_enters_degraded_forensic_in_protect_mode() -> None:

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from typing import Any, cast
 
@@ -36,12 +37,14 @@ from opensquilla.session.compaction_lifecycle import (
     COMPACTION_TRIGGERED_EVENT,
     compaction_lifecycle_payload,
     compaction_result_payload,
+    durable_receipt_allows_destructive_compaction,
     flush_receipt_allows_destructive_compaction,
     flush_receipt_is_successful_flush,
     flush_receipt_status_for_compaction,
     flush_receipt_to_dict,
     new_compaction_id,
     pre_compaction_flush_enabled,
+    pre_compaction_flush_requires_safe_receipt,
 )
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id
 from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
@@ -66,6 +69,41 @@ def _accepts_keyword_arg(func: Any, name: str) -> bool:
     return name in params or any(
         param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
     )
+
+
+def _receipt_field(receipt: Any, name: str) -> Any:
+    if isinstance(receipt, Mapping):
+        return receipt.get(name)
+    return getattr(receipt, name, None)
+
+
+async def _latest_session_checkpoint_receipt(
+    storage: Any,
+    session_key: str,
+    session_id: str | None,
+) -> Any | None:
+    list_receipts = getattr(storage, "list_memory_durable_receipts", None)
+    if not callable(list_receipts):
+        return None
+    receipts = await list_receipts(session_key=session_key, limit=100)
+    for receipt in reversed(receipts):
+        if _receipt_field(receipt, "scope") != "checkpoint":
+            continue
+        if session_id is not None and _receipt_field(receipt, "session_id") != session_id:
+            continue
+        return receipt
+    return None
+
+
+async def _durable_receipt_allows_current_destructive_compaction(
+    storage: Any,
+    session_key: str,
+    session_id: str | None,
+) -> bool:
+    receipt = await _latest_session_checkpoint_receipt(storage, session_key, session_id)
+    return durable_receipt_allows_destructive_compaction(receipt)
+
+
 _attachment_media_type = _attachment_ingest.attachment_media_type
 _normalize_attachments = _attachment_ingest.normalize_attachments
 _sniff_mime_from_bytes = _attachment_ingest.sniff_mime_from_bytes
@@ -1455,7 +1493,13 @@ async def _handle_sessions_reset(params: dict | None, ctx: RpcContext) -> dict[s
                 },
             ) from exc
 
-        if not flush_receipt_allows_destructive_compaction(receipt):
+        if not flush_receipt_allows_destructive_compaction(
+            receipt
+        ) and not await _durable_receipt_allows_current_destructive_compaction(
+            storage,
+            key,
+            previous_session_id,
+        ):
             flush_status = flush_receipt_status_for_compaction(receipt, ctx.config)
             raise RpcHandlerError(
                 code="flush_disk_error",
@@ -1547,7 +1591,7 @@ def _reset_response(
         "previous_session_id": previous_session_id,
         "session_id": session_id,
         "epoch": epoch,
-        "flush_receipt": receipt.to_dict(),
+        "flush_receipt": flush_receipt_to_dict(receipt),
     }
 
 
@@ -1739,6 +1783,36 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
                                 flush_receipt_status=flush_receipt_status,
                                 flush_receipt=flush_receipt_to_dict(receipt),
                             )
+
+            if (
+                flush_enabled
+                and transcript
+                and pre_compaction_flush_requires_safe_receipt(ctx.config)
+                and not flush_receipt_allows_destructive_compaction(receipt)
+            ):
+                durable_receipt_safe = (
+                    storage is not None
+                    and await _durable_receipt_allows_current_destructive_compaction(
+                        storage,
+                        key,
+                        getattr(session, "session_id", None) if session else None,
+                    )
+                )
+                if not durable_receipt_safe:
+                    raise RpcHandlerError(
+                        code="CONTEXT_FLUSH_FAILED",
+                        message=(
+                            "Manual compaction aborted: flush receipt is not sufficient "
+                            "for destructive compaction."
+                        ),
+                        details={
+                            "flush_receipt": flush_receipt_to_dict(receipt),
+                            "key": key,
+                            "session_id": getattr(session, "session_id", None),
+                            "reason": "destructive_manual_compact_requires_safe_flush",
+                            "flush_receipt_status": flush_receipt_status,
+                        },
+                    )
 
             compaction_config = build_compaction_config_from_provider(
                 _resolve_compaction_provider(ctx, session),
@@ -1982,7 +2056,13 @@ async def _handle_sessions_truncate(params: dict | None, ctx: RpcContext) -> dic
                         },
                     ) from exc
 
-                if not flush_receipt_allows_destructive_compaction(receipt):
+                if not flush_receipt_allows_destructive_compaction(
+                    receipt
+                ) and not await _durable_receipt_allows_current_destructive_compaction(
+                    storage,
+                    key,
+                    previous_session_id,
+                ):
                     flush_status = flush_receipt_status_for_compaction(receipt, ctx.config)
                     raise RpcHandlerError(
                         code="CONTEXT_FLUSH_FAILED",
@@ -2018,7 +2098,7 @@ async def _handle_sessions_truncate(params: dict | None, ctx: RpcContext) -> dic
             "after_count": result["after_count"],
         }
         if receipt is not None:
-            payload["flush_receipt"] = receipt.to_dict()
+            payload["flush_receipt"] = flush_receipt_to_dict(receipt)
         return payload
 
     if lock is None:

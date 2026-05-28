@@ -272,6 +272,19 @@ def flush_receipt_allows_destructive_compaction(receipt: Any) -> bool:
     return not _receipt_value(receipt, "obligation_missing_ids", [])
 
 
+def durable_receipt_allows_destructive_compaction(receipt: Any) -> bool:
+    scope = str(_receipt_value(receipt, "scope", "") or "")
+    status = str(_receipt_value(receipt, "status", "") or "")
+    if scope == "checkpoint":
+        source_path = str(_receipt_value(receipt, "source_path", "") or "")
+        content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+        return status == "checkpoint_saved" and bool(source_path) and bool(content_hash)
+    if scope == "flush":
+        target_path = str(_receipt_value(receipt, "target_path", "") or "")
+        return status == "flush_appended" and bool(target_path)
+    return flush_receipt_allows_destructive_compaction(receipt)
+
+
 def pre_compaction_flush_enabled(config: Any) -> bool:
     from opensquilla.memory.flush_config import is_session_flush_enabled
 
