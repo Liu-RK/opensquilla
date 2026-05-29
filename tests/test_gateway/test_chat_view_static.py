@@ -1009,6 +1009,22 @@ def test_savings_popup_persists_cache_hit_active_to_turn_meta() -> None:
     assert "__savings_ui_suppressed: !!u.__savings_ui_suppressed," in source
 
 
+def test_turn_meta_and_router_share_model_display_normalization() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    attach_start = source.index("function _attachTurnMeta(")
+    attach_end = source.index("    if (hasTokens)", attach_start)
+    attach_body = source[attach_start:attach_end]
+    router_strip_start = source.index("function _routerFxStripProvider(name)")
+    router_strip_end = source.index("  // Promise resolved", router_strip_start)
+    router_strip_body = source[router_strip_start:router_strip_end]
+
+    assert "function _modelDisplayName(name)" in source
+    assert r"return stripped.replace(/-\d{8}$/, '');" in source
+    assert "const displayModel = _modelDisplayName(model);" in attach_body
+    assert "span.textContent = displayModel;" in attach_body
+    assert "return _modelDisplayName(name);" in router_strip_body
+
+
 def test_router_fx_header_names_ai_model_router() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

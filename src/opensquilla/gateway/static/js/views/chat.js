@@ -959,10 +959,11 @@ const ChatView = (() => {
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
     if (hasModel) {
-      const shortModel = model.includes('/') ? model.split('/').pop() : model;
+      const displayModel = _modelDisplayName(model);
       const span = document.createElement('span');
       span.className = 'msg-meta__model';
-      span.textContent = shortModel;
+      span.textContent = displayModel;
+      if (displayModel !== model) span.title = model;
       meta.appendChild(span);
     }
     if (hasTokens) {
@@ -3054,11 +3055,17 @@ const ChatView = (() => {
     _routerFxSlotList = _routerFxSortTiers(_routerFxSlotList.concat([norm]));
   }
 
-  // "z-ai/glm-5.1" -> "glm-5.1"; "claude-opus-4.7" -> "claude-opus-4.7"
-  function _routerFxStripProvider(name) {
+  // Normalize user-facing model labels without changing stored/provider ids.
+  // "z-ai/glm-5.1" -> "glm-5.1"; "glm-5.1-20260406" -> "glm-5.1".
+  function _modelDisplayName(name) {
     if (!name || typeof name !== 'string') return name;
     const idx = name.lastIndexOf('/');
-    return idx >= 0 ? name.slice(idx + 1) : name;
+    const stripped = idx >= 0 ? name.slice(idx + 1) : name;
+    return stripped.replace(/-\d{8}$/, '');
+  }
+
+  function _routerFxStripProvider(name) {
+    return _modelDisplayName(name);
   }
 
   // Promise resolved when _loadFeatureToggles has populated tier
@@ -3360,7 +3367,8 @@ const ChatView = (() => {
       // operator's wired-up model roster. Winner detection reads the in-memory
       // _fxGridCells array (below), not any DOM attribute, so the routing
       // result still lands on the right cell without exposing the rest.
-      cell.innerHTML = `<span class="nm">${_esc(cellInfo.displayName)}</span>`;
+      // title surfaces the full name on hover when a long one is ellipsized.
+      cell.innerHTML = `<span class="nm" title="${_esc(cellInfo.displayName)}">${_esc(cellInfo.displayName)}</span>`;
       grid.appendChild(cell);
     });
     const selector = document.createElement('div');
