@@ -645,7 +645,7 @@ async def test_auto_summarize_uses_fallback_summary_when_context_cannot_be_verif
 
 
 @pytest.mark.asyncio
-async def test_auto_summarize_compacts_after_degraded_flush_receipt() -> None:
+async def test_auto_summarize_compacts_while_protect_flush_runs_in_background() -> None:
     cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10, flush_enabled=True)
     sm = _FakeSessionManager(_history(6, 40))
     flush_service = SimpleNamespace(
@@ -675,11 +675,13 @@ async def test_auto_summarize_compacts_after_degraded_flush_receipt() -> None:
     assert outcome.retried is True
     assert outcome.reason is None
     assert outcome.refusal is None
-    assert outcome.flush_receipt is not None
+    assert outcome.flush_receipt is None
     assert outcome.lifecycle is not None
     assert outcome.lifecycle.flush_receipt is outcome.flush_receipt
     assert outcome.lifecycle.refused is False
     assert sm.compact_calls == [("agent:main:s-flush", 10, None)]
+    await asyncio.sleep(0)
+    flush_service.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -707,11 +709,12 @@ async def test_auto_summarize_compacts_when_distill_fails_after_checkpoint() -> 
     assert outcome.flush_receipt is None
     assert sm.calls == ["checkpoint", "compact"]
     assert sm.compact_calls == [("agent:main:s-distill-fails", 10, None)]
+    await asyncio.sleep(0)
     assert flush_service.execute.await_args.kwargs["message_window"] == 0
 
 
 @pytest.mark.asyncio
-async def test_auto_summarize_strict_semantic_failure_after_checkpoint_compacts() -> None:
+async def test_auto_summarize_strict_semantic_failure_after_checkpoint_refuses() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
         budget=10,
@@ -747,11 +750,12 @@ async def test_auto_summarize_strict_semantic_failure_after_checkpoint_compacts(
     )
 
     assert outcome.over_budget is True
-    assert outcome.summarized is True
-    assert outcome.retried is True
-    assert outcome.reason is None
-    assert outcome.refusal is None
-    assert sm.calls == ["checkpoint", "compact"]
+    assert outcome.summarized is False
+    assert outcome.retried is False
+    assert outcome.reason == "compaction_flush_failed"
+    assert outcome.refusal is not None
+    assert sm.calls == ["checkpoint"]
+    assert sm.compact_calls == []
 
 
 @pytest.mark.asyncio
@@ -889,6 +893,8 @@ async def test_auto_summarize_protect_flush_receipt_degrades_without_refusal() -
     assert sm.compact_calls == [("agent:main:s-protect-flush", 10, None)]
     assert sm.compact_kwargs[0]["flush_receipt_status"] == "degraded_forensic"
     assert sm.compact_kwargs[0]["trigger_reason"] == "gateway_auto_summarize"
+    await asyncio.sleep(0)
+    flush_service.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -940,7 +946,7 @@ async def test_auto_summarize_compacts_when_flush_service_is_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_summarize_compacts_after_foreground_flush_grace_timeout() -> None:
+async def test_auto_summarize_compacts_while_slow_flush_runs_in_background() -> None:
     cfg = _cfg(
         ContextOverflowPolicy.AUTO_SUMMARIZE,
         budget=10,
@@ -976,7 +982,7 @@ async def test_auto_summarize_compacts_after_foreground_flush_grace_timeout() ->
         flush_service=flush_service,
     )
 
-    assert flush_started.is_set()
+    await asyncio.wait_for(flush_started.wait(), timeout=1.0)
     assert outcome.over_budget is True
     assert outcome.summarized is True
     assert outcome.retried is True

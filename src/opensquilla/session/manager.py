@@ -953,6 +953,18 @@ class SessionManager:
             return
         await self._storage.update_summary_flush_receipt_status(summary.id, status)
 
+    async def mark_compaction_flush_receipt_status(
+        self,
+        session_key: str,
+        compaction_id: str,
+        status: str,
+    ) -> int:
+        return await self._storage.update_summary_flush_receipt_status_by_compaction(
+            session_key=canonicalize_session_key(session_key),
+            compaction_id=compaction_id,
+            status=status,
+        )
+
     async def save_context_state(self, state: SessionContextState) -> SessionContextState:
         """Persist portable or provider-specific context state."""
         return await self._storage.save_context_state(state)

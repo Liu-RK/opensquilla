@@ -160,6 +160,7 @@ from opensquilla.session.compaction_lifecycle import (
     flush_receipt_allows_destructive_compaction,
     flush_receipt_is_successful_flush,
     flush_receipt_status_for_compaction,
+    mark_compaction_flush_status_with_retry,
     new_compaction_id,
     pre_compaction_flush_requires_safe_receipt,
 )
@@ -4218,6 +4219,33 @@ class TurnRunner:
         if not transcript:
             return _T3_HANDLED
 
+        compaction_config = None
+        if compaction_provider is not None or compaction_model:
+            from opensquilla.session.compaction import build_compaction_config_from_provider
+
+            compaction_config = build_compaction_config_from_provider(
+                compaction_provider,
+                model_override=compaction_model,
+                compaction_config=getattr(getattr(self, "_config", None), "compaction", None),
+            )
+
+        from opensquilla.session.compaction import CompactionConfig, estimate_entry_replay_tokens
+
+        total_tokens = sum(estimate_entry_replay_tokens(e) for e in transcript)
+        safety_margin = float(
+            getattr(compaction_config or CompactionConfig(), "safety_margin", 1.2) or 1.2
+        )
+        if total_tokens * safety_margin <= context_window_tokens:
+            log.info(
+                "t3_upgrade_compaction.skipped",
+                session_key=session_key,
+                reason="within_budget",
+                total_tokens=total_tokens,
+                context_window_tokens=context_window_tokens,
+                safety_margin=safety_margin,
+            )
+            return _T3_HANDLED
+
         log.info(
             "t3_upgrade_compaction.triggered",
             session_key=session_key,
@@ -4244,11 +4272,15 @@ class TurnRunner:
         )
         flush_receipt = None
         flush_receipt_status = "not_required"
+        requires_safe_receipt = self._pre_compaction_flush_requires_safe_receipt()
         if self._pre_compaction_flush_enabled():
             flush_receipt = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="t3_upgrade_compaction",
+                wait_for_receipt=requires_safe_receipt,
+                turn_id=compaction_id,
+                checkpoint_exists=checkpoint_saved,
             )
             flush_receipt_status = flush_receipt_status_for_compaction(
                 flush_receipt,
@@ -4256,11 +4288,11 @@ class TurnRunner:
             )
             memory_status = compaction_memory_status(
                 flush_receipt,
-                deterministic_receipt_safe=checkpoint_saved,
+                deterministic_receipt_safe=checkpoint_saved and not requires_safe_receipt,
                 required=self._pre_compaction_flush_enabled(),
             )
             if (
-                self._pre_compaction_flush_requires_safe_receipt()
+                requires_safe_receipt
                 and not memory_status.allows_destructive_compaction
             ):
                 log.warning(
@@ -4286,15 +4318,6 @@ class TurnRunner:
                 return _T3_HANDLED
 
         try:
-            compaction_config = None
-            if compaction_provider is not None or compaction_model:
-                from opensquilla.session.compaction import build_compaction_config_from_provider
-
-                compaction_config = build_compaction_config_from_provider(
-                    compaction_provider,
-                    model_override=compaction_model,
-                    compaction_config=getattr(getattr(self, "_config", None), "compaction", None),
-                )
             from opensquilla.session.compaction import call_compact_with_optional_config
 
             compaction_result = None
@@ -4490,11 +4513,15 @@ class TurnRunner:
         )
         flush_receipt = None
         flush_receipt_status = "not_required"
+        requires_safe_receipt = self._pre_compaction_flush_requires_safe_receipt()
         if self._pre_compaction_flush_enabled():
             flush_receipt = await self._await_pre_compaction_flush_grace(
                 transcript,
                 session_key,
                 event_prefix="preflight_compaction",
+                wait_for_receipt=requires_safe_receipt,
+                turn_id=compaction_id,
+                checkpoint_exists=checkpoint_saved,
             )
             flush_receipt_status = flush_receipt_status_for_compaction(
                 flush_receipt,
@@ -4502,11 +4529,11 @@ class TurnRunner:
             )
             memory_status = compaction_memory_status(
                 flush_receipt,
-                deterministic_receipt_safe=checkpoint_saved,
+                deterministic_receipt_safe=checkpoint_saved and not requires_safe_receipt,
                 required=self._pre_compaction_flush_enabled(),
             )
             if (
-                self._pre_compaction_flush_requires_safe_receipt()
+                requires_safe_receipt
                 and not memory_status.allows_destructive_compaction
             ):
                 log.warning(
@@ -4744,6 +4771,9 @@ class TurnRunner:
         session_key: str,
         *,
         event_prefix: str,
+        wait_for_receipt: bool | None = None,
+        turn_id: str | None = None,
+        checkpoint_exists: bool | None = None,
     ) -> Any | None:
         if self._session_flush_service is None:
             log.warning(
@@ -4753,6 +4783,12 @@ class TurnRunner:
             )
             return None
 
+        should_wait = (
+            self._pre_compaction_flush_requires_safe_receipt()
+            if wait_for_receipt is None
+            else bool(wait_for_receipt)
+        )
+        background_timeout = self._pre_compaction_flush_background_timeout_seconds()
         task = self._active_pre_compaction_flush_tasks.get(session_key)
         if task is not None:
             if task.done():
@@ -4770,37 +4806,48 @@ class TurnRunner:
                     return None
                 self._consume_pre_compaction_flush_task(session_key, task, event_prefix)
                 return receipt
-            else:
-                log.debug(
-                    f"{event_prefix}.flush_skipped",
-                    session_key=session_key,
-                    reason="already_running",
-                )
+            log.debug(
+                f"{event_prefix}.flush_skipped",
+                session_key=session_key,
+                reason="already_running",
+                waiting=should_wait,
+            )
+            if not should_wait:
                 return None
 
-        from opensquilla.session.keys import parse_agent_id
+        else:
+            from opensquilla.session.keys import parse_agent_id
 
-        background_timeout = self._pre_compaction_flush_background_timeout_seconds()
-        task = asyncio.create_task(
-            self._session_flush_service.execute(
-                transcript,
-                session_key,
-                agent_id=parse_agent_id(session_key),
-                message_window=0,
-                segment_mode="auto",
-                timeout=background_timeout,
-                raw_capture_policy="required",
+            task = asyncio.create_task(
+                self._session_flush_service.execute(
+                    transcript,
+                    session_key,
+                    agent_id=parse_agent_id(session_key),
+                    message_window=0,
+                    segment_mode="auto",
+                    timeout=background_timeout,
+                    raw_capture_policy="required",
+                    turn_id=turn_id,
+                    checkpoint_exists=checkpoint_exists,
+                )
             )
-        )
-        self._active_pre_compaction_flush_tasks[session_key] = task
-        task.add_done_callback(
-            lambda completed: self._consume_pre_compaction_flush_task(
-                session_key,
-                completed,
-                event_prefix,
-                background=True,
+            self._active_pre_compaction_flush_tasks[session_key] = task
+            task.add_done_callback(
+                lambda completed: self._consume_pre_compaction_flush_task(
+                    session_key,
+                    completed,
+                    event_prefix,
+                    background=True,
+                    compaction_id=turn_id,
+                )
             )
-        )
+            if not should_wait:
+                log.info(
+                    f"{event_prefix}.flush_background_started",
+                    session_key=session_key,
+                    background_timeout_seconds=background_timeout,
+                )
+                return None
 
         grace_timeout = self._pre_compaction_flush_timeout_seconds()
         flush_t0 = time.monotonic()
@@ -4844,6 +4891,7 @@ class TurnRunner:
         event_prefix: str,
         *,
         background: bool = False,
+        compaction_id: str | None = None,
     ) -> None:
         if self._active_pre_compaction_flush_tasks.get(session_key) is not task:
             return
@@ -4859,6 +4907,13 @@ class TurnRunner:
                 error=str(exc),
                 background=background,
             )
+            if background and compaction_id:
+                self._schedule_pre_compaction_flush_status_update(
+                    session_key,
+                    compaction_id,
+                    "failed_retryable",
+                    event_prefix,
+                )
         else:
             self._log_pre_compaction_flush_receipt(
                 event_prefix,
@@ -4867,6 +4922,38 @@ class TurnRunner:
                 duration_ms=getattr(receipt, "duration_ms", 0),
                 background=background,
             )
+            if background and compaction_id:
+                self._schedule_pre_compaction_flush_status_update(
+                    session_key,
+                    compaction_id,
+                    flush_receipt_status_for_compaction(receipt, self._config),
+                    event_prefix,
+                )
+
+    def _schedule_pre_compaction_flush_status_update(
+        self,
+        session_key: str,
+        compaction_id: str,
+        status: str,
+        event_prefix: str,
+    ) -> None:
+        if self._session_manager is None:
+            return
+        mark_status = getattr(self._session_manager, "mark_compaction_flush_receipt_status", None)
+        if not callable(mark_status):
+            return
+        asyncio.create_task(
+            mark_compaction_flush_status_with_retry(
+                mark_status,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=status,
+                log=log,
+                failed_event=f"{event_prefix}.flush_status_update_failed",
+                updated_event=f"{event_prefix}.flush_status_updated",
+                skipped_event=f"{event_prefix}.flush_status_update_skipped",
+            )
+        )
 
     def _log_pre_compaction_flush_receipt(
         self,

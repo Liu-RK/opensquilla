@@ -49,6 +49,7 @@ from opensquilla.session.compaction_lifecycle import (
     durable_receipt_allows_destructive_compaction,
     flush_receipt_is_successful_flush,
     flush_receipt_status_for_compaction,
+    mark_compaction_flush_status_with_retry,
     new_compaction_id,
     pre_compaction_flush_enabled,
     pre_compaction_flush_requires_safe_receipt,
@@ -186,7 +187,40 @@ def _log_auto_summarize_flush_receipt(
     )
 
 
-def _consume_auto_summarize_flush_task(session_key: str, task: asyncio.Task) -> None:
+def _schedule_auto_summarize_flush_status_update(
+    *,
+    session_manager: Any | None,
+    session_key: str,
+    compaction_id: str | None,
+    status: str,
+) -> None:
+    if session_manager is None or not compaction_id:
+        return
+    mark_status = getattr(session_manager, "mark_compaction_flush_receipt_status", None)
+    if not callable(mark_status):
+        return
+    asyncio.create_task(
+        mark_compaction_flush_status_with_retry(
+            mark_status,
+            session_key=session_key,
+            compaction_id=compaction_id,
+            status=status,
+            log=log,
+            failed_event="context_overflow.auto_summarize_flush_status_update_failed",
+            updated_event="context_overflow.auto_summarize_flush_status_updated",
+            skipped_event="context_overflow.auto_summarize_flush_status_update_skipped",
+        )
+    )
+
+
+def _consume_auto_summarize_flush_task(
+    session_key: str,
+    task: asyncio.Task,
+    *,
+    config: GatewayConfig | None = None,
+    session_manager: Any | None = None,
+    compaction_id: str | None = None,
+) -> None:
     try:
         receipt = task.result()
     except asyncio.CancelledError:
@@ -202,12 +236,25 @@ def _consume_auto_summarize_flush_task(session_key: str, task: asyncio.Task) -> 
             background=True,
             error=str(exc),
         )
+        _schedule_auto_summarize_flush_status_update(
+            session_manager=session_manager,
+            session_key=session_key,
+            compaction_id=compaction_id,
+            status="failed_retryable",
+        )
     else:
         _log_auto_summarize_flush_receipt(
             session_key=session_key,
             receipt=receipt,
             background=True,
         )
+        if config is not None:
+            _schedule_auto_summarize_flush_status_update(
+                session_manager=session_manager,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=flush_receipt_status_for_compaction(receipt, config),
+            )
 
 
 async def _await_auto_summarize_flush_grace(
@@ -216,6 +263,10 @@ async def _await_auto_summarize_flush_grace(
     transcript: list[Any],
     session_key: str,
     flush_service: Any | None,
+    session_manager: Any | None = None,
+    wait_for_receipt: bool = False,
+    turn_id: str | None = None,
+    checkpoint_exists: bool | None = None,
 ) -> Any | None:
     if not pre_compaction_flush_enabled(config) or not transcript:
         return None
@@ -242,15 +293,40 @@ async def _await_auto_summarize_flush_grace(
             message_window=0,
             segment_mode="auto",
             raw_capture_policy="required",
+            turn_id=turn_id,
+            checkpoint_exists=checkpoint_exists,
         )
     )
+
+    if not wait_for_receipt:
+        task.add_done_callback(
+            lambda completed: _consume_auto_summarize_flush_task(
+                session_key,
+                completed,
+                config=config,
+                session_manager=session_manager,
+                compaction_id=turn_id,
+            )
+        )
+        log.info(
+            "context_overflow.auto_summarize_flush_background_started",
+            session_key=session_key,
+            background_timeout_seconds=background_timeout,
+        )
+        return None
 
     grace_timeout = _memory_timeout_seconds(config, "flush_timeout_seconds", 15.0)
     try:
         receipt = await asyncio.wait_for(asyncio.shield(task), timeout=grace_timeout)
     except TimeoutError:
         task.add_done_callback(
-            lambda completed: _consume_auto_summarize_flush_task(session_key, completed)
+            lambda completed: _consume_auto_summarize_flush_task(
+                session_key,
+                completed,
+                config=config,
+                session_manager=session_manager,
+                compaction_id=turn_id,
+            )
         )
         log.warning(
             "context_overflow.auto_summarize_flush_timed_out",
@@ -261,7 +337,13 @@ async def _await_auto_summarize_flush_grace(
         return None
     except asyncio.CancelledError:
         task.add_done_callback(
-            lambda completed: _consume_auto_summarize_flush_task(session_key, completed)
+            lambda completed: _consume_auto_summarize_flush_task(
+                session_key,
+                completed,
+                config=config,
+                session_manager=session_manager,
+                compaction_id=turn_id,
+            )
         )
         raise
     except Exception as exc:  # noqa: BLE001
@@ -507,11 +589,16 @@ async def apply_context_overflow_policy(
             except Exception:
                 checkpoint_failed = True
                 raise
+            requires_safe_receipt = pre_compaction_flush_requires_safe_receipt(config)
             outcome.flush_receipt = await _await_auto_summarize_flush_grace(
                 config=config,
                 transcript=transcript,
                 session_key=session_key,
                 flush_service=flush_service,
+                session_manager=session_manager,
+                wait_for_receipt=requires_safe_receipt,
+                turn_id=compaction_id,
+                checkpoint_exists=checkpoint_saved,
             )
             if pre_compaction_flush_enabled(config):
                 flush_status = flush_receipt_status_for_compaction(
@@ -520,12 +607,12 @@ async def apply_context_overflow_policy(
                 )
             memory_status = compaction_memory_status(
                 outcome.flush_receipt,
-                deterministic_receipt_safe=checkpoint_saved,
+                deterministic_receipt_safe=checkpoint_saved and not requires_safe_receipt,
                 required=pre_compaction_flush_enabled(config),
             )
             if (
                 pre_compaction_flush_enabled(config)
-                and pre_compaction_flush_requires_safe_receipt(config)
+                and requires_safe_receipt
                 and not memory_status.allows_destructive_compaction
             ):
                 outcome.reason = "compaction_flush_failed"

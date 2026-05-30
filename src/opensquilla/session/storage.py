@@ -1468,6 +1468,24 @@ class SessionStorage:
         )
         await self.conn.commit()
 
+    async def update_summary_flush_receipt_status_by_compaction(
+        self,
+        *,
+        session_key: str,
+        compaction_id: str,
+        status: str,
+    ) -> int:
+        cur = await self.conn.execute(
+            """
+            UPDATE session_summaries
+            SET flush_receipt_status = ?
+            WHERE session_key = ? AND compaction_id = ?
+            """,
+            (status, canonicalize_session_key(session_key), compaction_id),
+        )
+        await self.conn.commit()
+        return int(cur.rowcount or 0)
+
     # ── SessionContextState CRUD ─────────────────────────────────────────────
 
     async def save_context_state(

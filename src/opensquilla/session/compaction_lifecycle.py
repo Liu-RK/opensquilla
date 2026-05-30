@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -425,3 +426,46 @@ def flush_receipt_to_dict(receipt: Any) -> dict[str, Any]:
     if isinstance(receipt, Mapping):
         return dict(receipt)
     return dict(vars(receipt))
+
+
+async def mark_compaction_flush_status_with_retry(
+    mark_status: Any,
+    *,
+    session_key: str,
+    compaction_id: str,
+    status: str,
+    log: Any,
+    failed_event: str,
+    updated_event: str,
+    skipped_event: str,
+    retry_delays: tuple[float, ...] = (0.0, 0.05, 0.25),
+) -> None:
+    for delay_seconds in retry_delays:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        try:
+            updated = await mark_status(session_key, compaction_id, status)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                failed_event,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=status,
+                error=str(exc),
+            )
+            return
+        if updated:
+            log.info(
+                updated_event,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=status,
+            )
+            return
+    log.debug(
+        skipped_event,
+        session_key=session_key,
+        compaction_id=compaction_id,
+        status=status,
+        reason="summary_not_found",
+    )

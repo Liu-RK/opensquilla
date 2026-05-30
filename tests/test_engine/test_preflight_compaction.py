@@ -9,10 +9,11 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -410,7 +411,9 @@ async def test_preflight_compacts_when_distill_fails_after_checkpoint() -> None:
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
-    assert calls == ["checkpoint", "flush", "compact"]
+    assert calls[:2] == ["checkpoint", "compact"]
+    await asyncio.sleep(0)
+    assert "flush" in calls
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
 
 
@@ -554,8 +557,8 @@ async def test_preflight_counts_reasoning_content_when_deciding_to_compact() -> 
 
 
 @pytest.mark.asyncio
-async def test_preflight_flushes_full_transcript_before_compact() -> None:
-    """Preflight compaction must give durable memory a full-coverage chance first."""
+async def test_preflight_starts_full_transcript_flush_without_blocking_compact() -> None:
+    """Preflight starts full-coverage memory flush in the background."""
 
     context_window = 1000
     entries = [_make_entry("early durable fact " + ("a" * 4000))]
@@ -587,7 +590,9 @@ async def test_preflight_flushes_full_transcript_before_compact() -> None:
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
-    assert calls == ["flush", "compact"]
+    assert calls == ["compact"]
+    await asyncio.sleep(0)
+    assert "flush" in calls
     flush_service.execute.assert_awaited_once_with(
         entries,
         "agent:ops:long-session",
@@ -596,6 +601,8 @@ async def test_preflight_flushes_full_transcript_before_compact() -> None:
         segment_mode="auto",
         timeout=120.0,
         raw_capture_policy="required",
+        turn_id=ANY,
+        checkpoint_exists=False,
     )
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
 
@@ -632,6 +639,7 @@ async def test_preflight_degraded_flush_receipts_do_not_block_compaction(
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
+    await asyncio.sleep(0)
     flush_service.execute.assert_awaited_once()
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
 
@@ -695,6 +703,7 @@ async def test_preflight_protect_flush_receipt_marks_degraded_forensic() -> None
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
+    await asyncio.sleep(0)
     flush_service.execute.assert_awaited_once()
     assert sm.compact_with_result_calls == [("agent:ops:long-session", context_window, None)]
     assert sm.compact_with_result_kwargs[0]["flush_receipt_status"] == "degraded_forensic"
@@ -878,6 +887,7 @@ async def test_preflight_backfilled_flush_receipt_allows_compact() -> None:
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
+    await asyncio.sleep(0)
     flush_service.execute.assert_awaited_once()
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
 
@@ -908,6 +918,7 @@ async def test_preflight_uses_background_timeout_for_flush_service() -> None:
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
+    await asyncio.sleep(0)
     assert flush_service.execute.await_args.kwargs["timeout"] == 42.0
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
 
@@ -945,8 +956,10 @@ async def test_preflight_flush_grace_timeout_does_not_block_compaction() -> None
     with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
         await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
 
+    await asyncio.sleep(0)
     assert flush_service.execute.await_args.kwargs["timeout"] == 42.0
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+    await asyncio.sleep(0.06)
 
 
 @pytest.mark.asyncio

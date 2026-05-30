@@ -800,6 +800,36 @@ async def test_degraded_compaction_preimage_can_be_listed_for_repair(manager):
 
 
 @pytest.mark.asyncio
+async def test_compaction_flush_status_can_be_backfilled_by_compaction_id(manager):
+    await manager.create("agent:main:main")
+    for i in range(20):
+        await manager.append_message(
+            "agent:main:main",
+            "user",
+            f"background flush msg {i} " + ("x" * 500),
+            token_count=200,
+        )
+
+    await manager.compact_with_result(
+        "agent:main:main",
+        context_window_tokens=1000,
+        compaction_id="cmp-bg-flush",
+        flush_receipt_status="degraded_forensic",
+    )
+
+    updated = await manager.mark_compaction_flush_receipt_status(
+        "agent:main:main",
+        "cmp-bg-flush",
+        "safe",
+    )
+
+    assert updated == 1
+    summaries = await manager.get_summaries("agent:main:main")
+    assert summaries[0].flush_receipt_status == "safe"
+    assert await manager.list_degraded_compactions(agent_id="main") == []
+
+
+@pytest.mark.asyncio
 async def test_noop_memory_flush_compaction_status_does_not_enter_repair_queue(manager):
     await manager.create("agent:main:main")
     for i in range(20):
