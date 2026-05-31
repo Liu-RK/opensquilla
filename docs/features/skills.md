@@ -150,7 +150,9 @@ If a skill is not selected:
 
 4. If optional dependencies are missing, install or update the skill and retry.
 
-For composed workflows, read [`meta-skills.md`](meta-skills.md).
+For composed workflows, read [`meta-skills.md`](meta-skills.md). For the full
+MetaSkill user guide, read [`meta-skill-user-guide.md`](meta-skill-user-guide.md).
+For authoring rules, read [`../authoring/meta-skills.md`](../authoring/meta-skills.md).
 
 ---
 

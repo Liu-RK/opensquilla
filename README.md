@@ -546,7 +546,9 @@ Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
 | **Durable sessions, subagents, and scheduling** | SQLite-backed session, transcript, and replay storage with per-agent workspaces. Agents spawn depth-bounded subagents, and a `SchedulerEngine` with an in-tree cron parser runs recurring jobs via `opensquilla cron`. |
 | **Operator controls** | Human-in-the-loop approvals can pause sensitive tool calls for a decision; per-turn and per-session token and cost rollups (`opensquilla cost`) and diagnostics are available from the CLI and Web UI. |
 
-Meta-skills authoring guide: [`META_SKILL_GUIDE.md`](META_SKILL_GUIDE.md).
+MetaSkill docs: [`docs/features/meta-skills.md`](docs/features/meta-skills.md),
+[`docs/features/meta-skill-user-guide.md`](docs/features/meta-skill-user-guide.md),
+and [`docs/authoring/meta-skills.md`](docs/authoring/meta-skills.md).
 
 ---
 

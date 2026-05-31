@@ -333,7 +333,7 @@ def test_runtime_router_config_does_not_ship_unused_cost_fields() -> None:
     data = yaml.safe_load(text)
 
     assert data["tier_registry"]["S"] == ["deepseek/deepseek-v4-flash"]
-    assert data["tier_registry"]["M"] == ["deepseek/deepseek-v4-flash"]
+    assert data["tier_registry"]["M"] == ["deepseek/deepseek-v4-pro"]
     assert data["tier_registry"]["L"] == ["z-ai/glm-5.1"]
     assert data["tier_registry"]["XL"] == ["anthropic/claude-opus-4.7"]
     assert data["tier_explanations"]["L"]["model"] == "z-ai/glm-5.1"

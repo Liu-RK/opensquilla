@@ -23,6 +23,10 @@ root release README with task-oriented guides.
 - [`features/tool-compression.md`](features/tool-compression.md) - compact tool
   results and handles.
 - [`features/meta-skills.md`](features/meta-skills.md) - reusable workflow skills.
+- [`features/meta-skill-user-guide.md`](features/meta-skill-user-guide.md) -
+  user-facing MetaSkill guide.
+- [`authoring/meta-skills.md`](authoring/meta-skills.md) - MetaSkill authoring
+  guide.
 - [`features/memory.md`](features/memory.md) - durable memory and recall.
 - [`features/skills.md`](features/skills.md) - skill discovery, install, and
   authoring.

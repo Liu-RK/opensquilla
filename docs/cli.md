@@ -162,6 +162,8 @@ Read:
 
 - [`features/skills.md`](features/skills.md)
 - [`features/meta-skills.md`](features/meta-skills.md)
+- [`features/meta-skill-user-guide.md`](features/meta-skill-user-guide.md)
+- [`authoring/meta-skills.md`](authoring/meta-skills.md)
 
 ## Sessions and History
 

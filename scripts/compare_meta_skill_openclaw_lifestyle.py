@@ -1,7 +1,7 @@
 """Lifestyle meta-skill benchmark against the OpenClaw t3 baseline.
 
 This catalog is intentionally narrower than ``compare_meta_skill_openclaw``:
-it covers eight practical work/life meta-skills and frames each case so the
+it covers retained practical work/life meta-skills and frames each case so the
 OpenSquilla meta-skill orchestration path can be judged against OpenClaw's
 t3 Opus 4.7 baseline.
 """

@@ -1,43 +1,69 @@
 # Meta-Skills
 
-Meta-skills package repeatable multi-step work as reusable workflows. They are
-for tasks that naturally combine skills, tools, routing, checkpoints, and final
-synthesis.
+Meta-skills package repeatable multi-step work as reusable, inspectable
+workflows. Use them when a request needs more than one normal skill, tool,
+checkpoint, or final synthesis pass.
 
-Use this page when a normal skill is too small and a full custom integration is
-too heavy.
+For the full user-facing guide, read
+[`meta-skill-user-guide.md`](meta-skill-user-guide.md). For authoring rules,
+read [`../authoring/meta-skills.md`](../authoring/meta-skills.md).
 
 ## Skills vs Meta-Skills
 
 | Capability | Use it for |
 | --- | --- |
-| Skill | One focused task pattern, instruction set, or tool helper. |
+| Skill | One focused task pattern, instruction set, script, or tool helper. |
 | Meta-skill | A reusable workflow made of multiple steps, skills, checks, or outputs. |
 
-For example, "summarize a document" is a skill-shaped task. "Search the web,
-collect sources, draft a report, render it as a PDF, and save the artifact" is
-a meta-skill-shaped task.
+For example, "summarize this document" is skill-shaped. "Turn this contract,
+quote, and email into a sign, reject, or negotiate recommendation with risks and
+next actions" is meta-skill-shaped.
 
-## Good Fits
+## Stable Built-In MetaSkills
 
-Use a meta-skill for:
+The retained stable catalog is intentionally small:
 
-- web research reports;
-- PDF or slide briefings;
-- current-diff review bundles;
-- pre-commit quality gates;
-- security or compliance review bundles;
-- knowledge-base bootstrap;
-- travel planning;
-- long-running operational checks;
-- repeatable document generation.
+| MetaSkill | Positioning |
+| --- | --- |
+| `meta-competitive-intel` | Turns account or competitor signals into sales, BD, or competitive-intel briefs. |
+| `meta-daily-operator-brief` | Turns today's tasks, context, and constraints into an operating brief. |
+| `meta-document-to-decision` | Turns contracts, quotes, renewals, notices, or spreadsheets into sign, reject, or negotiate decisions. |
+| `meta-job-search-pipeline` | Turns a JD, resume, and application goal into an application package and interview prep. |
+| `meta-kid-project-planner` | Produces safe, age-appropriate plans for school projects, show-and-tell, or science activities. |
+| `meta-paper-write` | Supports academic drafts, manuscript structure, citation planning, experiment placeholders, and LaTeX/PDF paths. |
+| `meta-skill-creator` | Turns repeated multi-skill collaboration patterns into new MetaSkill proposals. |
+| `meta-web-research-to-report` | Turns source-backed research needs into reports, briefs, or decision memos. |
 
-Avoid meta-skills for:
+Experimental meta-skills may exist under development trees, but this page lists
+only stable built-ins that should be presented as retained product capabilities.
 
-- one-off instructions;
-- a single tool call;
-- vague brainstorming with no stable workflow;
-- workflows that need frequent manual redesign.
+## How to Ask
+
+Ask for the outcome and the standard:
+
+```text
+Create a decision memo comparing travel eSIM, carrier roaming, and local SIM
+options for my parents' 8-day Japan trip. Include sources, risks, a final
+recommendation, and what I should order tonight.
+```
+
+For important or easily confused work, name the workflow:
+
+```text
+Use meta-skill `meta-web-research-to-report`.
+
+Create a source-backed decision memo comparing travel eSIM, carrier roaming,
+and local SIM options for my parents' 8-day Japan trip.
+```
+
+A strong request usually includes:
+
+- outcome;
+- context;
+- decision standard;
+- expected output;
+- constraints;
+- actions the agent must not take.
 
 ## Discover Meta-Skills
 
@@ -54,25 +80,7 @@ Inspect a meta-skill composition:
 opensquilla skills inspect <meta-skill-name>
 ```
 
-The inspect command is useful before relying on a workflow because it shows the
-compiled step shape at a product level.
-
-## Run Meta-Skills
-
-Meta-skills are usually invoked by the agent when the user's request matches
-their triggers. You can also ask for one directly:
-
-```text
-Use the web-to-PDF briefing workflow for this topic.
-```
-
-Prefer outcome-first requests:
-
-```text
-Create a sourced PDF briefing on this competitor and include risks.
-```
-
-OpenSquilla can then choose the matching workflow when one is available.
+The inspect command shows the compiled step shape before you rely on a workflow.
 
 ## Inspect Run History
 
@@ -112,17 +120,14 @@ Accept a proposal only after review:
 opensquilla skills meta proposals accept <proposal-id>
 ```
 
-## Authoring
+## Safety Model
 
-For full authoring rules, templates, safety notes, and examples, read:
+MetaSkill outputs are reviewable work products and decision-support drafts. They
+are not final professional advice in legal, medical, financial, hiring,
+academic, security, or other high-stakes contexts.
 
-```text
-META_SKILL_GUIDE.md
-```
-
-Keep meta-skill descriptions user-facing. A good description tells users when to
-use the workflow and what output to expect; it does not advertise scheduler
-mechanics.
+Actions such as publishing, applying, installing, paying, signing, messaging, or
+modifying production systems require explicit user authorization.
 
 ---
 

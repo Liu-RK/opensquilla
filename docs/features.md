@@ -34,7 +34,8 @@ Read: [`features/tool-compression.md`](features/tool-compression.md)
 Repeatable multi-step workflows can be represented as skills, inspected,
 proposed, replayed, and reused.
 
-Read: [`features/meta-skills.md`](features/meta-skills.md)
+Read: [`features/meta-skills.md`](features/meta-skills.md) and
+[`features/meta-skill-user-guide.md`](features/meta-skill-user-guide.md)
 
 ### Memory
 
@@ -127,10 +128,12 @@ Bundled user-facing skills include:
 - `sub-agent`
 - `skill-creator`
 
-Bundled meta-skills include workflows for PR review, security review, web
-research reports, PDF briefings, travel planning, knowledge-base bootstrap,
-arXiv digest decks, long-running build watch, compliance bundles, and
-meta-skill creation.
+Retained bundled MetaSkills include `meta-competitive-intel`,
+`meta-daily-operator-brief`, `meta-document-to-decision`,
+`meta-job-search-pipeline`, `meta-kid-project-planner`, `meta-paper-write`,
+`meta-skill-creator`, and `meta-web-research-to-report`. Experimental
+MetaSkills may exist in development trees, but they are not presented as stable
+built-in product capabilities.
 
 Read: [`features/skills.md`](features/skills.md)
 

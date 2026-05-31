@@ -68,7 +68,7 @@ single-turn chat alone.
 | Understand the main product capabilities | [`docs/features.md`](docs/features.md) |
 | Use SquillaRouter | [`docs/features/squilla-router.md`](docs/features/squilla-router.md) |
 | Understand tool compression and tool-result handles | [`docs/features/tool-compression.md`](docs/features/tool-compression.md) |
-| Use and author meta-skills | [`docs/features/meta-skills.md`](docs/features/meta-skills.md) |
+| Use MetaSkills | [`docs/features/meta-skills.md`](docs/features/meta-skills.md) |
 | Work with memory | [`docs/features/memory.md`](docs/features/memory.md) |
 | Work with skills | [`docs/features/skills.md`](docs/features/skills.md) |
 | Understand compaction, cache, and long-session continuity | [`docs/features/compaction-and-cache.md`](docs/features/compaction-and-cache.md) |
@@ -162,11 +162,13 @@ Read: [`docs/features/tool-compression.md`](docs/features/tool-compression.md)
 
 Meta-skills let OpenSquilla present higher-level workflows instead of making the
 user re-describe the same multi-step process. They are useful for repeatable
-research, reporting, audits, PDF/deck generation, PR review, and other composed
-tasks.
+research reports, document-to-decision work, daily operating briefs, account
+watching, job-search preparation, kid project planning, academic paper drafting,
+and MetaSkill proposal creation.
 
-Read: [`docs/features/meta-skills.md`](docs/features/meta-skills.md) and
-[`META_SKILL_GUIDE.md`](META_SKILL_GUIDE.md)
+Read: [`docs/features/meta-skills.md`](docs/features/meta-skills.md),
+[`docs/features/meta-skill-user-guide.md`](docs/features/meta-skill-user-guide.md),
+and [`docs/authoring/meta-skills.md`](docs/authoring/meta-skills.md)
 
 ## What OpenSquilla Can Do
 
@@ -202,7 +204,8 @@ trust. For tool behavior, approval flow, and workspace containment, see
 
 - [`README.md`](README.md) - release/package README
 - [`MIGRATION.md`](MIGRATION.md) - migration from OpenClaw and Hermes Agent
-- [`META_SKILL_GUIDE.md`](META_SKILL_GUIDE.md) - meta-skill authoring guide
+- [`docs/features/meta-skill-user-guide.md`](docs/features/meta-skill-user-guide.md) - MetaSkill user guide
+- [`docs/authoring/meta-skills.md`](docs/authoring/meta-skills.md) - MetaSkill authoring guide
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) - contributor workflow
 - [`CHANGELOG.md`](CHANGELOG.md) - release history
 
