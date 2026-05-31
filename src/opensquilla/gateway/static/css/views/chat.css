@@ -345,6 +345,19 @@
   flex-direction: column;
   gap: var(--sp-5);
 }
+/* The scroll container stays full-width so its scrollbar sits at the window
+   edge; the CONTENT is what's constrained to the reading measure and centered.
+   This is the same decisive column the dashboards use and the composer shares,
+   without stranding the scrollbar in the middle of the screen. */
+.chat-thread > * {
+  width: 100%;
+  max-width: var(--chat-measure);
+  margin-inline: auto;
+}
+/* The router panel keeps its own comfortable width (still centered). */
+.chat-thread > .router-fx {
+  max-width: min(100%, 620px);
+}
 
 .chat-thread.drag-over {
   outline: 2px dashed var(--accent);
@@ -446,15 +459,19 @@
 
 .chat-msg--user .chat-msg-text,
 .msg.user .msg-body {
-  background: var(--accent);
-  color: #fff;
+  /* Low-tint surface, not a saturated-orange fill: keeps orange as signal and
+     clears WCAG AA (>7:1 in both themes via color-mix) where #fff-on-#F56600
+     measured only 3.10:1. */
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  color: var(--text);
   border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-4);
   box-shadow: var(--shadow-sm);
   font-size: var(--fs-sm);
   line-height: 1.6;
   word-break: break-word;
-  max-width: 70%;
+  max-width: 78%;
   min-width: 56px;
   min-height: 32px;
   margin-left: auto;
@@ -469,13 +486,13 @@
 .chat-msg--assistant .chat-msg-text,
 .msg.assistant .msg-body {
   background: var(--bg-surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-4);
   box-shadow: var(--shadow-sm);
   font-size: var(--fs-sm);
   line-height: 1.7;
   word-break: break-word;
-  max-width: 85%;
+  max-width: 88%;
   min-width: 56px;
   min-height: 32px;
 }
@@ -681,7 +698,7 @@
   padding: 0 var(--sp-1);
 }
 .chat-msg--user .chat-msg-time,
-.msg.user .msg-time { text-align: right; color: rgba(255,255,255,0.6); }
+.msg.user .msg-time { text-align: right; }
 
 /* ─── Per-turn metadata footer (model + session tokens + combo) ─────── */
 .msg-meta {
@@ -690,8 +707,9 @@
   flex-wrap: wrap;
   gap: 4px 8px;
   font-size: var(--fs-xs);
-  color: var(--text-muted);
-  opacity: 0.75;
+  /* --text-dim directly (4.98:1 dark / 5.69:1 light) instead of muted@0.75,
+     which dropped light theme to ~4.39:1 and forced calc(1/0.75) lift hacks. */
+  color: var(--text-dim);
   padding: 0 2px;
   user-select: none;
   /* Cap the row width to the bubble so long model names break cleanly
@@ -736,7 +754,8 @@
   font-size: var(--fs-xs);
 }
 
-.msg.user .msg-body pre { background: rgba(0,0,0,0.2); border-color: rgba(255,255,255,0.2); }
+/* User bubble is now a light tint with normal text — code/pre inherit the
+   base surface treatment (was a dark overlay tuned for white-on-orange). */
 
 .msg .msg-body code,
 .chat-msg-text code {
@@ -745,7 +764,6 @@
   border-radius: var(--radius-sm);
   font-size: 0.9em;
 }
-.msg.user .msg-body code { background: rgba(0,0,0,0.2); }
 
 .msg .msg-body blockquote {
   border-left: 3px solid var(--border-focus);
@@ -754,9 +772,24 @@
   color: var(--text-muted);
 }
 
-.msg.assistant .msg-body h2,
-.msg.assistant .msg-body h3 {
-  color: var(--accent);
+/* In-bubble markdown headings — sized + weighted so the UA fallback can't
+   blow them up inside 13px bubbles, and painted as text (orange stays signal,
+   not routine body decoration). */
+.msg.assistant .msg-body h1,
+.msg.assistant .msg-body h2 {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  line-height: 1.3;
+  margin: var(--sp-3) 0 var(--sp-1);
+  color: var(--text);
+}
+.msg.assistant .msg-body h3,
+.msg.assistant .msg-body h4 {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: var(--sp-3) 0 var(--sp-1);
+  color: var(--text-muted);
 }
 
 /* ─── Thinking / Typing indicator ──────────────────────────────────────── */
@@ -2249,7 +2282,8 @@
   border-top: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
-  max-width: 768px;
+  /* Share the thread's reading axis so input and conversation align. */
+  max-width: var(--chat-measure);
   width: 100%;
   margin: 0 auto;
 }
@@ -2349,28 +2383,72 @@
   to   { opacity: 1; transform: scale(1); }
 }
 
-/* Squilla router tier routing — amber */
+/* Squilla router tier routing — amber. Token-based: color-mix(var(--warn))
+   resolves per theme, so the hand-written [data-theme] twins are gone. */
 .savings-chip--tier {
-  background: rgba(234, 140, 0, 0.1);
-  border: 1px solid rgba(234, 140, 0, 0.28);
-  color: #b36b00;
-}
-[data-theme="dark"] .savings-chip--tier {
-  background: rgba(251, 191, 36, 0.1);
-  border-color: rgba(251, 191, 36, 0.28);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  color: var(--warn);
 }
 
-/* Prompt cache hit — green */
+/* Prompt cache hit — green (same green the dashboards use). */
 .savings-chip--cache {
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.22);
-  color: #166534;
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent);
+  color: var(--ok);
 }
-[data-theme="dark"] .savings-chip--cache {
-  background: rgba(34, 197, 94, 0.08);
-  border-color: rgba(34, 197, 94, 0.22);
-  color: #4ade80;
+
+/* ─── Per-turn saved chip (inline in .msg-meta, persistent) ──────────── */
+/*
+ * Stays attached to each assistant turn that produced a savings event
+ * (cache hit OR squilla-router routed). Shows the bucketed savings %
+ * and a small flame next to the model+tokens row. Distinct from the
+ * COMBO chip: amber palette here, red palette there — at-a-glance
+ * separation between "this turn saved tokens" and "this is run #N".
+ */
+
+/* Amber (warn) tier; escalates by raising the accent mix, not by swapping
+   hand-picked hues or animating. color-mix resolves per theme. */
+.msg-meta__saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
+}
+.msg-meta__saved--high {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.msg-meta__saved--peak {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+/* Flame — inherits the chip's token color (currentColor); static. */
+.msg-meta__saved-flame {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 1em;
+  height: 1em;
+  transform-origin: 50% 85%;
+}
+
+.msg-meta__saved-label {
+  letter-spacing: 0.01em;
 }
 
 /* ─── "Saved ~X%" floating label — viewport-centered, headline weight ── */
@@ -2448,96 +2526,6 @@
   }
 }
 
-/* ─── Per-turn saved chip (inline in .msg-meta, persistent) ──────────── */
-/*
- * Stays attached to each assistant turn that produced a savings event
- * (cache hit OR squilla-router routed). Shows the bucketed savings %
- * and a small flame next to the model+tokens row. Distinct from the
- * COMBO chip: amber palette here, red palette there — at-a-glance
- * separation between "this turn saved tokens" and "this is run #N".
- */
-
-.msg-meta__saved {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px 1px 6px;
-  border-radius: 999px;
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.10);
-  color: #b45309; /* amber-700 */
-  font-family: var(--font-mono);
-  font-size: 0.95em;
-  font-weight: 600;
-  line-height: 1.2;
-  white-space: nowrap;
-  cursor: default;
-  user-select: none;
-  /* Lift past the parent's opacity so the savings figure reads */
-  opacity: calc(1 / 0.75);
-  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
-}
-[data-theme="dark"] .msg-meta__saved {
-  color: #fbbf24;
-  border-color: rgba(245, 158, 11, 0.55);
-  background: rgba(245, 158, 11, 0.14);
-}
-
-.msg-meta__saved--high {
-  border-color: rgba(234, 88, 12, 0.6);
-  background: rgba(234, 88, 12, 0.14);
-  color: #9a3412;
-}
-[data-theme="dark"] .msg-meta__saved--high {
-  color: #fdba74;
-  border-color: rgba(234, 88, 12, 0.7);
-  background: rgba(234, 88, 12, 0.18);
-}
-
-.msg-meta__saved--peak {
-  border-color: rgba(220, 38, 38, 0.7);
-  background: rgba(220, 38, 38, 0.16);
-  color: #7f1d1d;
-  box-shadow: 0 0 10px rgba(220, 38, 38, 0.25);
-}
-[data-theme="dark"] .msg-meta__saved--peak {
-  color: #fca5a5;
-  border-color: rgba(239, 68, 68, 0.85);
-  background: rgba(239, 68, 68, 0.20);
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.45);
-}
-
-/* Flame — saturated red so it reads as fire regardless of OS emoji
-   palette and clearly distinguishes the saved-chip from plain text. */
-.msg-meta__saved-flame {
-  display: inline-block;
-  flex-shrink: 0;
-  width: 1em;
-  height: 1em;
-  color: #ef4444; /* red-500 */
-  filter: drop-shadow(0 0 3px rgba(239, 68, 68, 0.55));
-  transform-origin: 50% 85%;
-  animation: msg-saved-flicker 2.4s ease-in-out infinite;
-}
-.msg-meta__saved--peak .msg-meta__saved-flame {
-  color: #dc2626;
-  filter: drop-shadow(0 0 6px rgba(220, 38, 38, 0.85));
-  animation-duration: 1.4s;
-}
-
-.msg-meta__saved-label {
-  letter-spacing: 0.01em;
-}
-
-@keyframes msg-saved-flicker {
-  0%, 100% { transform: rotate(-2deg) scale(1); }
-  50%      { transform: rotate(2deg)  scale(1.06); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .msg-meta__saved-flame { animation: none; }
-}
-
 /* ─── Per-turn combo (inline with model + tokens in .msg-meta) ────────── */
 /*
  * The combo lives inside the per-turn meta footer beneath each assistant
@@ -2549,15 +2537,18 @@
  * emoji palette.
  */
 
+/* Three intensity tiers expressed as ONE var(--danger) ramped by mix %
+   (16 → 22 → 30) — no hand-picked reds, no perpetual flicker, no glow pulse.
+   Brief entrance only. color-mix resolves per theme. */
 .msg-meta__combo {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 2px 8px 2px 6px;
   border-radius: 999px;
-  border: 1px solid rgba(220, 38, 38, 0.45);
-  background: rgba(220, 38, 38, 0.10);
-  color: #b91c1c; /* red-700 */
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
   font-family: var(--font-mono);
   font-size: 0.95em;
   font-weight: 700;
@@ -2566,68 +2557,25 @@
   white-space: nowrap;
   cursor: default;
   user-select: none;
-  /* The parent .msg-meta uses opacity:0.75; lift the combo back to full
-     so the celebration reads against the muted model/tokens text. */
-  opacity: calc(1 / 0.75);
   animation: msg-combo-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
-  transition: border-color 200ms ease, background 200ms ease, color 200ms ease, box-shadow 200ms ease;
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
 }
-[data-theme="dark"] .msg-meta__combo {
-  color: #fca5a5; /* red-300 */
-  border-color: rgba(220, 38, 38, 0.55);
-  background: rgba(220, 38, 38, 0.14);
-}
-
 .msg-meta__combo--hot {
-  border-color: rgba(220, 38, 38, 0.7);
-  background: rgba(220, 38, 38, 0.16);
-  color: #991b1b; /* red-800 */
-  box-shadow: 0 0 8px rgba(220, 38, 38, 0.30);
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+  background: color-mix(in srgb, var(--danger) 22%, transparent);
 }
-[data-theme="dark"] .msg-meta__combo--hot {
-  color: #fca5a5;
-  border-color: rgba(239, 68, 68, 0.75);
-  background: rgba(239, 68, 68, 0.18);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.45);
-}
-
 .msg-meta__combo--blaze {
-  border-color: rgba(239, 68, 68, 0.85);
-  background: rgba(239, 68, 68, 0.22);
-  color: #7f1d1d; /* red-900 */
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
-  animation:
-    msg-combo-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    msg-combo-blaze-pulse 1.6s ease-in-out 320ms infinite;
-}
-[data-theme="dark"] .msg-meta__combo--blaze {
-  color: #fecaca; /* red-200 */
-  border-color: rgba(239, 68, 68, 0.95);
-  background: rgba(239, 68, 68, 0.28);
-  box-shadow: 0 0 18px rgba(239, 68, 68, 0.70);
+  border-color: color-mix(in srgb, var(--danger) 75%, var(--border));
+  background: color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
-/* Flame icon — always saturated red so the visual cue is unmistakable.
-   Tier intensity is conveyed through the chip's border/background, not
-   by changing the flame color. */
+/* Flame icon — inherits currentColor (the chip's danger token); static. */
 .msg-meta__combo-flame {
   display: inline-block;
   flex-shrink: 0;
   width: 1.05em;
   height: 1.05em;
-  color: #ef4444; /* red-500 — flame fill via currentColor */
-  filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.65));
   transform-origin: 50% 85%;
-  animation: msg-combo-flicker 1.7s ease-in-out infinite;
-}
-.msg-meta__combo--hot .msg-meta__combo-flame {
-  color: #dc2626; /* red-600 */
-  filter: drop-shadow(0 0 6px rgba(220, 38, 38, 0.85));
-}
-.msg-meta__combo--blaze .msg-meta__combo-flame {
-  color: #dc2626;
-  filter: drop-shadow(0 0 8px rgba(220, 38, 38, 0.95));
-  animation-duration: 1.0s;
 }
 
 .msg-meta__combo-label {
@@ -2642,26 +2590,13 @@
 }
 
 @keyframes msg-combo-in {
-  0%   { opacity: 0;              transform: scale(0.6); }
-  60%  { opacity: calc(1 / 0.75); transform: scale(1.15); }
-  100% { opacity: calc(1 / 0.75); transform: scale(1); }
-}
-
-@keyframes msg-combo-flicker {
-  0%, 100% { transform: rotate(-4deg) scale(1); }
-  35%      { transform: rotate(3deg)  scale(1.10); }
-  70%      { transform: rotate(-1deg) scale(0.95); }
-}
-
-@keyframes msg-combo-blaze-pulse {
-  0%, 100% { box-shadow: 0 0 14px rgba(239, 68, 68, 0.55); }
-  50%      { box-shadow: 0 0 24px rgba(239, 68, 68, 0.85); }
+  0%   { opacity: 0; transform: scale(0.6); }
+  60%  { opacity: 1; transform: scale(1.12); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg-meta__combo,
-  .msg-meta__combo-flame,
-  .msg-meta__combo--blaze { animation: none; }
+  .msg-meta__combo { animation: none; }
 }
 
 .savings-indicator {
@@ -2851,14 +2786,15 @@ select.clarify-form-input {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* Centered, prominent panel within the reading column. The column (P0-1)
+     already keeps it from stranding in a dead band on wide screens, so the
+     full AI-model-router grid stays a deliberate centerpiece. */
   margin: var(--sp-3) auto 4px;
   padding: 0;
   user-select: none;
   align-self: center;
   width: 100%;
-  /* Wider envelope so the 5-col grid keeps cells readable without
-     forcing model names to ellipsis at common breakpoints. */
-  max-width: 680px;
+  max-width: min(100%, 620px);
 }
 
 .router-fx-header {

@@ -68,7 +68,7 @@ const App = (() => {
       : '';
     app.innerHTML = `
       <nav class="sidebar" id="sidebar-nav" aria-label="Primary">
-        <div class="nav-brand"><img class="brand-mark" src="${basePath}/static/img/opensquilla-mark.png" alt="" aria-hidden="true"> OpenSquilla</div>
+        <div class="nav-brand"><img class="brand-mark" src="${basePath}/static/img/opensquilla-mark.png" alt="" aria-hidden="true"><span class="nav-brand__div" aria-hidden="true"></span><span class="nav-brand__wm"><span class="nav-brand__pre">Open</span><span class="nav-brand__name">Squilla</span></span></div>
         <div class="nav-group-label">Chat</div>
         <a class="nav-item" href="#" data-path="/chat">${icons.chat()} Chat</a>
         <div class="nav-group-label">Control</div>

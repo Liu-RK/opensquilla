@@ -1119,8 +1119,9 @@ def test_savings_popup_suppresses_only_the_model_switch_turn() -> None:
     assert "let suppressPopup = false;" in source
     assert "const identityChanged =" in source
     assert "suppressPopup = true;" in source
+    assert "const _savingsPopupTsByIdentity = new Map();" in source
     assert (
-        "if (!cacheHit && now - _savingsPopupLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;"
+        "if (!cacheHit && now - _identityLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;"
         in source
     )
     assert source.index("let suppressPopup = false;") < source.index(

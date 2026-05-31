@@ -853,7 +853,7 @@
   padding: 4px 8px;
   border-radius: var(--radius-sm);
 }
-.drawer__close:hover { background: var(--bg-elev); color: var(--text); }
+.drawer__close:hover { background: var(--bg-elevated); color: var(--text); }
 
 .drawer__body {
   flex: 1 1 auto;
@@ -896,7 +896,7 @@
 .ui-combo__input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(240, 160, 48, 0.18);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .ui-combo__list {
   position: absolute;
@@ -926,7 +926,7 @@
 }
 .ui-combo__option:hover,
 .ui-combo__option.is-active {
-  background: var(--bg-elev);
+  background: var(--bg-elevated);
 }
 .ui-combo__option.is-disabled {
   opacity: 0.4;
@@ -951,7 +951,7 @@
 }
 .ui-combo__option--create:hover,
 .ui-combo__option--create.is-active {
-  background: rgba(240, 160, 48, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .ui-combo__empty {
   padding: 8px 10px;

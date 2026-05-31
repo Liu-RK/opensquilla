@@ -524,9 +524,15 @@ const ChatView = (() => {
   const _SAVINGS_POPUP_COOLDOWN_MS = 10 * 60 * 1000;
   let _savingsPopupLastTs = 0;
   let _lastSavingsPopupIdentity = '';
+  // Per-identity celebration timestamps so the cooldown throttles only repeats
+  // of the SAME routed (model|tier) — not every turn globally. Without this, a
+  // standard turn's celebration would mask a following, differently-routed
+  // tool-assisted turn for the whole 10-minute window.
+  const _savingsPopupTsByIdentity = new Map();
   function _resetSavingsPopupCooldown() {
     _savingsPopupLastTs = 0;
     _lastSavingsPopupIdentity = '';
+    _savingsPopupTsByIdentity.clear();
     if (window.SavingsFX) {
       window.SavingsFX.resetStreak();
       window.SavingsFX.cleanup();
@@ -1226,6 +1232,15 @@ const ChatView = (() => {
                       </label>
                     </div>
                   </div>
+                  <div class="chat-toolbar-row">
+                    <span class="chat-toolbar-row-label">Savings FX</span>
+                    <div class="toggle-switch-wrap" id="pill-savings-fx-group" title="Show a subtle accent pulse on routed / cache-saved turns">
+                      <label class="toggle-switch" aria-label="Savings FX">
+                        <input type="checkbox" id="toggle-savings-fx" />
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1392,6 +1407,16 @@ const ChatView = (() => {
       });
     }
 
+    // Savings FX toggle — client-side preference (persisted in SavingsFX).
+    // Controls the subtle accent pulse on routed / cache-saved turns.
+    const savingsFxToggle = _el.querySelector('#toggle-savings-fx');
+    if (savingsFxToggle && window.SavingsFX) {
+      savingsFxToggle.addEventListener('change', () => {
+        window.SavingsFX.setEnabled(savingsFxToggle.checked);
+        UI.toast('Savings FX: ' + (savingsFxToggle.checked ? 'ON' : 'OFF'), 'info');
+      });
+    }
+
   }
 
   // Re-pull router config (and rebuild history strips) when the chat
@@ -1439,6 +1464,8 @@ const ChatView = (() => {
       if (routerFxToggle) routerFxToggle.checked = _routerFx.enabled;
       const routerCloudToggle = _el?.querySelector('#toggle-router-cloud');
       if (routerCloudToggle) routerCloudToggle.checked = _routerFx.variant === 'cloud';
+      const savingsFxToggle = _el?.querySelector('#toggle-savings-fx');
+      if (savingsFxToggle && window.SavingsFX) savingsFxToggle.checked = window.SavingsFX.isEnabled();
       _globalElevatedMode = _normalizeElevatedMode(cfg?.permissions?.default_mode);
       _toolbarState.bypass = _isApprovalBypassMode(_effectiveElevatedMode());
       _updateElevatedPill();
@@ -5225,11 +5252,28 @@ const ChatView = (() => {
     const hasRoutedSavings = hasTier && turnSavedPct > 0;
     const cacheHit = !!(u.cache_hit_active || (u.cached_tokens || 0) > 0);
     if (!hasRoutedSavings && !cacheHit) return;
-    if (!cacheHit && now - _savingsPopupLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;
-    if (!bubble || !bubble.isConnected) return;
+    // Cooldown is now per routed-identity (cache hits still bypass). A distinct
+    // qualifying turn — e.g. a tool-assisted turn routed differently than a
+    // preceding standard turn — is no longer suppressed by an unrelated
+    // celebration's global wall.
+    const _identityLastTs = identity ? (_savingsPopupTsByIdentity.get(identity) || 0) : _savingsPopupLastTs;
+    if (!cacheHit && now - _identityLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;
 
-    window.SavingsFX.fire(bubble, u);
+    // The burst + "Saved ~X%" label are viewport-centered and need no bubble;
+    // only the reduced-motion border pulse uses one (and self-guards null). Fall
+    // back to the last assistant bubble so tool-assisted turns (and refresh-only
+    // terminal frames) still celebrate even if the stream bubble reference was
+    // already cleared. (querySelectorAll + last, since :last-of-type keys off
+    // element type, not the .msg.assistant class.)
+    let fxBubble = (bubble && bubble.isConnected) ? bubble : null;
+    if (!fxBubble && _thread) {
+      const _assistants = _thread.querySelectorAll('.msg.assistant');
+      fxBubble = _assistants.length ? _assistants[_assistants.length - 1] : null;
+    }
+
+    window.SavingsFX.fire(fxBubble, u);
     _savingsPopupLastTs = now;
+    if (identity) _savingsPopupTsByIdentity.set(identity, now);
   }
 
   /* ── Context Usage Warning ──────────────────────────────────────────── */
