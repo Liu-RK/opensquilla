@@ -206,6 +206,7 @@ class _TurnRunnerPipelineExecutionAdapter(PipelineExecutionPort):
             history_user_texts=request.history_user_texts,
             flags_text_override=request.flags_text_override,
             tool_context=request.tool_context,
+            normalization_metadata=request.normalization_metadata,
         )
 
 class _TurnRunnerRouterContextAdapter(RouterContextPort):

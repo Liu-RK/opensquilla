@@ -388,7 +388,11 @@ def test_chat_slash_input_supports_literal_slash_escape() -> None:
     assert "if (text.startsWith('//')) {" in send_prefix
     assert "isLiteralSlash = true;" in send_prefix
     assert "text = text.slice(1);" in send_prefix
-    assert "if (!isLiteralSlash && text.startsWith('/')) {" in send_prefix
+    literal_idx = send_prefix.index("if (text.startsWith('//')) {")
+    normalize_idx = send_prefix.index("const normalized = await _normalizeOutgoingComposerPayload(")
+    slash_exec_guard_idx = send_prefix.index("if (!isLiteralSlash && text.startsWith('/')) {")
+    assert literal_idx < normalize_idx < slash_exec_guard_idx
+    assert "{ allowSlashCommand: isSlashCommand }" in send_prefix
     assert "await _executeSlashCommand(text)" in send_prefix
     assert "if (val.startsWith('//')) { _closeSlashMenu(); return; }" in source
 
@@ -402,6 +406,7 @@ def test_chat_slash_commands_are_blocked_while_streaming_after_literal_escape() 
     flag_idx = send_prefix.index("let isLiteralSlash = false;")
     literal_idx = send_prefix.index("if (text.startsWith('//')) {")
     flag_set_idx = send_prefix.index("isLiteralSlash = true;")
+    normalize_idx = send_prefix.index("const normalized = await _normalizeOutgoingComposerPayload(")
     streaming_idx = send_prefix.index(
         "if (_isStreaming || _isCompactInFlightForCurrentSession()) {"
     )
@@ -410,9 +415,14 @@ def test_chat_slash_commands_are_blocked_while_streaming_after_literal_escape() 
     streaming_block_end = send_prefix.index(f"\n\n    {real_slash_guard}", streaming_idx)
     streaming_block = send_prefix[streaming_idx:streaming_block_end]
 
-    assert flag_idx < literal_idx < streaming_idx
-    assert literal_idx < flag_set_idx < streaming_idx
-    assert "text = text.slice(1);" in send_prefix[literal_idx:streaming_idx]
+    assert flag_idx < literal_idx < normalize_idx < streaming_idx
+    assert literal_idx < flag_set_idx < normalize_idx
+    assert "text = text.slice(1);" in send_prefix[literal_idx:normalize_idx]
+    assert "text = normalized.text;" in send_prefix[normalize_idx:streaming_idx]
+    assert (
+        "_pendingAttachments = normalized.attachments;"
+        in send_prefix[normalize_idx:streaming_idx]
+    )
     assert real_slash_guard in streaming_block
     assert "const waitReason = _isCompactInFlightForCurrentSession()" in streaming_block
     assert "Wait for ${waitReason} before running" in streaming_block
@@ -928,8 +938,15 @@ def test_chat_surfaces_persistent_compaction_status_row() -> None:
     assert "function _hideCompactStatus()" in source
     assert "function _hideCompactionRail()" in source
     assert "_compactStatusEl = _el.querySelector('#chat-compact-status');" in source
-    assert "_setCompactStatus('started', _compactionStatusMessage(payload || {}, source, status)" in body
-    assert "return source === 'manual' ? 'Compacting context...' : 'Automatically compacting context...';" in source
+    assert (
+        "_setCompactStatus('started', _compactionStatusMessage(payload || {}, source, status)"
+        in body
+    )
+    assert (
+        "return source === 'manual' ? 'Compacting context...' : "
+        "'Automatically compacting context...';"
+        in source
+    )
     assert "function _compactionSkipMessage(payload, source)" in source
     assert "if (_INTERNAL_COMPACTION_SKIP_REASONS.has(reason)) return '';" in source
     assert "Request-scoped; session history was not rewritten" in source
@@ -1038,6 +1055,96 @@ def test_chat_compact_inflight_uses_pending_queue_and_safe_terminal_drain() -> N
         toast_body.index("if (status === 'cancelled')") :
         toast_body.index("if (status !== 'completed')")
     ]
+
+
+def test_chat_large_paste_guard_runs_before_queue_and_rpc_send() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    send_start = source.index("async function _onSend()")
+    send_end = source.index("  /* ── Streaming", send_start)
+    send_body = source[send_start:send_end]
+    normalize_start = source.index("async function _normalizeOutgoingComposerPayload(")
+    normalize_end = source.index("  function _addAttachment(file)", normalize_start)
+    normalize_body = source[normalize_start:normalize_end]
+
+    assert "const LARGE_PASTE_CHARS = 20_000;" in source
+    assert "const PAGE_DUMP_CHARS = 8_000;" in source
+    assert "function _normalizeOutgoingComposerPayload(" in source
+    assert "function _inputNormalizationProvenanceFromAttachments(" in source
+    normalize_call = "await _normalizeOutgoingComposerPayload("
+    assert normalize_call in send_body
+    assert send_body.count(normalize_call) == 1
+    assert send_body.index(normalize_call) < send_body.index(
+        "if (_isStreaming || _isCompactInFlightForCurrentSession())"
+    )
+    assert send_body.index(normalize_call) < send_body.index("_enqueuePendingInput(")
+    assert send_body.index(normalize_call) < send_body.index(
+        "await _executeSlashCommand(text)"
+    )
+    assert send_body.index(normalize_call) < send_body.index("const params = { message:")
+    provenance_call = (
+        "const normalizationProvenance = "
+        "_inputNormalizationProvenanceFromAttachments(_pendingAttachments);"
+    )
+    assert provenance_call in send_body
+    assert (
+        "if (normalizationProvenance) params.inputProvenance = normalizationProvenance;"
+        in send_body
+    )
+    assert send_body.index("const params = { message:") < send_body.index(provenance_call)
+    assert send_body.index(provenance_call) < send_body.index("_rpc.call('chat.send', params)")
+    assert "inputNormalization: {" in normalize_body
+    assert "materialEstimatedTokens," in normalize_body
+    assert "guardAction: 'generated_text_attachment'," in normalize_body
+
+
+def test_chat_pending_queue_can_store_normalized_attachments_explicitly() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    enqueue_start = source.index("function _enqueuePendingInput(")
+    enqueue_end = source.index("  function _drainQueueHead()", enqueue_start)
+    enqueue_body = source[enqueue_start:enqueue_end]
+
+    assert "attachmentsOverride = null" in source
+    assert "const queuedAttachments = attachmentsOverride || _pendingAttachments" in enqueue_body
+    assert "attachments: queuedAttachments.map((a) => ({ ...a }))" in enqueue_body
+
+
+def test_chat_manual_pending_enqueue_normalizes_large_pastes() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    current_start = source.index("async function _enqueueCurrentInput()")
+    current_end = source.index("  function _updateStopButton()", current_start)
+    current_body = source[current_start:current_end]
+
+    normalize_idx = current_body.index(
+        "const normalized = await _normalizeOutgoingComposerPayload("
+    )
+    enqueue_idx = current_body.index("_enqueuePendingInput(")
+
+    assert "let text = _textarea.value.trim();" in current_body
+    assert "let isLiteralSlash = false;" in current_body
+    assert "if (text.startsWith('//')) {" in current_body
+    assert "isLiteralSlash = true;" in current_body
+    assert "text = text.slice(1);" in current_body
+    assert "const isSlashCommand = !isLiteralSlash && text.startsWith('/');" in current_body
+    assert "{ allowSlashCommand: isSlashCommand }" in current_body
+    assert normalize_idx < enqueue_idx
+    assert "_pendingAttachments = normalized.attachments;" in current_body
+    assert (
+        "_enqueuePendingInput(text, null, 'the current response', normalized.attachments)"
+        in current_body
+    )
+
+
+def test_chat_large_paste_attachment_base64_is_computed_once() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    normalize_start = source.index("async function _normalizeOutgoingComposerPayload(")
+    normalize_end = source.index("  function _addAttachment(file)", normalize_start)
+    normalize_body = source[normalize_start:normalize_end]
+
+    assert "function _bytesToBase64(bytes)" in source
+    assert "const encoded = _bytesToBase64(bytes);" in normalize_body
+    assert "data: encoded," in normalize_body
+    assert "dataUrl: `data:text/plain;base64,${encoded}`" in normalize_body
+    assert "_encodeUtf8Base64(raw)" not in normalize_body
 
 
 def test_chat_compact_blocking_failure_preserves_pending_queue() -> None:
@@ -1186,7 +1293,10 @@ def test_router_fx_replay_without_live_strip_renders_settled_history() -> None:
     assert "shouldAnimate" not in handler_body
     assert "_rpc.on('session.event.router_decision'" in subscription_body
     assert "_handleRouterDecision(payload);" in subscription_body
-    assert "const liveStrip = _thread.querySelector('.router-fx[data-live=\"true\"]');" in handler_body
+    assert (
+        "const liveStrip = _thread.querySelector('.router-fx[data-live=\"true\"]');"
+        in handler_body
+    )
     assert "liveStrip._fxDecision = payload;" in handler_body
     assert "_routerFxLock(liveStrip, payload);" in handler_body
     assert "preSettled: true," in handler_body
@@ -1346,7 +1456,10 @@ def test_router_fx_history_reanchors_stranded_strip() -> None:
     assert "el.dataset.turnIndex === String(_histUserIdx)" in history_body
     assert "el.dataset.routerIdentity === routerIdentity" in history_body
     # Drop duplicates, re-anchor the survivor, normalize it into history state.
-    assert "ownStrips.forEach((el) => { if (el !== keep) _routerFxRemoveStrip(el); });" in history_body
+    assert (
+        "ownStrips.forEach((el) => { if (el !== keep) _routerFxRemoveStrip(el); });"
+        in history_body
+    )
     assert "_thread.insertBefore(keep, userMsg.nextSibling);" in history_body
     assert "_routerFxNormalizeSettledStrip(keep, 'history', savedUsage);" in history_body
     # The consolidation must precede the existingStrip probe so the relocated
@@ -1726,7 +1839,9 @@ def test_router_decision_without_anchor_is_cached_for_history_replay() -> None:
     assert "_historyHydrating = true;" in history_body
     assert "_historyHydrating = false;" in history_body
     assert "_historyHasRendered = true;" in history_body
-    assert history_body.index("_historyHasRendered = true;") < history_body.index("_flushPendingRouterDecisions();")
+    assert history_body.index("_historyHasRendered = true;") < history_body.index(
+        "_flushPendingRouterDecisions();"
+    )
     assert "_flushPendingRouterDecisions();" in history_body
 
 
@@ -1780,7 +1895,10 @@ def test_router_fx_config_refresh_prunes_stale_model_cache() -> None:
 
 def test_router_fx_settled_semantics_expose_render_mode_and_result() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
-    assert "wrap.dataset.renderMode = opts.renderMode || (opts.preSettled ? 'history' : 'live');" in source
+    assert (
+        "wrap.dataset.renderMode = opts.renderMode || (opts.preSettled ? 'history' : 'live');"
+        in source
+    )
     start = source.index("function _routerFxApplySettledSemantics(wrap, decision, renderMode) {")
     end = source.index("function _routerFxClearVisualResidue(wrap) {", start)
     body = source[start:end]
@@ -2027,7 +2145,10 @@ def test_router_fx_disable_removes_all_strips_without_live_spare_path() -> None:
     # path that competes with history reorder repair.
     source = CHAT_JS.read_text(encoding="utf-8")
 
-    assert "_thread.querySelectorAll('.router-fx').forEach((n) => _routerFxRemoveStrip(n));" in source
+    assert (
+        "_thread.querySelectorAll('.router-fx').forEach((n) => _routerFxRemoveStrip(n));"
+        in source
+    )
     assert ".router-fx:not([data-live=\"true\"])" not in source
     history_start = source.index("async function _loadHistory() {")
     history_end = source.index("  /* ── Send Message", history_start)
@@ -2035,7 +2156,10 @@ def test_router_fx_disable_removes_all_strips_without_live_spare_path() -> None:
     assert "if (!_routerFx.enabled) {" in history_body
     sweep = history_body[history_body.index("if (!_routerFx.enabled) {"):]
     sweep = sweep[: sweep.index("_lastSavingsPopupIdentity")]
-    assert "_thread.querySelectorAll('.router-fx').forEach((el) => _routerFxRemoveStrip(el));" in sweep
+    assert (
+        "_thread.querySelectorAll('.router-fx').forEach((el) => _routerFxRemoveStrip(el));"
+        in sweep
+    )
     assert "dataset.live" not in sweep
 
 

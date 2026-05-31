@@ -100,6 +100,10 @@ _THINKING_LEVELS = {"minimal", "low", "medium", "high", "xhigh", "adaptive"}
 _TIER_TO_ROUTE_CLASS = {"t0": "R0", "t1": "R1", "t2": "R2", "t3": "R3"}
 _ROUTE_CLASS_TO_TIER = {v: k for k, v in _TIER_TO_ROUTE_CLASS.items()}
 _THINKING_MODE_ORDER = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
+_LARGE_CONTEXT_T2_FLOOR_TOKENS = 25_000
+_LARGE_CONTEXT_T3_FLOOR_TOKENS = 80_000
+_LARGE_CONTEXT_T3_CONTEXT_RATIO = 0.40
+_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 _COMPLAINT_TERMS = (
     "不对",
     "不行",
@@ -489,6 +493,61 @@ def _tier_index(tier: str, valid_tiers: list[str]) -> int:
     return valid_tiers.index(tier) if tier in valid_tiers else -1
 
 
+def _token_estimate(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(value, 0)
+    return None
+
+
+def _material_estimated_tokens(ctx: TurnContext, semantic_message: str) -> int:
+    metadata = getattr(ctx, "metadata", {}) or {}
+    candidates: list[int] = [max(len(semantic_message) // 4, 0)]
+
+    top_level = _token_estimate(metadata.get("material_estimated_tokens"))
+    if top_level is not None:
+        candidates.append(top_level)
+
+    normalization = metadata.get("input_normalization")
+    if isinstance(normalization, dict):
+        nested = _token_estimate(normalization.get("material_estimated_tokens"))
+        if nested is not None:
+            candidates.append(nested)
+
+    return max(candidates)
+
+
+def _context_window_tokens(ctx: TurnContext, router_cfg: object) -> int:
+    for candidate in (
+        getattr(router_cfg, "context_window_tokens", None),
+        getattr(getattr(ctx, "config", None), "context_window_tokens", None),
+        getattr(getattr(getattr(ctx, "config", None), "llm", None), "context_window_tokens", None),
+    ):
+        tokens = _token_estimate(candidate)
+        if tokens and tokens > 0:
+            return tokens
+    return _DEFAULT_CONTEXT_WINDOW_TOKENS
+
+
+def _large_context_min_tier(
+    ctx: TurnContext,
+    *,
+    router_cfg: object,
+    semantic_message: str,
+) -> tuple[str, int] | None:
+    material_tokens = _material_estimated_tokens(ctx, semantic_message)
+    context_window = _context_window_tokens(ctx, router_cfg)
+    if (
+        material_tokens >= _LARGE_CONTEXT_T3_FLOOR_TOKENS
+        or material_tokens >= int(context_window * _LARGE_CONTEXT_T3_CONTEXT_RATIO)
+    ):
+        return "t3", material_tokens
+    if material_tokens >= _LARGE_CONTEXT_T2_FLOOR_TOKENS:
+        return "t2", material_tokens
+    return None
+
+
 def _tier_config_value(tier_cfg: object, key: str, default: object = None) -> object:
     if isinstance(tier_cfg, dict):
         return tier_cfg.get(key, default)
@@ -538,6 +597,55 @@ def _detect_complaint(message: str, max_chars: int | None = None) -> list[str]:
 
 def _route_class_for_tier(tier: str) -> str | None:
     return _TIER_TO_ROUTE_CLASS.get(tier)
+
+
+def _apply_large_context_floor(
+    decision: RoutingDecision,
+    *,
+    ctx: TurnContext,
+    router_cfg: object,
+    tiers: dict,
+    valid_tiers: list[str],
+    semantic_message: str,
+    extra: dict | None,
+) -> RoutingDecision:
+    if decision.tier not in valid_tiers:
+        return decision
+
+    floor = _large_context_min_tier(
+        ctx,
+        router_cfg=router_cfg,
+        semantic_message=semantic_message,
+    )
+    if floor is None:
+        return decision
+
+    min_tier, material_tokens = floor
+    if min_tier not in valid_tiers:
+        return decision
+    if _tier_index(decision.tier, valid_tiers) >= _tier_index(min_tier, valid_tiers):
+        return decision
+
+    floored = RoutingDecision(
+        tier=min_tier,
+        model=tiers[min_tier].get("model", decision.model),
+        confidence=decision.confidence,
+        source="large_context_floor",
+    )
+    ctx.metadata["large_context_floor_from_tier"] = decision.tier
+    ctx.metadata["large_context_material_tokens"] = material_tokens
+
+    if extra is not None:
+        extra.setdefault("base_tier", decision.tier)
+        extra["large_context_floor_applied"] = True
+        extra["large_context_floor_from_tier"] = decision.tier
+        extra["large_context_floor_min_tier"] = min_tier
+        extra["large_context_material_tokens"] = material_tokens
+        extra["large_context_pre_floor_source"] = decision.source
+        extra["final_tier"] = min_tier
+        extra["final_route_class"] = _route_class_for_tier(min_tier)
+
+    return floored
 
 
 def _tier_for_route_class(route_class: object) -> str | None:
@@ -990,6 +1098,23 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
             strategy_name=strategy_name,
             extra=routing_extra,
         )
+        thinking_mode, prompt_policy = _reconcile_controller_with_final_tier(
+            thinking_mode,
+            prompt_policy,
+            routing_extra,
+        )
+
+    routing_extra = ctx.metadata.get("routing_extra")
+    decision = _apply_large_context_floor(
+        decision,
+        ctx=ctx,
+        router_cfg=router_cfg,
+        tiers=tiers,
+        valid_tiers=valid_tiers,
+        semantic_message=semantic_message,
+        extra=routing_extra if isinstance(routing_extra, dict) else None,
+    )
+    if decision.source == "large_context_floor" and isinstance(routing_extra, dict):
         thinking_mode, prompt_policy = _reconcile_controller_with_final_tier(
             thinking_mode,
             prompt_policy,

@@ -62,6 +62,16 @@ class _FallbackSequenceProvider(_SequenceProvider):
         return True
 
 
+def _large_reasoning_only_done() -> ProviderDone:
+    return ProviderDone(
+        stop_reason="stop",
+        input_tokens=35_000,
+        output_tokens=2,
+        reasoning_tokens=2,
+        reasoning_content="internal",
+    )
+
+
 class _SelectorClone:
     def __init__(self, provider: _SequenceProvider) -> None:
         self.provider = provider
@@ -341,6 +351,70 @@ async def test_clean_empty_done_can_switch_to_selector_fallback() -> None:
     assert len(provider.calls) == 2
     assert any(event.kind == "done" and event.text == "ok" for event in events)
     assert not any(event.kind == "error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_large_reasoning_only_uses_fallback_before_same_model_retry() -> None:
+    provider = _FallbackSequenceProvider(
+        [
+            [_large_reasoning_only_done()],
+            [
+                ProviderText(text="ok"),
+                ProviderDone(stop_reason="stop", input_tokens=4, output_tokens=1),
+            ],
+        ]
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            thinking=ThinkingLevel.MEDIUM,
+            retry_base_backoff_ms=0,
+            retry_max_backoff_ms=0,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert provider.fallback_reasons == ["reasoning_only"]
+    assert len(provider.calls) == 2
+    assert not any(
+        event.kind == "warning" and event.code == "provider_reasoning_only_retry"
+        for event in events
+    )
+    assert any(
+        event.kind == "warning" and event.code == "provider_large_context_fallback"
+        for event in events
+    )
+    assert any(event.kind == "done" and event.text == "ok" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_large_empty_response_without_fallback_surfaces_clear_error() -> None:
+    provider = _SequenceProvider(
+        [[ProviderDone(stop_reason="stop", input_tokens=35_000, output_tokens=0)]]
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_provider_retries=1,
+            retry_base_backoff_ms=0,
+            retry_max_backoff_ms=0,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert len(provider.calls) == 1
+    error = next(event for event in events if event.kind == "error")
+    assert error.code == "empty_response"
+    assert "large input" in error.message
+    assert "attachment" in error.message
+    assert "summarize" in error.message or "shorten" in error.message
+    assert "stronger model" in error.message
+    assert not any(
+        event.kind == "warning" and event.code == "provider_empty_retry"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

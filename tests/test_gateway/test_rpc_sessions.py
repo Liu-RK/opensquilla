@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ import pytest
 
 from opensquilla.agents.registry import AgentRegistry
 from opensquilla.engine.types import DoneEvent, ErrorEvent
-from opensquilla.gateway import rpc_sessions
+from opensquilla.gateway import rpc_chat, rpc_sessions
 from opensquilla.gateway.agent_tasks import get_agent_task_registry
 from opensquilla.gateway.attachment_ingest import (
     MAX_STAGED_PDF_BYTES,
@@ -22,6 +23,7 @@ from opensquilla.gateway.attachment_ingest import (
 )
 from opensquilla.gateway.auth import Principal
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
+from opensquilla.gateway.input_normalization import LARGE_PASTE_CHARS, estimate_text_tokens
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
 from opensquilla.gateway.rpc_sessions import _normalize_terminal_event_payload
 from opensquilla.gateway.session_streams import get_session_streams
@@ -203,6 +205,21 @@ class FakeSessionManager:
         )
         self._storage._sessions[session_key] = session
         return session
+
+    async def get_or_create(
+        self,
+        session_key: str,
+        agent_id: str = "main",
+        display_name: str | None = None,
+    ):
+        session = await self._storage.get_session(session_key)
+        if session is not None:
+            return session
+        return await self.create(
+            session_key=session_key,
+            agent_id=agent_id,
+            display_name=display_name,
+        )
 
     async def get_transcript(self, key: str) -> list:
         return list(self.transcript)
@@ -1016,6 +1033,258 @@ class TestSessionsSend:
         assert cli_persisted["text"] == "Describe these attachments"
         assert "display_text" not in cli_persisted
         assert cli_runner.run_calls[0]["message"] == "Describe these attachments"
+
+    @pytest.mark.asyncio
+    async def test_web_large_paste_is_normalized_before_turn_runner(
+        self,
+        dispatcher,
+    ):
+        raw = "a" * LARGE_PASTE_CHARS
+        placeholder = "Please process the attached pasted text."
+        web_session = FakeSession(
+            session_key="agent:main:webchat:web-large-paste",
+            session_id="web-large-paste",
+        )
+        web_manager = FakeSessionManager([web_session])
+        web_runner = _RecordingTurnRunner()
+        web_ctx = make_ctx(session_manager=web_manager, turn_runner=web_runner)
+
+        res = await dispatcher.dispatch(
+            "r-web-large-paste",
+            "sessions.send",
+            {
+                "key": web_session.session_key,
+                "message": raw,
+                "inputProvenance": {"kind": "webchat_clip", "surface": "test"},
+                "_source": {"caller_kind": "web", "channel_kind": "webchat"},
+            },
+            web_ctx,
+        )
+        web_task = get_agent_task_registry().get(web_session.session_key)
+        if web_task is not None:
+            await web_task
+
+        assert res.ok is True
+        assert web_runner.run_calls[0]["message"] == placeholder
+        assert web_runner.run_calls[0]["semantic_message"] == placeholder
+        runner_attachments = web_runner.run_calls[0]["attachments"]
+        assert len(runner_attachments) == 1
+        assert runner_attachments[0]["type"] == "text/plain"
+        assert runner_attachments[0]["name"].startswith("webchat-paste-")
+
+        persisted = json.loads(web_manager.created_messages[0][2])
+        assert persisted["text"] == placeholder
+        assert len(persisted["attachments"]) == 1
+        assert persisted["attachments"][0]["name"].startswith("webchat-paste-")
+
+        provenance = web_runner.run_calls[0]["input_provenance"]
+        assert provenance["kind"] == "webchat_clip"
+        assert provenance["surface"] == "test"
+        assert provenance["input_normalization"]["guard_action"] == (
+            "generated_text_attachment"
+        )
+        assert provenance["input_normalization"]["original_chars"] == len(raw)
+        assert provenance["input_normalization"]["generated_attachment_count"] == 1
+        assert provenance["input_normalization"]["material_estimated_tokens"] == (
+            estimate_text_tokens(raw)
+        )
+
+    @pytest.mark.asyncio
+    async def test_sessions_send_large_paste_defaults_to_web_guard(
+        self,
+        dispatcher,
+    ):
+        raw = "a" * LARGE_PASTE_CHARS
+        placeholder = "Please process the attached pasted text."
+        web_session = FakeSession(
+            session_key="agent:main:webchat:untagged-large-paste",
+            session_id="untagged-large-paste",
+        )
+        web_manager = FakeSessionManager([web_session])
+        web_runner = _RecordingTurnRunner()
+        web_ctx = make_ctx(session_manager=web_manager, turn_runner=web_runner)
+
+        res = await dispatcher.dispatch(
+            "r-untagged-large-paste",
+            "sessions.send",
+            {
+                "key": web_session.session_key,
+                "message": raw,
+            },
+            web_ctx,
+        )
+        web_task = get_agent_task_registry().get(web_session.session_key)
+        if web_task is not None:
+            await web_task
+
+        assert res.ok is True
+        assert web_runner.run_calls[0]["message"] == placeholder
+        assert web_runner.run_calls[0]["semantic_message"] == placeholder
+        runner_attachments = web_runner.run_calls[0]["attachments"]
+        assert len(runner_attachments) == 1
+        assert runner_attachments[0]["type"] == "text/plain"
+        assert runner_attachments[0]["name"].startswith("webchat-paste-")
+
+        persisted = json.loads(web_manager.created_messages[0][2])
+        assert persisted["text"] == placeholder
+        assert len(persisted["attachments"]) == 1
+        assert persisted["attachments"][0]["name"].startswith("webchat-paste-")
+
+        provenance = web_runner.run_calls[0]["input_provenance"]
+        assert provenance["input_normalization"]["guard_action"] == (
+            "generated_text_attachment"
+        )
+        assert provenance["input_normalization"]["original_chars"] == len(raw)
+        assert provenance["input_normalization"]["generated_attachment_count"] == 1
+        assert provenance["input_normalization"]["material_estimated_tokens"] == (
+            estimate_text_tokens(raw)
+        )
+
+    @pytest.mark.asyncio
+    async def test_cli_large_message_is_not_auto_attachmentized(
+        self,
+        dispatcher,
+    ):
+        raw = "a" * LARGE_PASTE_CHARS
+        cli_session = FakeSession(
+            session_key="agent:main:cli:cli-large-paste",
+            session_id="cli-large-paste",
+        )
+        cli_manager = FakeSessionManager([cli_session])
+        cli_runner = _RecordingTurnRunner()
+        cli_ctx = make_ctx(session_manager=cli_manager, turn_runner=cli_runner)
+
+        res = await dispatcher.dispatch(
+            "r-cli-large-paste",
+            "sessions.send",
+            {
+                "key": cli_session.session_key,
+                "message": raw,
+                "_source": {"caller_kind": "cli", "channel_kind": "cli"},
+            },
+            cli_ctx,
+        )
+        cli_task = get_agent_task_registry().get(cli_session.session_key)
+        if cli_task is not None:
+            await cli_task
+
+        assert res.ok is True
+        assert cli_manager.created_messages[0][2] == raw
+        assert cli_runner.run_calls[0]["message"] == raw
+        assert cli_runner.run_calls[0]["semantic_message"] == raw
+        assert cli_runner.run_calls[0]["attachments"] == []
+        assert "input_normalization" not in cli_runner.run_calls[0][
+            "input_provenance"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_chat_send_large_web_paste_uses_sessions_guard(
+        self,
+        dispatcher,
+    ):
+        assert rpc_chat._handle_chat_send is not None
+        raw = "a" * LARGE_PASTE_CHARS
+        placeholder = "Please process the attached pasted text."
+        attachment = {"type": "text/plain", "data": "bm90ZQ==", "name": "note.txt"}
+        chat_session = FakeSession(
+            session_key="agent:main:webchat:chat-large-paste",
+            session_id="chat-large-paste",
+        )
+        chat_manager = FakeSessionManager([chat_session])
+        chat_runner = _RecordingTurnRunner()
+        chat_ctx = make_ctx(session_manager=chat_manager, turn_runner=chat_runner)
+
+        res = await dispatcher.dispatch(
+            "r-chat-large-paste",
+            "chat.send",
+            {
+                "sessionKey": chat_session.session_key,
+                "message": raw,
+                "displayText": "",
+                "attachments": [attachment],
+            },
+            chat_ctx,
+        )
+        chat_task = get_agent_task_registry().get(chat_session.session_key)
+        if chat_task is not None:
+            await chat_task
+
+        assert res.ok is True
+        assert chat_runner.run_calls[0]["message"] == placeholder
+        assert chat_runner.run_calls[0]["semantic_message"] == placeholder
+        assert len(chat_runner.run_calls[0]["attachments"]) == 2
+        assert chat_runner.run_calls[0]["attachments"][0]["name"].startswith(
+            "webchat-paste-"
+        )
+        assert chat_runner.run_calls[0]["attachments"][1]["name"] == "note.txt"
+        persisted = json.loads(chat_manager.created_messages[0][2])
+        assert persisted["text"] == placeholder
+        assert persisted["display_text"] == ""
+
+    @pytest.mark.asyncio
+    async def test_chat_send_client_normalized_paste_preserves_provenance(
+        self,
+        dispatcher,
+    ):
+        assert rpc_chat._handle_chat_send is not None
+        raw = "a" * LARGE_PASTE_CHARS
+        placeholder = "Please process the attached pasted text."
+        attachment = {
+            "type": "text/plain",
+            "mime": "text/plain",
+            "data": base64.b64encode(raw.encode("utf-8")).decode("ascii"),
+            "name": "webchat-paste-20260531-000000.txt",
+        }
+        client_provenance = {
+            "kind": "web_message",
+            "source": "WebChat",
+            "input_normalization": {
+                "source": "input_normalization",
+                "original_chars": len(raw),
+                "material_estimated_tokens": estimate_text_tokens(raw),
+                "marker_score": 0,
+                "generated_attachment_count": 1,
+                "guard_action": "generated_text_attachment",
+            },
+        }
+        chat_session = FakeSession(
+            session_key="agent:main:webchat:client-normalized-paste",
+            session_id="client-normalized-paste",
+        )
+        chat_manager = FakeSessionManager([chat_session])
+        chat_runner = _RecordingTurnRunner()
+        chat_ctx = make_ctx(session_manager=chat_manager, turn_runner=chat_runner)
+
+        res = await dispatcher.dispatch(
+            "r-chat-client-normalized-paste",
+            "chat.send",
+            {
+                "sessionKey": chat_session.session_key,
+                "message": placeholder,
+                "displayText": placeholder,
+                "attachments": [attachment],
+                "inputProvenance": client_provenance,
+            },
+            chat_ctx,
+        )
+        chat_task = get_agent_task_registry().get(chat_session.session_key)
+        if chat_task is not None:
+            await chat_task
+
+        assert res.ok is True
+        assert chat_runner.run_calls[0]["message"] == placeholder
+        assert chat_runner.run_calls[0]["semantic_message"] == placeholder
+        assert len(chat_runner.run_calls[0]["attachments"]) == 1
+        provenance = chat_runner.run_calls[0]["input_provenance"]
+        assert provenance["kind"] == "web_message"
+        assert provenance["source"] == "WebChat"
+        assert provenance["input_normalization"]["guard_action"] == (
+            "generated_text_attachment"
+        )
+        assert provenance["input_normalization"]["original_chars"] == len(raw)
+        assert provenance["input_normalization"]["material_estimated_tokens"] == (
+            estimate_text_tokens(raw)
+        )
 
     @pytest.mark.asyncio
     async def test_send_rejects_aggregate_attachment_cap_before_start_and_evict(

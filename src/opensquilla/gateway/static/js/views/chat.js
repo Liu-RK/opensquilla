@@ -243,6 +243,21 @@ const ChatView = (() => {
   // Single source of truth for the inline-vs-staged threshold; never re-typed.
   const INLINE_THRESHOLD_BYTES = 2_000_000;
   const ATTACHMENT_TEXT_HARD_CAP_BYTES = INLINE_THRESHOLD_BYTES;
+  const LARGE_PASTE_CHARS = 20_000;
+  const PAGE_DUMP_CHARS = 8_000;
+  const PAGE_DUMP_MARKER_MIN_SCORE = 3;
+  const PAGE_DUMP_MARKERS = [
+    'Chat session',
+    'agent:main:webchat:',
+    'Still waiting for agent response',
+    'AI MODEL ROUTER',
+    'The provider returned an empty response',
+    'Pulsing',
+    'Running',
+    'Send a message',
+    'SYSTEM',
+    'SQUILLA',
+  ];
   const ATTACHMENT_IMAGE_HARD_CAP_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_PDF_HARD_CAP_BYTES = 30 * 1024 * 1024; // staged PDF bridge cap
   const ATTACHMENT_IMAGE_MIMES = [
@@ -6094,6 +6109,15 @@ const ChatView = (() => {
       text = text.slice(1);
       hasPayload = text || _pendingAttachments.length > 0;
     }
+    const isSlashCommand = !isLiteralSlash && text.startsWith('/');
+    const normalized = await _normalizeOutgoingComposerPayload(
+      text,
+      _pendingAttachments,
+      { allowSlashCommand: isSlashCommand },
+    );
+    if (!normalized) return;
+    text = normalized.text;
+    _pendingAttachments = normalized.attachments;
 
     // While a turn is streaming, Send enqueues. Use ESC or the
     // Stop button to actually halt the current response. Manual compaction uses
@@ -6116,6 +6140,7 @@ const ChatView = (() => {
         _isCompactInFlightForCurrentSession()
           ? 'context compaction'
           : 'the current response',
+        _pendingAttachments,
       );
       return;
     }
@@ -6173,6 +6198,8 @@ const ChatView = (() => {
         return { type: a.mime || 'image/png', data: a.data, mime: a.mime, name: a.name };
       });
     }
+    const normalizationProvenance = _inputNormalizationProvenanceFromAttachments(_pendingAttachments);
+    if (normalizationProvenance) params.inputProvenance = normalizationProvenance;
 
     // Clear input and attachments
     _textarea.value = '';
@@ -8023,6 +8050,126 @@ const ChatView = (() => {
 
   /* ── Attachments ────────────────────────────────────────────────────── */
 
+  function _estimateTextTokens(text) {
+    return text ? Math.max(1, Math.floor(text.length / 4)) : 0;
+  }
+
+  function _pageDumpMarkerScore(text) {
+    const lowered = String(text || '').toLowerCase();
+    return PAGE_DUMP_MARKERS.reduce((score, marker) => (
+      lowered.includes(marker.toLowerCase()) ? score + 1 : score
+    ), 0);
+  }
+
+  function _bytesToBase64(bytes) {
+    const chunkSize = 0x8000;
+    const chunks = [];
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
+    }
+    return btoa(chunks.join(''));
+  }
+
+  function _largePasteAttachmentName(kind) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '-').replace('Z', '');
+    return `${kind === 'page_dump' ? 'webchat-page-dump' : 'webchat-paste'}-${stamp}.txt`;
+  }
+
+  function _nonNegativeInteger(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return 0;
+    return Math.floor(number);
+  }
+
+  function _inputNormalizationProvenanceFromAttachments(attachments) {
+    const generated = (attachments || [])
+      .filter((a) => a && a.generated === true && a.inputNormalization);
+    if (!generated.length) return null;
+    const meta = generated[0].inputNormalization || {};
+    return {
+      kind: 'web_message',
+      source: 'WebChat',
+      input_normalization: {
+        source: 'input_normalization',
+        original_chars: _nonNegativeInteger(meta.originalChars),
+        material_estimated_tokens: _nonNegativeInteger(meta.materialEstimatedTokens),
+        marker_score: _nonNegativeInteger(meta.markerScore),
+        generated_attachment_count: generated.length,
+        guard_action: meta.guardAction || 'generated_text_attachment',
+      },
+    };
+  }
+
+  async function _normalizeOutgoingComposerPayload(text, attachments, options = {}) {
+    const raw = String(text || '');
+    const markerScore = _pageDumpMarkerScore(raw);
+    const isPageDump = raw.length >= PAGE_DUMP_CHARS && markerScore >= PAGE_DUMP_MARKER_MIN_SCORE;
+    const isLargePaste = raw.length >= LARGE_PASTE_CHARS;
+    if (options.allowSlashCommand && raw.startsWith('/')) {
+      return {
+        text: raw,
+        displayText: raw,
+        attachments: attachments.map((a) => ({ ...a })),
+        normalized: null,
+      };
+    }
+    if (!isPageDump && !isLargePaste) {
+      return {
+        text: raw,
+        displayText: raw,
+        attachments: attachments.map((a) => ({ ...a })),
+        normalized: null,
+      };
+    }
+
+    const kind = isPageDump ? 'page_dump' : 'large_paste';
+    const bytes = new TextEncoder().encode(raw);
+    const materialEstimatedTokens = _estimateTextTokens(raw);
+    if (bytes.length > ATTACHMENT_TEXT_HARD_CAP_BYTES) {
+      UI.toast(
+        `Pasted text is too large to attach directly (${Math.round(bytes.length / 1000 / 1000)} MB). Save it as a file or send a shorter summary.`,
+        'warn',
+        6000,
+      );
+      return null;
+    }
+
+    const encoded = _bytesToBase64(bytes);
+    const generatedAttachment = {
+      kind: 'inline',
+      local_id: _nextAttachmentId++,
+      name: _largePasteAttachmentName(kind),
+      mime: 'text/plain',
+      size: bytes.length,
+      data: encoded,
+      dataUrl: `data:text/plain;base64,${encoded}`,
+      generated: true,
+      normalizationKind: kind,
+      inputNormalization: {
+        kind,
+        originalChars: raw.length,
+        markerScore,
+        materialEstimatedTokens,
+        guardAction: 'generated_text_attachment',
+      },
+    };
+    const message = kind === 'page_dump'
+      ? 'Please process the attached WebChat page dump.'
+      : 'Please process the attached pasted text.';
+    UI.toast('Large pasted text was attached as a .txt file.', 'info', 2500);
+    return {
+      text: message,
+      displayText: message,
+      attachments: [...attachments.map((a) => ({ ...a })), generatedAttachment],
+      normalized: {
+        kind,
+        originalChars: raw.length,
+        markerScore,
+        materialEstimatedTokens,
+      },
+    };
+  }
+
   function _addAttachment(file) {
     const mime = _resolveAttachmentMime(file);
     if (!_isAllowedAttachmentMime(mime)) {
@@ -8323,7 +8470,12 @@ const ChatView = (() => {
     _pendingArea.innerHTML = html;
   }
 
-  function _enqueuePendingInput(text, toastMessage = null, waitReason = 'the current response') {
+  function _enqueuePendingInput(
+    text,
+    toastMessage = null,
+    waitReason = 'the current response',
+    attachmentsOverride = null,
+  ) {
     if (_pendingQueue.length >= _MAX_PENDING) {
       UI.toast(
         `Pending queue full (${_MAX_PENDING}). Wait for ${waitReason} or clear.`,
@@ -8332,9 +8484,10 @@ const ChatView = (() => {
       );
       return false;
     }
+    const queuedAttachments = attachmentsOverride || _pendingAttachments;
     _pendingQueue.push({
       text,
-      attachments: _pendingAttachments.map((a) => ({ ...a })),
+      attachments: queuedAttachments.map((a) => ({ ...a })),
       intent: _pendingSessionIntent,
     });
     _textarea.value = '';
@@ -8557,11 +8710,26 @@ const ChatView = (() => {
   // Enqueue the current textarea content into _pendingQueue. Mirrors the
   // streaming-branch logic in _onSend so Alt+↓ produces the same shape of
   // entry as "Send during streaming".
-  function _enqueueCurrentInput() {
-    const text = _textarea.value.trim();
-    const hasPayload = text || _pendingAttachments.length > 0;
+  async function _enqueueCurrentInput() {
+    let text = _textarea.value.trim();
+    let hasPayload = text || _pendingAttachments.length > 0;
+    let isLiteralSlash = false;
+    if (text.startsWith('//')) {
+      isLiteralSlash = true;
+      text = text.slice(1);
+      hasPayload = text || _pendingAttachments.length > 0;
+    }
+    const isSlashCommand = !isLiteralSlash && text.startsWith('/');
     if (!hasPayload) return false;
-    return _enqueuePendingInput(text);
+    const normalized = await _normalizeOutgoingComposerPayload(
+      text,
+      _pendingAttachments,
+      { allowSlashCommand: isSlashCommand },
+    );
+    if (!normalized) return false;
+    text = normalized.text;
+    _pendingAttachments = normalized.attachments;
+    return _enqueuePendingInput(text, null, 'the current response', normalized.attachments);
   }
 
   function _updateStopButton() {

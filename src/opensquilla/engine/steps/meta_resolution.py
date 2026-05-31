@@ -150,6 +150,16 @@ def _hits_cancel_keywords(message: str, keywords: tuple[str, ...]) -> bool:
     return False
 
 
+def _current_semantic_text(ctx: TurnContext) -> str:
+    candidate = (
+        getattr(ctx, "semantic_message", None)
+        or getattr(ctx, "raw_message", None)
+        or getattr(ctx, "message", "")
+        or ""
+    )
+    return str(candidate)
+
+
 def _chat_pending_fields(schema, awaiting):
     """Return tuple of fields not yet in awaiting_filled_json (chat mode).
 
@@ -587,17 +597,17 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
         log.warning("meta_resolution.load_failed", error=str(exc))
         return ctx
 
-    # Use ``ctx.message`` (not ``semantic_message``) so the string used
-    # for matching is the same one stuffed into ``MetaMatch.inputs``
-    # downstream. Earlier divergence — match on semantic, render on raw
-    # — meant downstream Jinja templates could see a different message
-    # than the one that fired the trigger.
-    message_lower = (ctx.message or "").lower()
+    # Use the normalized current user intent for semantic trigger work.
+    # Raw/page-dump material can still live in ``ctx.message`` on some direct
+    # paths after input normalization, but meta triggers and templates should
+    # see the same semantic text.
+    semantic_text = _current_semantic_text(ctx)
+    message_lower = semantic_text.lower()
     if not message_lower:
         return ctx
 
     # Sticky-cancel: explicit user opt-out always wins over a stale match.
-    if _hits_cancel_keywords(ctx.message or "", _STICKY_CANCEL_KEYWORDS):
+    if _hits_cancel_keywords(semantic_text, _STICKY_CANCEL_KEYWORDS):
         _sticky_drop(session_id)
 
     matched: list[tuple[int, str, object, str]] = []
@@ -628,7 +638,7 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
 
     sticky_replay = False
     if not matched:
-        if _is_skill_marketplace_intent(ctx.message or ""):
+        if _is_skill_marketplace_intent(semantic_text):
             _sticky_drop(session_id)
             return ctx
 
@@ -694,7 +704,7 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
     match = MetaMatch(
         plan=chosen_plan,  # type: ignore[arg-type]
         inputs=make_meta_inputs(
-            user_message=ctx.message,
+            user_message=semantic_text,
             system_prompt=getattr(ctx, "system_prompt", ""),
         ),
     )
@@ -770,6 +780,6 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
         candidate_list=[(n, p) for p, n, _t in candidate_digest],
         # Include the head of the actual input so an operator can
         # diagnose accidental fires from the log alone.
-        message_head=(ctx.message or "")[:200],
+        message_head=semantic_text[:200],
     )
     return ctx

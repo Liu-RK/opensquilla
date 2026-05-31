@@ -362,6 +362,47 @@ async def test_confidence_gate_falls_back_low_confidence_non_default_text_tier(
 
 
 @pytest.mark.asyncio
+async def test_large_material_estimate_floors_low_router_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(monkeypatch, "t1", 0.91, {"route_class": "R1"})
+    ctx = make_context("Please process the attached pasted text.")
+    ctx.metadata["input_normalization"] = {
+        "guard_action": "generated_text_attachment",
+        "material_estimated_tokens": 45_000,
+    }
+    ctx.metadata["material_estimated_tokens"] = 45_000
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routed_tier"] == "t2"
+    assert routed.metadata["routing_source"] == "large_context_floor"
+    assert routed.metadata["large_context_floor_from_tier"] == "t1"
+    assert routed.metadata["large_context_material_tokens"] == 45_000
+    assert routed.metadata["routing_extra"]["final_tier"] == "t2"
+
+
+@pytest.mark.asyncio
+async def test_large_material_ratio_floors_low_router_tier_to_t3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(monkeypatch, "t1", 0.91, {"route_class": "R1"})
+    ctx = make_context("Please process the attached pasted text.")
+    object.__setattr__(ctx.config.squilla_router, "context_window_tokens", 100_000)
+    ctx.metadata["input_normalization"] = {
+        "guard_action": "generated_text_attachment",
+        "material_estimated_tokens": 40_000,
+    }
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routed_tier"] == "t3"
+    assert routed.metadata["routing_source"] == "large_context_floor"
+    assert routed.metadata["large_context_floor_from_tier"] == "t1"
+    assert routed.metadata["large_context_material_tokens"] == 40_000
+
+
+@pytest.mark.asyncio
 async def test_anti_downgrade_keeps_recent_higher_tier_despite_confidence_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1523,6 +1523,221 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
     }, after_hydration
 
 
+def test_webchat_large_paste_auto_attaches_text_in_real_browser(tmp_path: Path) -> None:
+    if os.environ.get("OPENSQUILLA_WEBUI_BROWSER_CHAT_E2E") != "1":
+        pytest.skip("set OPENSQUILLA_WEBUI_BROWSER_CHAT_E2E=1 to run chat browser e2e")
+
+    port = _free_port()
+    server_script = tmp_path / "webui_large_paste_server.py"
+    browser_script = tmp_path / "webui_large_paste_browser.js"
+    server_script.write_text(
+        textwrap.dedent(
+            f"""
+            import uvicorn
+
+            from opensquilla.gateway.app import create_gateway_app
+            from opensquilla.gateway.config import AuthConfig, GatewayConfig
+
+            config = GatewayConfig(
+                host="127.0.0.1",
+                port={port},
+                auth=AuthConfig(mode="none"),
+            )
+            app = create_gateway_app(config)
+
+            if __name__ == "__main__":
+                uvicorn.run(app, host="127.0.0.1", port={port}, log_level="warning")
+            """
+        ),
+        encoding="utf-8",
+    )
+    browser_script.write_text(
+        textwrap.dedent(
+            r"""
+            const { chromium } = require("playwright");
+
+            async function waitRpc(page) {
+              await page.waitForFunction(
+                () =>
+                  typeof App !== "undefined" &&
+                  App.getRpc &&
+                  App.getRpc()?.state === "connected",
+                { timeout: 15000 }
+              );
+            }
+
+            (async () => {
+              const browser = await chromium.launch({ headless: true });
+              const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+              const errors = [];
+              page.on("pageerror", err => errors.push(String(err)));
+
+              await page.goto(process.env.TARGET_URL, {
+                waitUntil: "domcontentloaded",
+                timeout: 30000,
+              });
+              await page.waitForSelector("#chat-textarea", { timeout: 15000 });
+              await waitRpc(page);
+
+              await page.evaluate(() => {
+                window.__largePaste = { calls: [] };
+                const rpc = App.getRpc();
+                const originalCall = rpc.call.bind(rpc);
+                rpc.call = (method, params = {}) => {
+                  if (method === "tools.search_provider") {
+                    return Promise.resolve({ provider: "none" });
+                  }
+                  if (method === "config.get") {
+                    return Promise.resolve({
+                      permissions: { default_mode: "ask" },
+                      squilla_router: { enabled: false, rollout_phase: "off", tiers: {} },
+                    });
+                  }
+                  if (method === "chat.history") {
+                    return Promise.resolve({
+                      messages: [],
+                      history_scope: "complete",
+                      has_more: false,
+                    });
+                  }
+                  if (method === "sessions.messages.subscribe") {
+                    return Promise.resolve({
+                      subscribed: true,
+                      key: params.key,
+                      current_stream_seq: 0,
+                      replay_complete: true,
+                      replayed_count: 0,
+                      run_status: "idle",
+                    });
+                  }
+                  if (method === "chat.send") {
+                    window.__largePaste.calls.push({ method, params });
+                    return Promise.resolve({ task_id: "large-paste-task" });
+                  }
+                  return originalCall(method, params);
+                };
+              });
+
+              await page.fill("#chat-textarea", "x".repeat(20000));
+              await page.click("#chat-btn-send");
+              await page.waitForFunction(
+                () => window.__largePaste?.calls?.length === 1,
+                { timeout: 5000 }
+              );
+
+              const payload = await page.evaluate(() => {
+                const call = window.__largePaste.calls[0];
+                const params = call.params;
+                const attachment = params.attachments?.[0] || {};
+                const attachmentData = String(attachment.data || "");
+                const inputProvenance = params.inputProvenance || {};
+                const inputNormalization = inputProvenance.input_normalization || {};
+                let decodedAttachmentText = "";
+                try {
+                  const bytes = Uint8Array.from(atob(attachmentData), char =>
+                    char.charCodeAt(0)
+                  );
+                  decodedAttachmentText = new TextDecoder().decode(bytes);
+                } catch (_err) {
+                  decodedAttachmentText = "";
+                }
+                const userBubbleText = document.querySelector(".msg.user")?.textContent || "";
+                const attachmentText =
+                  document.querySelector(".msg.user .msg-attachments")?.textContent || "";
+                return {
+                  callMethod: call.method,
+                  message: params.message,
+                  messageLength: String(params.message || "").length,
+                  attachmentCount: Array.isArray(params.attachments)
+                    ? params.attachments.length
+                    : 0,
+                  attachmentName: attachment.name || "",
+                  attachmentMime: attachment.mime || attachment.type || "",
+                  attachmentDataLength: attachmentData.length,
+                  attachmentDataLooksBase64: /^[A-Za-z0-9+/]+={0,2}$/.test(attachmentData),
+                  attachmentDecodedLength: decodedAttachmentText.length,
+                  attachmentDecodedMatchesPaste: decodedAttachmentText === "x".repeat(20000),
+                  inputProvenanceKind: inputProvenance.kind || "",
+                  inputProvenanceSource: inputProvenance.source || "",
+                  inputNormalizationGuardAction: inputNormalization.guard_action || "",
+                  inputNormalizationOriginalChars: inputNormalization.original_chars || 0,
+                  inputNormalizationMaterialEstimatedTokens:
+                    inputNormalization.material_estimated_tokens || 0,
+                  inputNormalizationGeneratedAttachmentCount:
+                    inputNormalization.generated_attachment_count || 0,
+                  bubbleHasPlaceholder: userBubbleText.includes(
+                    "Please process the attached pasted text."
+                  ),
+                  bubbleHasLongRawPaste: userBubbleText.includes("x".repeat(500)),
+                  attachmentChipHasGeneratedName: attachmentText.includes("webchat-paste-"),
+                };
+              });
+              payload.pageErrors = errors;
+
+              await browser.close();
+              console.log(JSON.stringify(payload));
+            })().catch(err => {
+              console.error(err && err.stack ? err.stack : String(err));
+              process.exit(1);
+            });
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["OPENSQUILLA_STATE_DIR"] = str(tmp_path / "state")
+    env["OPENSQUILLA_LOG_DIR"] = str(tmp_path / "logs")
+    server = subprocess.Popen(
+        [sys.executable, str(server_script)],
+        cwd=Path.cwd(),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        _wait_for_health(port, server)
+        _install_playwright(tmp_path)
+        result = subprocess.run(
+            [_node(), str(browser_script)],
+            cwd=tmp_path,
+            env=dict(env, TARGET_URL=f"http://127.0.0.1:{port}/control/chat"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    finally:
+        _stop_process(server)
+
+    assert payload["callMethod"] == "chat.send", payload
+    assert payload["message"] == "Please process the attached pasted text.", payload
+    assert payload["messageLength"] < 20000, payload
+    assert payload["attachmentCount"] == 1, payload
+    assert payload["attachmentName"].startswith("webchat-paste-"), payload
+    assert payload["attachmentName"].endswith(".txt"), payload
+    assert payload["attachmentMime"] == "text/plain", payload
+    assert payload["attachmentDataLength"] > 1000, payload
+    assert payload["attachmentDataLooksBase64"] is True, payload
+    assert payload["attachmentDecodedLength"] == 20000, payload
+    assert payload["attachmentDecodedMatchesPaste"] is True, payload
+    assert payload["inputProvenanceKind"] == "web_message", payload
+    assert payload["inputProvenanceSource"] == "WebChat", payload
+    assert payload["inputNormalizationGuardAction"] == "generated_text_attachment", payload
+    assert payload["inputNormalizationOriginalChars"] == 20000, payload
+    assert payload["inputNormalizationMaterialEstimatedTokens"] == 5000, payload
+    assert payload["inputNormalizationGeneratedAttachmentCount"] == 1, payload
+    assert payload["bubbleHasPlaceholder"] is True, payload
+    assert payload["bubbleHasLongRawPaste"] is False, payload
+    assert payload["attachmentChipHasGeneratedName"] is True, payload
+    assert payload["pageErrors"] == [], payload
+
+
 def test_completed_reconnect_without_replay_refreshes_history_in_real_browser(
     tmp_path: Path,
 ) -> None:
@@ -1633,7 +1848,9 @@ def test_completed_reconnect_without_replay_refreshes_history_in_real_browser(
                           },
                           {
                             role: "assistant",
-                            text: "未能解析回复：\n  - field 'intent': '不要用这个skill实施' not in choices",
+                            text:
+                              "未能解析回复：\n  - field 'intent': " +
+                              "'不要用这个skill实施' not in choices",
                             message_id: "completed-reconnect-a1",
                             timestamp: "2026-05-31T00:38:28Z",
                             model: "openrouter/deepseek-v4-flash",
@@ -1673,7 +1890,10 @@ def test_completed_reconnect_without_replay_refreshes_history_in_real_browser(
               );
               await page.waitForSelector("#chat-textarea", { timeout: 15000 });
               await page.waitForFunction(
-                () => document.querySelector(".msg.user")?.textContent.includes("late single chunk"),
+                () =>
+                  document.querySelector(".msg.user")?.textContent.includes(
+                    "late single chunk"
+                  ),
                 { timeout: 5000 }
               );
               const userOnly = await page.evaluate(() => ({

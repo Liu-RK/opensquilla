@@ -234,6 +234,31 @@ async def test_meta_resolution_matches_trigger() -> None:
 
 
 @pytest.mark.asyncio
+async def test_meta_resolution_ignores_trigger_inside_raw_page_dump() -> None:
+    spec = _make_meta_spec(
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=10,
+    )
+    loader = _FakeLoader([spec])
+    semantic_text = "Please process the attached WebChat page dump."
+    ctx = SimpleNamespace(
+        message=(
+            "WebChat page dump: navigation, ads, contacts, and a copied section "
+            "mentioning 家庭日程 inside the attached material."
+        ),
+        raw_message=semantic_text,
+        semantic_message=semantic_text,
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert "meta_skill_match" not in out.metadata
+
+
+@pytest.mark.asyncio
 async def test_meta_resolution_semantic_fallback_matches_without_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

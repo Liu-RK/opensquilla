@@ -15,6 +15,7 @@ from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.engine.start_turn import start_turn_via_runtime
 from opensquilla.gateway import attachment_ingest as _attachment_ingest
 from opensquilla.gateway.agent_tasks import get_agent_task_registry
+from opensquilla.gateway.input_normalization import normalize_incoming_text
 from opensquilla.gateway.rpc import RpcContext, RpcHandlerError, RpcUnavailableError, get_dispatcher
 from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.gateway.session_services import (
@@ -161,6 +162,26 @@ def _trusted_elevated_hint(ctx: RpcContext, source_hint: dict[str, Any]) -> str 
     if isinstance(value, str) and value in _ELEVATED_MODES and ctx.principal.is_owner:
         return value
     return None
+
+
+def _normalize_session_send_source_hint(params: dict[str, Any]) -> dict[str, Any]:
+    raw_hint = params.get("_source")
+    source_hint = dict(raw_hint) if isinstance(raw_hint, dict) else {}
+    caller_kind = str(
+        source_hint.get("caller_kind") or source_hint.get("callerKind") or ""
+    ).strip().lower()
+    channel_kind = str(
+        source_hint.get("channel_kind") or source_hint.get("channelKind") or ""
+    ).strip().lower()
+    if caller_kind:
+        source_hint.setdefault("caller_kind", caller_kind)
+    if channel_kind:
+        source_hint.setdefault("channel_kind", channel_kind)
+    if caller_kind == "cli" or channel_kind == "cli":
+        return source_hint
+    source_hint.setdefault("caller_kind", "web")
+    source_hint.setdefault("channel_kind", "web")
+    return source_hint
 
 
 _STREAM_IDLE_TIMEOUT_CODE = "stream_idle_timeout"
@@ -831,7 +852,19 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
         raise ValueError("params.message is required")
 
     message_text: str = params["message"]
-    semantic_message_text = message_text
+    source_hint = _normalize_session_send_source_hint(params)
+    incoming_attachments = params.get("attachments", [])
+    normalized_input = normalize_incoming_text(
+        message_text,
+        source_hint=source_hint,
+        attachments=incoming_attachments if isinstance(incoming_attachments, list) else [],
+    )
+    message_text = normalized_input.message_text
+    semantic_message_text = normalized_input.semantic_message
+    combined_attachments = [
+        *normalized_input.generated_attachments,
+        *(incoming_attachments if isinstance(incoming_attachments, list) else []),
+    ]
     attachments_cfg = getattr(ctx.config, "attachments", None)
     persist_enabled = bool(getattr(attachments_cfg, "persist_transcripts", True))
     media_root = media_root_from_config(ctx.config)
@@ -839,7 +872,7 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
     disk_budget = getattr(attachments_cfg, "transcript_disk_budget_bytes", None)
     ingested_attachments = await _attachment_ingest.ingest_attachments(
         message_text,
-        params.get("attachments", []),
+        combined_attachments,
         failure_mode="raise",
         material_root=media_root,
         session_id=session_id,
@@ -882,9 +915,6 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
     elif session_intent is not SessionIntent.CONTINUE:
         raise RuntimeError("Session intent handling requires SessionManager.apply_intent")
 
-    source_hint = params.get("_source") if isinstance(params, dict) else None
-    if not isinstance(source_hint, dict):
-        source_hint = {}
     display_text = params.get("displayText") if source_hint.get("caller_kind") == "web" else None
     if display_text is not None and not isinstance(display_text, str):
         display_text = None
@@ -922,10 +952,17 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
         route_envelope.metadata["elevated"] = elevated_hint
 
     capture_controls = _normalize_memory_capture_controls(params)
-    if capture_controls["input_provenance"] is not None:
+    input_provenance = capture_controls["input_provenance"]
+    if input_provenance is not None:
+        input_provenance = dict(input_provenance)
+    else:
+        input_provenance = dict(route_envelope.input_provenance)
+    if normalized_input.metadata.get("guard_action") != "none":
+        input_provenance["input_normalization"] = normalized_input.metadata
+    if input_provenance != route_envelope.input_provenance:
         route_envelope = replace(
             route_envelope,
-            input_provenance=capture_controls["input_provenance"],
+            input_provenance=input_provenance,
         )
     run_kind = capture_controls["run_kind"] or "session_turn"
 

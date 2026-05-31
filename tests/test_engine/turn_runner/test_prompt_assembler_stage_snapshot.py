@@ -196,6 +196,7 @@ def _patch_run_pipeline(runner, turn_factory, provider, raises=None):
         semantic_message=None, ingress_pipeline_steps=None,
         prev_assistant_text=None, prev_assistant_usage=None,
         history_user_texts=None, flags_text_override=None, tool_context=None,
+        normalization_metadata=None,
     ):  # noqa: ARG001
         if raises is not None:
             raise raises("equivalence pipeline boom")

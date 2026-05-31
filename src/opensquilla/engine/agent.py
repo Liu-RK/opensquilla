@@ -178,6 +178,7 @@ _PROVIDER_CONTEXT_REPAIR_PROMPT = (
     "tool arguments. Regenerate the complete tool arguments from the available "
     "source context and retry the tool call. Do not copy compacted placeholders."
 )
+_LARGE_CONTEXT_INVALID_RESPONSE_INPUT_TOKENS = 30_000
 _COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
     {
         "_opensquilla_compacted_tool_arguments",
@@ -370,6 +371,21 @@ class _ProviderAttemptKind(StrEnum):
 
 class _IterationStreamTimeoutError(TimeoutError):
     """Raised when provider streaming exceeds the active Agent iteration budget."""
+
+
+def _is_large_context_invalid_response(
+    kind: _ProviderAttemptKind,
+    *,
+    input_tokens: int,
+) -> bool:
+    return (
+        kind
+        in {
+            _ProviderAttemptKind.REASONING_ONLY,
+            _ProviderAttemptKind.MALFORMED_EMPTY,
+        }
+        and input_tokens >= _LARGE_CONTEXT_INVALID_RESPONSE_INPUT_TOKENS
+    )
 
 
 @dataclass(frozen=True)
@@ -2474,6 +2490,40 @@ class Agent:
                             iter_reasoning_tokens=iter_reasoning_tokens,
                             reasoning_chars=len(iter_reasoning_content or ""),
                         )
+
+                        large_context_invalid = _is_large_context_invalid_response(
+                            attempt_classification.kind,
+                            input_tokens=iter_input_tokens,
+                        )
+                        if large_context_invalid:
+                            if (
+                                not _invalid_response_fallback_done
+                                and self._switch_to_invalid_response_fallback(
+                                    attempt_classification.kind.value
+                                )
+                            ):
+                                _invalid_response_fallback_done = True
+                                yield WarningEvent(
+                                    code="provider_large_context_fallback",
+                                    message=(
+                                        "The provider returned no visible response for a "
+                                        "large input; trying a fallback provider once."
+                                    ),
+                                )
+                                _call_attempt += 1
+                                continue
+
+                            yield self._transition(AgentState.ERROR)
+                            terminal_error = ErrorEvent(
+                                message=(
+                                    "Provider returned no visible response for a large input. "
+                                    "Send the material as an attachment, summarize or shorten "
+                                    "the prompt, or use a stronger model."
+                                ),
+                                code="empty_response",
+                            )
+                            yield terminal_error
+                            break
 
                         if (
                             attempt_classification.kind == _ProviderAttemptKind.REASONING_ONLY

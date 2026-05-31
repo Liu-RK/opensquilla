@@ -1921,6 +1921,7 @@ class TurnRunner:
             runtime_message = input_out.runtime_message
             semantic_input = input_out.semantic_input
             extra_prompt_context = input_out.extra_prompt_context
+            normalization_metadata = input_out.normalization_metadata
 
             pt_outcome = await self._provider_and_tools_stage.run(
                 ProviderAndToolsStageInput(
@@ -1982,6 +1983,7 @@ class TurnRunner:
                     history_has_persisted_user=history_has_persisted_user,
                     persist_input=persist_input,
                     ingress_pipeline_steps=ingress_pipeline_steps,
+                    normalization_metadata=normalization_metadata,
                 )
             )
             pa_out = pa_outcome.require_output()
@@ -3619,6 +3621,7 @@ class TurnRunner:
         history_user_texts: list[str] | None = None,
         flags_text_override: str | None = None,
         tool_context: ToolContext | None = None,
+        normalization_metadata: dict[str, Any] | None = None,
     ) -> tuple[Any, Any]:
         """Run the pre-turn pipeline and re-resolve provider if model changed.
 
@@ -3711,6 +3714,11 @@ class TurnRunner:
                 )
             ),
         }
+        if normalization_metadata is not None:
+            initial_metadata["input_normalization"] = dict(normalization_metadata)
+            material_tokens = normalization_metadata.get("material_estimated_tokens")
+            if type(material_tokens) is int and material_tokens > 0:
+                initial_metadata["material_estimated_tokens"] = material_tokens
         if ingress_pipeline_steps:
             initial_metadata["pipeline_steps"] = list(ingress_pipeline_steps)
         if prev_assistant_text:
