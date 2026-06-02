@@ -1632,6 +1632,8 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
                   winners: strips.map(
                     el => el.querySelector(".router-fx-cell.win .nm")?.textContent || ""
                   ),
+                  cellCount: cells.length,
+                  cellLabels: cells.map(el => el.textContent || ""),
                   hasLongLabel: cells.some(el => el.textContent === "gemini-3.1-flash-lite"),
                   overflows,
                   gridWithinViewport: gridRect
@@ -1662,6 +1664,20 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
                   sessionKey: "agent:main:webchat:router-fx-panel",
                   historyMessages: [],
                   chatCalls: [],
+                  routerConfig: {
+                    enabled: true,
+                    rollout_phase: "full",
+                    tiers: {
+                      t1: { model: "openrouter/deepseek-v4-flash" },
+                      t2: { model: "openrouter/gemini-3.1-flash-lite" },
+                      t3: { model: "openrouter/qwen3.6-max" },
+                      image_model: {
+                        model: "openrouter/kimi-k2.6",
+                        supports_image: true,
+                        image_only: true,
+                      },
+                    },
+                  },
                 };
                 const rpc = App.getRpc();
                 const originalCall = rpc.call.bind(rpc);
@@ -1672,15 +1688,7 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
                   if (method === "config.get") {
                     return Promise.resolve({
                       permissions: { default_mode: "ask" },
-                      squilla_router: {
-                        enabled: true,
-                        rollout_phase: "full",
-                        tiers: {
-                          t1: { model: "openrouter/deepseek-v4-flash" },
-                          t2: { model: "openrouter/gemini-3.1-flash-lite" },
-                          t3: { model: "openrouter/qwen3.6-max" },
-                        },
-                      },
+                      squilla_router: window.__routerFxTest.routerConfig,
                     });
                   }
                   if (method === "chat.history") {
@@ -1881,8 +1889,8 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
                   },
                 ];
                 window.__routerFxTest.deferHistory = true;
-                const stateHandlers = App.getRpc()._listeners.get("_state");
-                if (stateHandlers) stateHandlers.forEach(h => h("connected"));
+                Router.navigate("/overview");
+                Router.navigate("/chat?session=agent:main:webchat:router-fx-panel");
               });
               await emit(page, "session.event.router_decision", {
                 session_key: sessionKey,
@@ -1908,6 +1916,94 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
               await page.waitForTimeout(300);
               const afterHistoryHydrationReplay = await snapshot(page);
 
+              await page.evaluate(() => {
+                window.__routerFxTest.historyMessages = [
+                  {
+                    role: "user",
+                    text: "describe image",
+                    message_id: "router-fx-u-image",
+                    timestamp: "2026-05-30T00:00:04Z",
+                    attachments: [{
+                      mime: "image/png",
+                      type: "image/png",
+                      name: "preview.png",
+                      data: "data:image/png;base64,iVBORw0KGgo=",
+                    }],
+                  },
+                  {
+                    role: "assistant",
+                    text: "image done",
+                    message_id: "router-fx-a-image",
+                    timestamp: "2026-05-30T00:00:05Z",
+                    model: "openrouter/kimi-k2.6",
+                    usage: {
+                      model: "openrouter/kimi-k2.6",
+                      routed_model: "openrouter/kimi-k2.6",
+                      routed_tier: "image_model",
+                      routing_source: "image_route",
+                      routing_applied: true,
+                      input_tokens: 21,
+                      output_tokens: 5,
+                    },
+                  },
+                ];
+                Router.navigate("/overview");
+                Router.navigate("/chat?session=agent:main:webchat:router-fx-panel");
+              });
+              await page.waitForFunction(
+                () =>
+                  document.querySelector(".msg.user .msg-attachments") &&
+                  document.querySelectorAll(".router-fx").length === 0,
+                { timeout: 15000 }
+              );
+              const singleImageCandidate = await snapshot(page);
+
+              await page.evaluate(() => {
+                window.__routerFxTest.routerConfig = {
+                  enabled: true,
+                  rollout_phase: "full",
+                  tiers: {
+                    t1: { model: "openrouter/shared-model" },
+                    t2: { model: "other-provider/shared-model" },
+                  },
+                };
+                window.__routerFxTest.historyMessages = [
+                  {
+                    role: "user",
+                    text: "same model different provider",
+                    message_id: "router-fx-u-same-display",
+                    timestamp: "2026-05-30T00:00:06Z",
+                  },
+                  {
+                    role: "assistant",
+                    text: "same done",
+                    message_id: "router-fx-a-same-display",
+                    timestamp: "2026-05-30T00:00:07Z",
+                    model: "openrouter/shared-model",
+                    usage: {
+                      model: "openrouter/shared-model",
+                      routed_model: "openrouter/shared-model",
+                      routed_tier: "t1",
+                      routing_source: "squilla_router",
+                      routing_applied: true,
+                      input_tokens: 8,
+                      output_tokens: 2,
+                    },
+                  },
+                ];
+                Router.navigate("/overview");
+                Router.navigate("/chat?session=agent:main:webchat:router-fx-panel");
+              });
+              await page.waitForFunction(
+                () =>
+                  document.querySelector(".msg.user")?.textContent.includes(
+                    "same model different provider"
+                  ) &&
+                  document.querySelectorAll(".router-fx").length === 0,
+                { timeout: 15000 }
+              );
+              const sameDisplaySingleCandidate = await snapshot(page);
+
               const result = {
                 liveSettled,
                 reopened,
@@ -1915,6 +2011,8 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
                 narrow,
                 duringHistoryHydrationReplay,
                 afterHistoryHydrationReplay,
+                singleImageCandidate,
+                sameDisplaySingleCandidate,
                 pageErrors: errors,
               };
               await browser.close();
@@ -1966,6 +2064,13 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
     assert payload["liveSettled"]["selectorVisible"] == 0
     assert payload["liveSettled"]["winner"] == "deepseek-v4-flash"
     assert "Router selected deepseek-v4-flash" in payload["liveSettled"]["aria"]
+    assert payload["liveSettled"]["cellCount"] == 3
+    assert set(payload["liveSettled"]["cellLabels"]) == {
+        "deepseek-v4-flash",
+        "gemini-3.1-flash-lite",
+        "qwen3.6-max",
+    }
+    assert "kimi-k2.6" not in payload["liveSettled"]["cellLabels"]
 
     for key in ("reopened", "afterReplay", "narrow"):
         snap = payload[key]
@@ -1980,12 +2085,15 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
         assert snap["animations"] == [], snap
         assert snap["winner"] == "deepseek-v4-flash", snap
         assert snap["hasLongLabel"] is True, snap
+        assert snap["cellCount"] == 3, snap
+        assert "kimi-k2.6" not in snap["cellLabels"], snap
         assert snap["overflows"] == [], snap
         assert snap["gridWithinViewport"] is True, snap
 
     during = payload["duringHistoryHydrationReplay"]
-    assert during["count"] == 1, during
-    assert during["winners"] == ["deepseek-v4-flash"], during
+    assert during["count"] in (0, 1), during
+    if during["count"] == 1:
+        assert during["winners"] == ["deepseek-v4-flash"], during
     assert during["liveCount"] == 0, during
     assert during["scanningCount"] == 0, during
     assert during["selectorVisible"] == 0, during
@@ -2005,6 +2113,18 @@ def test_router_fx_live_then_reopen_stays_settled_in_real_browser(tmp_path: Path
         "deepseek-v4-flash",
         "gemini-3.1-flash-lite",
     }, after_hydration
+
+    image_single = payload["singleImageCandidate"]
+    assert image_single["count"] == 0, image_single
+    assert image_single["cellCount"] == 0, image_single
+    assert image_single["liveCount"] == 0, image_single
+    assert image_single["scanningCount"] == 0, image_single
+
+    same_display_single = payload["sameDisplaySingleCandidate"]
+    assert same_display_single["count"] == 0, same_display_single
+    assert same_display_single["cellCount"] == 0, same_display_single
+    assert same_display_single["liveCount"] == 0, same_display_single
+    assert same_display_single["scanningCount"] == 0, same_display_single
 
 
 def test_webchat_large_paste_auto_attaches_text_in_real_browser(tmp_path: Path) -> None:

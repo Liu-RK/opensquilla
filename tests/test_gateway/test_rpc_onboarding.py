@@ -185,6 +185,45 @@ async def test_router_configure_accepts_tier_overrides_and_syncs_llm_model(
 
 
 @pytest.mark.asyncio
+async def test_router_configure_persists_image_model_as_image_capable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    from opensquilla.gateway.config import GatewayConfig
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig(llm={"provider": "openrouter", "model": "z-ai/glm-5.1"})
+    ctx.config.config_path = str(tmp_path / "c.toml")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.router.configure",
+        {
+            "mode": "openrouter-mix",
+            "defaultTier": "t1",
+            "tiers": {
+                "image_model": {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-opus-4.7",
+                    "supportsImage": False,
+                },
+            },
+        },
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    image_tier = persisted["squilla_router"]["tiers"]["image_model"]
+    assert image_tier["model"] == "anthropic/claude-opus-4.7"
+    assert image_tier["supports_image"] is True
+    assert image_tier["image_only"] is True
+    assert ctx.config.squilla_router.tiers["image_model"]["supports_image"] is True
+    assert ctx.config.squilla_router.tiers["image_model"]["image_only"] is True
+
+
+@pytest.mark.asyncio
 async def test_router_configure_rejects_image_model_as_default_tier(
     tmp_path,
     monkeypatch,

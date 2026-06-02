@@ -139,6 +139,15 @@ def _normalize_tier_payload(name: str, payload: Any) -> dict[str, Any]:
     return out
 
 
+def _enforce_router_tier_role_invariants(name: str, tier: dict[str, Any]) -> dict[str, Any]:
+    if name != "image_model":
+        return tier
+    out = dict(tier)
+    out["supports_image"] = True
+    out["image_only"] = True
+    return out
+
+
 def _merge_router_tiers(
     base: dict[str, Any],
     overrides: dict[str, Any] | None,
@@ -153,7 +162,7 @@ def _merge_router_tiers(
         override = _normalize_tier_payload(tier_name, raw_override)
         current = dict(merged.get(tier_name, {}))
         current.update(override)
-        merged[tier_name] = current
+        merged[tier_name] = _enforce_router_tier_role_invariants(tier_name, current)
     return merged
 
 

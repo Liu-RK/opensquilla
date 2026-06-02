@@ -360,6 +360,28 @@ def test_upsert_router_recommended_writes_profile_without_expanded_tiers():
     assert res.public_payload["mode"] == "recommended"
 
 
+def test_upsert_router_forces_image_model_role_invariants():
+    cfg = GatewayConfig(llm={"provider": "openrouter", "model": "z-ai/glm-5.1"})
+
+    res = upsert_router(
+        cfg,
+        mode="openrouter-mix",
+        tiers={
+            "image_model": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-opus-4.7",
+                "supportsImage": False,
+                "image_only": False,
+            }
+        },
+    )
+
+    image_tier = res.config.squilla_router.tiers["image_model"]
+    assert image_tier["model"] == "anthropic/claude-opus-4.7"
+    assert image_tier["supports_image"] is True
+    assert image_tier["image_only"] is True
+
+
 def test_upsert_router_can_disable():
     cfg = GatewayConfig(llm={"provider": "openrouter", "model": "deepseek/x"})
 

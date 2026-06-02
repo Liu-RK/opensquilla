@@ -43,6 +43,10 @@ const ChatView = (() => {
   let _currentRunStatus = 'idle';
   let _historySyncTimer = null;
   const _AWAITING_MODEL_CLASS = 'awaiting-model';
+  const _STREAM_ACTIVE_MARK_CLASS = 'streaming-active-mark';
+  const _STREAM_ACTIVE_MARK_DELAY_MS = 3500;
+  let _streamActiveMarkTimer = null;
+  let _streamActiveMarkVisibleStartedAt = 0;
   let _lastVisibleStreamEvent = '';
   const _DEFAULT_STREAM_IDLE_TIMEOUT_MS = 210000; // server should emit terminal first
   let _streamIdleTimeoutMs = _DEFAULT_STREAM_IDLE_TIMEOUT_MS;
@@ -1450,12 +1454,10 @@ const ChatView = (() => {
       _updateElevatedPill();
       _refreshToolbarTriggerGlow();
 
-      // Pre-populate the router slider's tier list and model cache
-      // from the operator's actual configured tiers. We register EVERY
-      // tier (including image-only ones like "image_model") into the
-      // slot list, so image-capable models like kimi-k2.6 show up in
-      // the slider even before the first image route fires for the
-      // current session.
+      // Pre-populate the router visualisation from the operator's actual
+      // configured tiers. We keep every tier in the cache, including
+      // image-only routes, but render-time request-kind filtering decides
+      // which candidates can really be called for this turn.
       //
       // We REPLACE _routerFxSlotList from config (rather than merge)
       // so that tiers the operator has removed drop out of the grid
@@ -1471,14 +1473,21 @@ const ChatView = (() => {
           const lower = tier.toLowerCase();
           configTierKeys.push(lower);
           configTierSet.add(lower);
-          const model = tiers[tier]?.model;
-          if (typeof model === 'string' && model) {
-            _routerFxModels[lower] = model;
-          }
+          const rawTier = tiers[tier];
+          const tierConfig = {
+            model: typeof rawTier?.model === 'string' ? rawTier.model : '',
+            supportsImage: rawTier?.supports_image === true,
+            imageOnly: rawTier?.image_only === true,
+          };
+          _routerFxTierConfigs[lower] = tierConfig;
+          if (tierConfig.model) _routerFxModels[lower] = tierConfig.model;
         });
       }
       Object.keys(_routerFxModels).forEach((tier) => {
         if (!configTierSet.has(tier)) delete _routerFxModels[tier];
+      });
+      Object.keys(_routerFxTierConfigs).forEach((tier) => {
+        if (!configTierSet.has(tier)) delete _routerFxTierConfigs[tier];
       });
       _routerFxConfigTiers = configTierSet;
       if (configTierKeys.length > 0) {
@@ -3243,73 +3252,12 @@ const ChatView = (() => {
   }
 
   /* ── Router slider — arcade-brutalist whac-a-mole grid ─────────────
-   * Fires once per user message when session.event.router_decision
-   * lands. A 3 × 4 cell grid mixes the operator's real configured
-   * tiers (deduped by model) with popular decoy models from the
-   * OpenRouter ecosystem; a hammer-selector hops between cells with
-   * bouncy easing and locks onto the routed cell with a particle
-   * burst. The strip is non-blocking — assistant text streams below
-   * the grid while the chase plays above. */
-
-  // 5 cols × 3 rows = 15 cells. The wider grid gives the hammer more
-  // hops to play and shows the model space as a proper "dial" rather
-  // than a tight 4-cell strip. Mobile breakpoints collapse this down
-  // (see chat.css @media rules).
-  const _ROUTER_FX_GRID_COLS = 5;
-  const _ROUTER_FX_GRID_ROWS = 3;
-  const _ROUTER_FX_GRID_CELLS = _ROUTER_FX_GRID_COLS * _ROUTER_FX_GRID_ROWS;
-  const _ROUTER_FX_REAL_ANCHOR_CELLS = [1, 6, 8, 13, 11, 3, 5, 9, 12, 14, 0, 4, 7, 10, 2];
-
-  // Popular OpenRouter models used as visual decoys, ordered by
-  // approximate openrouter.ai traffic ranking (highest volume first),
-  // refreshed 2026-05 from the OpenRouter usage leaderboard. Anything
-  // already on the operator's router (matched after stripping the
-  // provider prefix) is filtered out at render-time, so the
-  // highest-traffic models that aren't on this user's dial bubble to
-  // the top of the visible field. The actual route is always chosen
-  // from the operator's configured tiers — these only populate the
-  // field. With the real/decoy distinction removed, configured models
-  // are no longer VISUALLY distinguishable from the rest (the roster can
-  // still be inferred by correlating shown names against this public
-  // pool — closing that fully is a separate, deeper change).
-  const _ROUTER_FX_DECOY_POOL = [
-    'deepseek-v4-flash',
-    'claude-sonnet-4.6',
-    'qwen3.6-plus',
-    'minimax-m2.7',
-    'gpt-5.5',
-    'gemini-3.5-flash',
-    'glm-5-turbo',
-    'claude-opus-4.8',
-    'nemotron-3-super',
-    'deepseek-v4-pro',
-    'mimo-v2.5-pro',
-    'gpt-5.4',
-    'kimi-k2.6',
-    'claude-opus-4.7',
-    'gemini-3.1-flash-lite',
-    'glm-5.1',
-    'qwen3.6-max',
-    'claude-haiku-4.5',
-    'grok-4.3',
-    'gpt-5.4-mini',
-    'gemini-2.5-flash',
-    'step-3.5-flash',
-    'mistral-medium-3.5',
-    'ling-2.6-1t',
-    'deepseek-v3.2',
-    'trinity-large-thinking',
-    'gemini-2.5-pro',
-    'seed-2.0-mini',
-    'gpt-5.3-codex',
-    'grok-4.20',
-    'mercury-2',
-    'hunyuan-3',
-    'mimo-v2-omni',
-    'command-r-plus',
-    'llama-4-405b',
-    'sonar-large',
-  ];
+   * Fires once per user message when session.event.router_decision lands.
+   * The grid contains only the effective candidates that could actually be
+   * called for this request kind, deduped by display model name. A
+   * hammer-selector hops between those real cells and locks onto the routed
+   * cell with a particle burst. The strip is non-blocking — assistant text
+   * streams below the grid while the chase plays above. */
 
   // OpenSquilla's tier ids vary by tier_profile. We seed the slot
   // list from config and register any decision tier we haven't seen
@@ -3317,6 +3265,7 @@ const ChatView = (() => {
   const _ROUTER_FX_DEFAULT_TIERS = ['t0', 't1', 't2', 't3'];
   let _routerFxSlotList = _ROUTER_FX_DEFAULT_TIERS.slice();
   const _routerFxModels = {};
+  const _routerFxTierConfigs = {};
   // Authoritative set of tier ids that exist in the *current* config
   // snapshot (populated by _loadFeatureToggles). Used to skip history
   // strips whose routed_tier has been removed from config and to know
@@ -3386,6 +3335,106 @@ const ChatView = (() => {
 
   function _routerFxStripProvider(name) {
     return _modelDisplayName(name);
+  }
+
+  function _routerFxRequestKindFromAttachments(attachments) {
+    const list = Array.isArray(attachments) ? attachments : [];
+    for (const item of list) {
+      const mime = String(item?.mime || item?.type || '').toLowerCase();
+      if (mime.indexOf('image/') === 0) return 'image';
+    }
+    return 'text';
+  }
+
+  function _routerFxNormalizeRequestKind(requestKind) {
+    return requestKind === 'image' ? 'image' : 'text';
+  }
+
+  function _routerFxTierConfig(tier) {
+    const norm = typeof tier === 'string' ? tier.toLowerCase() : '';
+    const known = norm ? _routerFxTierConfigs[norm] : null;
+    if (known) return known;
+    return {
+      model: norm && _routerFxModels[norm] ? _routerFxModels[norm] : '',
+      supportsImage: false,
+      imageOnly: false,
+    };
+  }
+
+  function _routerFxRememberTierDecision(tier, model) {
+    if (typeof tier !== 'string' || !tier) return;
+    const norm = tier.toLowerCase();
+    _routerFxRegisterTier(norm);
+    if (!model) return;
+    const modelName = String(model);
+    _routerFxModels[norm] = modelName;
+    const current = _routerFxTierConfigs[norm] || {};
+    _routerFxTierConfigs[norm] = {
+      model: modelName,
+      supportsImage: current.supportsImage === true,
+      imageOnly: current.imageOnly === true,
+    };
+  }
+
+  function _routerFxTierMatchesRequestKind(tierConfig, requestKind) {
+    const kind = _routerFxNormalizeRequestKind(requestKind);
+    if (kind === 'image') return !!(tierConfig.supportsImage || tierConfig.imageOnly);
+    return !tierConfig.imageOnly;
+  }
+
+  function _routerFxRequestKindFromDecision(decision, fallbackKind) {
+    if (fallbackKind) return _routerFxNormalizeRequestKind(fallbackKind);
+    const source = String(decision?.source || decision?.routing_source || '').toLowerCase();
+    const tier = String(decision?.tier || decision?.routed_tier || '').toLowerCase();
+    if (source === 'image_route' || tier === 'image_model') return 'image';
+    return 'text';
+  }
+
+  function _routerFxVisualEntries(requestKind, decision) {
+    if (_routerFxConfigTiers === null) return [];
+    const kind = _routerFxRequestKindFromDecision(decision, requestKind);
+    const byDisplay = new Map();
+    _routerFxSlotList.forEach((tier) => {
+      if (_routerFxConfigTiers !== null && !_routerFxConfigTiers.has(tier)) return;
+      const tierConfig = _routerFxTierConfig(tier);
+      if (!_routerFxTierMatchesRequestKind(tierConfig, kind)) return;
+      const displayName = tierConfig.model ? _routerFxStripProvider(tierConfig.model) : tier;
+      const key = displayName ? displayName.toLowerCase() : tier;
+      let entry = byDisplay.get(key);
+      if (!entry) {
+        entry = { key, tiers: [], model: tierConfig.model || '', displayName };
+        byDisplay.set(key, entry);
+      }
+      entry.tiers.push(tier);
+      if (!entry.model && tierConfig.model) entry.model = tierConfig.model;
+    });
+    const decisionTier = decision && typeof decision.tier === 'string'
+      ? decision.tier.toLowerCase()
+      : '';
+    const decisionModel = decision && typeof decision.model === 'string' ? decision.model : '';
+    if (decisionTier && decisionModel) {
+      const displayName = _routerFxStripProvider(decisionModel);
+      const key = displayName ? displayName.toLowerCase() : decisionTier;
+      let entry = byDisplay.get(key);
+      if (!entry && _routerFxTierMatchesRequestKind(_routerFxTierConfig(decisionTier), kind)) {
+        entry = { key, tiers: [], model: decisionModel, displayName };
+        byDisplay.set(key, entry);
+      }
+      if (entry) {
+        if (entry.tiers.indexOf(decisionTier) < 0) entry.tiers.push(decisionTier);
+        if (!entry.model) entry.model = decisionModel;
+      }
+    }
+    return Array.from(byDisplay.values()).map((e) => ({
+      key: e.key,
+      tiers: _routerFxSortTiers(e.tiers),
+      model: e.model,
+      displayName: e.displayName || (e.model ? _routerFxStripProvider(e.model) : e.tiers[0]),
+    }));
+  }
+
+  function _routerFxHasMultipleCandidates(requestKind, decision) {
+    return _routerFxVisualEntries(requestKind, decision).length > 1;
   }
 
   // Promise resolved when _loadFeatureToggles has populated tier
@@ -3520,110 +3569,25 @@ const ChatView = (() => {
     }
   }
 
-  // Group tiers by their backing model so two tiers that resolve to
-  // the same model don't get two cells.
-  function _routerFxRealEntries(decision) {
-    const winnerTier = decision && typeof decision.tier === 'string' ? decision.tier.toLowerCase() : '';
-    const winnerModel = decision && typeof decision.model === 'string' ? decision.model : '';
-    const slotKeyOf = (tier) => {
-      const m = _routerFxModels[tier];
-      return m ? m : 'tier:' + tier;
-    };
-    const byKey = new Map();
-    _routerFxSlotList.forEach((tier) => {
-      const key = slotKeyOf(tier);
-      let entry = byKey.get(key);
-      if (!entry) {
-        entry = { key, tiers: [], model: _routerFxModels[tier] || '' };
-        byKey.set(key, entry);
-      }
-      entry.tiers.push(tier);
-    });
-    if (winnerTier && winnerModel) {
-      const target = byKey.get(slotKeyOf(winnerTier));
-      if (target && !target.model) target.model = winnerModel;
-    }
-    return Array.from(byKey.values()).map((e) => ({
-      key: e.key,
-      tiers: e.tiers,
-      model: e.model,
-      displayName: e.model ? _routerFxStripProvider(e.model) : e.tiers[0],
-    }));
+  // Build the visual roster for this turn only. Text requests exclude
+  // image-only routes; image requests include only image-capable routes.
+  // Entries are deduped by display model name so provider/thinking/tier
+  // differences do not create extra visual cells.
+  function _routerFxRealEntries(decision, requestKind) {
+    return _routerFxVisualEntries(requestKind, decision);
   }
 
-  // FNV-1a 32-bit hash of a string — folds the seed key down to a
-  // single integer for mulberry32 to seed off.
-  function _routerFxHashSeed(key) {
-    let h = 0x811c9dc5;
-    const s = String(key == null ? '' : key);
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
-  }
-
-  // mulberry32 PRNG — deterministic, well-distributed, ~10 LoC.
-  function _routerFxMulberry32(seed) {
-    let state = seed >>> 0;
-    return function () {
-      state = (state + 0x6D2B79F5) >>> 0;
-      let t = state;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
-  // Fisher-Yates in place using the supplied RNG (defaults to
-  // Math.random when no seed key is given — exclusively for code
-  // paths that don't have a stable identifier).
-  function _routerFxShuffle(arr, seedKey) {
-    const rng = seedKey != null
-      ? _routerFxMulberry32(_routerFxHashSeed(seedKey))
-      : Math.random;
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      const tmp = arr[i];
-      arr[i] = arr[j];
-      arr[j] = tmp;
-    }
-    return arr;
-  }
-
-  // Assemble the grid (_ROUTER_FX_GRID_CELLS cells): real (deduped) entries + decoys.
-  // Real cells land on distributed anchor slots in a deterministic model order,
-  // so each available model keeps a stable position. The live selector animation
-  // remains random; only the underlying dial layout is fixed.
+  // Assemble the grid from real candidates only. No filler/decoy wall: every
+  // visible model name is a candidate that could actually be called this turn.
   function _routerFxBuildGridCells(realEntries, seedKey) {
-    const cells = Array.from({ length: _ROUTER_FX_GRID_CELLS }, () => null);
-    const realNames = new Set();
     const orderedRealEntries = realEntries.slice().sort((a, b) => (
       (a.displayName || a.key || '').localeCompare(b.displayName || b.key || '')
     ));
-    orderedRealEntries.forEach((entry, i) => {
-      const anchor = _ROUTER_FX_REAL_ANCHOR_CELLS[i];
-      const idx = typeof anchor === 'number' ? anchor : cells.findIndex((cell) => cell == null);
-      if (idx < 0 || idx >= cells.length) return;
-      cells[idx] = { kind: 'real', entry, displayName: entry.displayName };
-      if (entry.displayName) realNames.add(entry.displayName);
-    });
-
-    const decoys = [];
-    for (let i = 0; i < _ROUTER_FX_DECOY_POOL.length && decoys.length < _ROUTER_FX_GRID_CELLS; i++) {
-      const name = _ROUTER_FX_DECOY_POOL[i];
-      if (realNames.has(name)) continue;
-      decoys.push({ kind: 'decoy', displayName: name });
-    }
-    while (decoys.length < _ROUTER_FX_GRID_CELLS) {
-      decoys.push({ kind: 'decoy', displayName: '—' });
-    }
-    const orderedDecoys = _routerFxShuffle(decoys, seedKey ? seedKey + ':decoy' : undefined);
-    let decoyIdx = 0;
-    for (let i = 0; i < cells.length; i++) {
-      if (cells[i] == null) cells[i] = orderedDecoys[decoyIdx++];
-    }
-    return cells;
+    return orderedRealEntries.map((entry) => ({
+      kind: 'real',
+      entry,
+      displayName: entry.displayName,
+    }));
   }
 
   function _buildRouterFxElement(decision, opts) {
@@ -3665,32 +3629,21 @@ const ChatView = (() => {
     const seedKey = opts && opts.seedKey ? String(opts.seedKey) : '';
     if (seedKey) wrap.dataset.seed = seedKey;
 
-    // Cloud variant: a focal-depth nebula of pool models + the routed winner.
-    // No configured roster is rendered. Returns early; the grid build below
-    // is the default look.
-    if (variant === 'cloud') {
-      _routerFxBuildCloud(wrap, decision, seedKey);
-      if (opts.preSettled) {
-        _settleRouterFxCloud(wrap);
-        _routerFxNormalizeSettledStrip(wrap, opts.renderMode || 'history', decision);
-      }
-      return wrap;
-    }
-
-    const realEntries = _routerFxRealEntries(decision);
+    const requestKind = _routerFxRequestKindFromDecision(decision, opts.requestKind);
+    const realEntries = _routerFxRealEntries(decision, requestKind);
+    if (realEntries.length <= 1) return null;
     const gridCells = _routerFxBuildGridCells(realEntries, seedKey || undefined);
 
     const grid = document.createElement('div');
     grid.className = 'router-fx-grid';
+    const cols = Math.min(4, Math.max(2, gridCells.length));
+    const mobileCols = gridCells.length > 2 ? 2 : gridCells.length;
+    grid.style.setProperty('--router-fx-cols', String(cols));
+    grid.style.setProperty('--router-fx-mobile-cols', String(Math.max(1, mobileCols)));
     gridCells.forEach((cellInfo, i) => {
       const cell = document.createElement('div');
       cell.className = 'router-fx-cell';
       cell.dataset.cellIdx = String(i);
-      // Intentionally NOT stamping which cell is real (configured) vs decoy:
-      // every cell renders identically, and the DOM must not leak the
-      // operator's wired-up model roster. Winner detection reads the in-memory
-      // _fxGridCells array (below), not any DOM attribute, so the routing
-      // result still lands on the right cell without exposing the rest.
       // title surfaces the full name on hover when a long one is ellipsized.
       cell.innerHTML = `<span class="nm" title="${_esc(cellInfo.displayName)}">${_esc(cellInfo.displayName)}</span>`;
       grid.appendChild(cell);
@@ -3702,6 +3655,7 @@ const ChatView = (() => {
 
     wrap._fxGridCells = gridCells;
     wrap._fxRealEntries = realEntries;
+    wrap._fxRequestKind = requestKind;
 
     if (opts.preSettled) {
       const winnerIdx = _routerFxWinnerCellIndex(wrap, decision.tier);
@@ -3788,9 +3742,6 @@ const ChatView = (() => {
     if (selector) selector.classList.remove('visible', 'lock', 'lock-impact');
     wrap.querySelectorAll('.router-fx-cell.pinging').forEach((cell) => {
       cell.classList.remove('pinging');
-    });
-    wrap.querySelectorAll('.router-fx-mote.is-scan').forEach((mote) => {
-      mote.classList.remove('is-scan');
     });
     wrap.querySelectorAll('.router-fx-burst').forEach((burst) => burst.remove());
   }
@@ -3947,116 +3898,13 @@ const ChatView = (() => {
     });
   }
 
-  // ── Cloud variant ("model nebula" / rack-focus) ─────────────────────
-  // A focal-depth field of ~36 pool models + the routed winner, scattered
-  // at seeded positions/depths. Routing reads as a camera rack-focus pull:
-  // the whole field defocuses, then the winner snaps sharp and blooms an
-  // accent glow at the focal point while the rest recede to bokeh. The field
-  // is pool + winner ONLY (never the configured roster), so it exposes
-  // nothing beyond the already-public routed model.
+  // Winner label used for settled semantics and assistive text.
   function _routerFxWinnerName(decision) {
     const model = decision && (decision.model || decision.routed_model);
     if (model) return _routerFxStripProvider(String(model));
     const tier = decision && decision.tier ? String(decision.tier).toLowerCase() : '';
     if (tier && _routerFxModels[tier]) return _routerFxStripProvider(_routerFxModels[tier]);
     return tier || '';
-  }
-
-  function _routerFxBuildCloud(wrap, decision, seedKey) {
-    const cloud = document.createElement('div');
-    cloud.className = 'router-fx-cloud';
-    const winnerName = _routerFxWinnerName(decision);
-    // Field = the public decoy pool + the routed winner (deduped). No
-    // configured-roster names beyond the winner are ever rendered.
-    const seen = new Set();
-    const names = [];
-    if (winnerName) { names.push(winnerName); seen.add(winnerName.toLowerCase()); }
-    _ROUTER_FX_DECOY_POOL.forEach((n) => {
-      const k = n.toLowerCase();
-      if (!seen.has(k)) { seen.add(k); names.push(n); }
-    });
-    // Deterministic per seed so a history rebuild reproduces the same nebula.
-    const rng = _routerFxMulberry32(_routerFxHashSeed((seedKey || '') + ':cloud'));
-    const wkey = winnerName ? winnerName.toLowerCase() : '';
-    let winnerEl = null;
-    names.forEach((name) => {
-      // Two layers, so motion never fights: the OUTER mote owns position +
-      // a perpetual parallax drift (transform) + the winner's travel-to-
-      // focus (left/top), while the INNER owns the rack-focus (scale, blur,
-      // opacity, glow). Splitting them means the field keeps breathing even
-      // once settled, and the winner glides to the focal point instead of
-      // teleporting.
-      const mote = document.createElement('span');
-      mote.className = 'router-fx-mote';
-      // Organic elliptical scatter: area-uniform radius (sqrt) at a random
-      // angle clusters names toward the core and thins to the edges — a soft
-      // nebula, no rigid rows. Focal depth d∈[0,1] drives blur, scale and
-      // opacity TOGETHER so it reads as coherent optical depth, not a tag cloud.
-      const d = rng();
-      const ang = rng() * Math.PI * 2;
-      const rad = Math.sqrt(rng());
-      const x = (50 + Math.cos(ang) * rad * 47).toFixed(2);
-      const y = (50 + Math.sin(ang) * rad * 41).toFixed(2);
-      const blur = (d * 3.4).toFixed(2);
-      const scale = (1.22 - d * 0.62).toFixed(3);
-      const op = (0.92 - d * 0.64).toFixed(3);
-      const z = Math.round((1 - d) * 100);
-      const driftDur = (11 + rng() * 9).toFixed(2);
-      const driftDelay = (-(rng() * 20)).toFixed(2);
-      const dx = (rng() * 2 - 1).toFixed(2);
-      const dy = (rng() * 2 - 1).toFixed(2);
-      mote.style.cssText =
-        `--x:${x}%;--y:${y}%;--z:${z};--drift:${driftDur}s;`
-        + `--ddelay:${driftDelay}s;--dx:${dx};--dy:${dy};`;
-      const inner = document.createElement('span');
-      inner.className = 'router-fx-mote-i';
-      inner.style.cssText = `--blur:${blur}px;--sc:${scale};--op:${op};`;
-      inner.textContent = name;
-      mote.appendChild(inner);
-      if (!winnerEl && wkey && name.toLowerCase() === wkey) {
-        mote.classList.add('router-fx-mote--winner');
-        winnerEl = mote;
-      }
-      cloud.appendChild(mote);
-    });
-    const reticle = document.createElement('div');
-    reticle.className = 'router-fx-reticle';
-    reticle.setAttribute('aria-hidden', 'true');
-    cloud.appendChild(reticle);
-    wrap.appendChild(cloud);
-    wrap._fxCloud = true;
-    wrap._fxWinnerEl = winnerEl;
-  }
-
-  // Settle with no animation (history rebuild, observe mode, reduced motion):
-  // winner in focus, the rest already receded — the CSS settled state does it.
-  function _settleRouterFxCloud(wrap) {
-    if (!wrap) return;
-    wrap.dataset.state = 'settled';
-    delete wrap.dataset.live;
-    delete wrap.dataset.scanning;
-    wrap._fxFinished = true;
-    _routerFxClearVisualResidue(wrap);
-    _routerFxApplySettledSemantics(wrap, wrap._fxDecision || null, wrap.dataset.renderMode);
-  }
-
-  // Live rack-focus: brief beat on the full field, defocus the whole field
-  // (ease-in, lens leaving focus), then snap the winner sharp (decelerate).
-  // The optical pull is CSS (mote transitions keyed off data-state); JS only
-  // flips the phase with the right timing.
-  function _animateRouterFxCloud(wrap) {
-    if (!wrap) return;
-    // Opt-in via the toggle, independent of OS reduce-motion (see
-    // _animateRouterFx). Settle directly only if there is no winner to focus.
-    if (!wrap._fxWinnerEl) { _settleRouterFxCloud(wrap); return; }
-    _routerFxClearAnimationTimers(wrap);
-    // Hold the in-focus field a beat so the defocus reads as intentional.
-    wrap._fxAnimTimers.push(setTimeout(() => {
-      if (wrap.isConnected && wrap.dataset.renderMode === 'live') wrap.dataset.state = 'playing';
-    }, 260));
-    wrap._fxAnimTimers.push(setTimeout(() => {
-      if (wrap.isConnected && wrap.dataset.renderMode === 'live') _settleRouterFxCloud(wrap);
-    }, 680));
   }
 
   // ── Scan → lock ─────────────────────────────────────────────────────────
@@ -4082,7 +3930,7 @@ const ChatView = (() => {
     }
   }
 
-  function _finishPendingRouterFxScan() {
+  async function _finishPendingRouterFxScan() {
     const pending = _routerFxScanPending;
     _routerFxScanDelayTimer = null;
     _routerFxScanPending = null;
@@ -4102,7 +3950,25 @@ const ChatView = (() => {
       });
       return;
     }
-    const started = _routerFxBeginScan(pending.anchorDiv, pending.seedKey);
+    await _routerFxAwaitConfig();
+    if (pending.sessionKey !== (_sessionKey || '')) {
+      _chatDiag('router_scan.pending.drop.session_changed_after_config', {
+        pendingSessionKey: pending.sessionKey || '',
+        sessionKey: _sessionKey || '',
+      });
+      return;
+    }
+    if (_isCompactInFlightForCurrentSession()
+        || _routerFxIsSuppressedForCompactionTurn(pending.turnIndex)) {
+      _chatDiag('router_scan.pending.drop.compaction_suppressed_after_config', {
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+      return;
+    }
+    const started = _routerFxBeginScan(pending.anchorDiv, pending.seedKey, {
+      requestKind: pending.requestKind,
+    });
     if (!started || !pending.decision || !_thread) return;
     const liveStrip = _thread.querySelector('.router-fx[data-live="true"]');
     if (!liveStrip || liveStrip.dataset.turnIndex !== String(pending.turnIndex)) return;
@@ -4117,7 +3983,9 @@ const ChatView = (() => {
     }
   }
 
-  function _scheduleRouterFxBeginScan(anchorDiv, seedKey) {
+  function _scheduleRouterFxBeginScan(anchorDiv, seedKey, opts) {
+    opts = opts || {};
+    const requestKind = _routerFxNormalizeRequestKind(opts.requestKind);
     _cancelPendingRouterFxScan('reschedule');
     if (_routerFxIsSuppressedForCompactionTurn(_routerFxCountUserMessages())) {
       _chatDiag('router_scan.schedule.skip.compaction_suppressed', {
@@ -4133,16 +4001,27 @@ const ChatView = (() => {
       });
       return false;
     }
+    if (_routerFxConfigTiers !== null && !_routerFxHasMultipleCandidates(requestKind, null)) {
+      _chatDiag('router_scan.schedule.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
     _routerFxScanPending = {
       anchorDiv,
       seedKey,
+      requestKind,
       sessionKey: _sessionKey || '',
       turnIndex: String(_routerFxCountUserMessages()),
       decision: null,
     };
-    _routerFxScanDelayTimer = setTimeout(_finishPendingRouterFxScan, _ROUTER_FX_START_DELAY_MS);
+    _routerFxScanDelayTimer = setTimeout(() => {
+      void _finishPendingRouterFxScan();
+    }, _ROUTER_FX_START_DELAY_MS);
     _chatDiag('router_scan.scheduled', {
       seedKey,
+      requestKind,
       delayMs: _ROUTER_FX_START_DELAY_MS,
       turnIndex: _routerFxScanPending.turnIndex,
       anchor: _chatDiagDescribeElement(anchorDiv),
@@ -4155,7 +4034,9 @@ const ChatView = (() => {
   // winner. The scan is JS-driven (discrete class/position changes every
   // ~170ms), so it renders regardless of any CSS-animation quirk — and it
   // fills the wait instead of trailing it, replacing the "Watching" placeholder.
-  function _routerFxBeginScan(anchorDiv, seedKey) {
+  function _routerFxBeginScan(anchorDiv, seedKey, opts) {
+    opts = opts || {};
+    const requestKind = _routerFxNormalizeRequestKind(opts.requestKind);
     if (_routerFxIsSuppressedForCompactionTurn(_routerFxCountUserMessages())) {
       _chatDiag('router_scan.skip.compaction_suppressed', {
         turnIndex: String(_routerFxCountUserMessages()),
@@ -4172,10 +4053,28 @@ const ChatView = (() => {
       });
       return false;
     }
+    if (!_routerFxHasMultipleCandidates(requestKind, null)) {
+      _chatDiag('router_scan.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
     _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((el) => {
       _routerFxRemoveStrip(el);
     });
-    const wrap = _buildRouterFxElement({ source: 'none' }, { seedKey, renderMode: 'live' });
+    const wrap = _buildRouterFxElement({ source: 'none' }, {
+      seedKey,
+      renderMode: 'live',
+      requestKind,
+    });
+    if (!wrap) {
+      _chatDiag('router_scan.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
     wrap.dataset.live = 'true';
     wrap.dataset.scanning = 'true';
     wrap.dataset.state = 'scanning';
@@ -4227,15 +4126,14 @@ const ChatView = (() => {
     }
   }
 
-  // JS-driven roaming "search": every ~170ms a different candidate is brought
-  // into focus (cloud: a mote sharpens via .is-scan; grid: the hammer hops).
+  // JS-driven roaming "search": every ~190ms the selector hops across a real
+  // candidate cell.
   function _routerFxScanRoam(wrap) {
-    const isCloud = !!wrap._fxCloud;
-    const container = wrap.querySelector(isCloud ? '.router-fx-cloud' : '.router-fx-grid');
-    if (!container) return;
-    const targets = container.querySelectorAll(isCloud ? '.router-fx-mote' : '.router-fx-cell');
+    const grid = wrap.querySelector('.router-fx-grid');
+    if (!grid) return;
+    const targets = grid.querySelectorAll('.router-fx-cell');
     if (!targets.length) return;
-    const selector = isCloud ? null : container.querySelector('.router-fx-selector');
+    const selector = grid.querySelector('.router-fx-selector');
     if (selector) selector.classList.add('visible');
     let prev = -1;
     const step = () => {
@@ -4244,13 +4142,11 @@ const ChatView = (() => {
       let g = 0;
       do { i = Math.floor(Math.random() * targets.length); g++; } while (i === prev && g < 8);
       prev = i;
-      if (isCloud) {
-        targets.forEach((m, idx) => m.classList.toggle('is-scan', idx === i));
-      } else if (selector) {
+      if (selector) {
         _routerFxPositionSelector(selector, targets[i], { hopIdx: i });
         _routerFxPing(targets[i]);
       }
-      wrap._fxScanTimer = setTimeout(step, isCloud ? 170 : 190);
+      wrap._fxScanTimer = setTimeout(step, 190);
     };
     step();
   }
@@ -4260,7 +4156,6 @@ const ChatView = (() => {
     if (wrap._fxScanTimer) { clearTimeout(wrap._fxScanTimer); wrap._fxScanTimer = null; }
     if (wrap._fxScanCap) { clearTimeout(wrap._fxScanCap); wrap._fxScanCap = null; }
     delete wrap.dataset.scanning;
-    wrap.querySelectorAll('.router-fx-mote.is-scan').forEach((m) => m.classList.remove('is-scan'));
   }
 
   function _routerFxPauseScanTimers(wrap) {
@@ -4297,7 +4192,7 @@ const ChatView = (() => {
     _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((wrap) => {
       // Output already complete/arriving → finish the scan immediately, locking
       // onto the cached winner (no half-scan left hanging). Do not mark frozen:
-      // _routerFxLockGrid/_routerFxLockCloud own the visible selection motion.
+      // _routerFxLockGrid owns the visible selection motion.
       if (wrap._fxDecision) {
         _routerFxFinishScan(wrap);
       } else {
@@ -4324,36 +4219,13 @@ const ChatView = (() => {
       wrap.dataset.rolloutPhase = typeof decision.rollout_phase === 'string'
         ? decision.rollout_phase : 'observe';
     }
-    if (wrap._fxCloud) _routerFxLockCloud(wrap, decision);
-    else _routerFxLockGrid(wrap, decision);
-  }
-
-  function _routerFxLockCloud(wrap, decision) {
-    const winnerName = _routerFxWinnerName(decision);
-    const wkey = winnerName ? winnerName.toLowerCase() : '';
-    let winnerEl = null;
-    const motes = wrap.querySelectorAll('.router-fx-mote');
-    if (wkey) {
-      motes.forEach((m) => {
-        const inner = m.querySelector('.router-fx-mote-i');
-        if (!winnerEl && inner && (inner.textContent || '').trim().toLowerCase() === wkey) winnerEl = m;
-      });
-      if (!winnerEl && motes.length) {
-        // Routed model isn't in the field — relabel the first mote to it.
-        winnerEl = motes[0];
-        const inner = winnerEl.querySelector('.router-fx-mote-i');
-        if (inner) inner.textContent = winnerName;
-      }
-    }
-    if (winnerEl) { winnerEl.classList.add('router-fx-mote--winner'); wrap._fxWinnerEl = winnerEl; }
-    requestAnimationFrame(() => { if (wrap.isConnected) _settleRouterFxCloud(wrap); });
+    _routerFxLockGrid(wrap, decision);
   }
 
   function _routerFxLockGrid(wrap, decision) {
     const tier = decision.tier ? String(decision.tier) : '';
     if (tier) {
-      _routerFxRegisterTier(tier);
-      if (decision.model) _routerFxModels[tier.toLowerCase()] = String(decision.model);
+      _routerFxRememberTierDecision(tier, decision.model || '');
     }
     const winnerIdx = _routerFxWinnerCellIndex(wrap, tier);
     if (winnerIdx >= 0) {
@@ -4499,10 +4371,7 @@ const ChatView = (() => {
       _chatDiag('router_decision.skip.no_tier', _chatDiagSummarizePayload(payload));
       return;
     }
-    _routerFxRegisterTier(tier);
-    if (payload.model) {
-      _routerFxModels[tier.toLowerCase()] = String(payload.model);
-    }
+    _routerFxRememberTierDecision(tier, payload.model || '');
     const turnIndex = _routerFxCountUserMessages();
     if (_routerFxIsSuppressedForCompactionTurn(turnIndex)) {
       if (_thread) {
@@ -4536,6 +4405,7 @@ const ChatView = (() => {
       _chatDiag('router_decision.cached_on_pending_scan', {
         payload: _chatDiagSummarizePayload(payload),
         turnIndex: _routerFxScanPending.turnIndex || '',
+        requestKind: _routerFxScanPending.requestKind || '',
       });
       return;
     }
@@ -4576,6 +4446,11 @@ const ChatView = (() => {
       _chatDiag('router_decision.skip.disabled_post_config', _chatDiagSummarizePayload(payload));
       return;
     }
+    const replayRequestKind = _routerFxRequestKindFromDecision(payload, null);
+    if (!_routerFxHasMultipleCandidates(replayRequestKind, payload)) {
+      _chatDiag('router_decision.skip.single_candidate', _chatDiagSummarizePayload(payload));
+      return;
+    }
     if (!_historyHasRendered || _historyHydrating) {
       _cachePendingRouterDecision(payload);
       _chatDiag('router_decision.cached_during_history_hydration', {
@@ -4602,14 +4477,16 @@ const ChatView = (() => {
       preSettled: true,
       renderMode: 'history',
       seedKey: replaySeed,
+      requestKind: replayRequestKind,
     });
-    // Cloud flags its winner mote at build time; the grid resolves a winning
-    // cell index. Either way, bail if there is no winner to focus.
-    const winnerIdx = wrap._fxCloud ? -1 : _routerFxWinnerCellIndex(wrap, tier);
-    if (wrap._fxCloud ? !wrap._fxWinnerEl : winnerIdx < 0) {
+    if (!wrap) {
+      _chatDiag('router_decision.skip.single_candidate', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    const winnerIdx = _routerFxWinnerCellIndex(wrap, tier);
+    if (winnerIdx < 0) {
       _chatDiag('router_decision.skip.no_winner', {
         payload: _chatDiagSummarizePayload(payload),
-        cloud: !!wrap._fxCloud,
         winnerIdx,
       });
       return;
@@ -4648,7 +4525,8 @@ const ChatView = (() => {
   // `seedKey` should be a stable per-turn identifier (msg.timestamp
   // or message id) so the cell shuffle reproduces deterministically
   // across page refreshes.
-  function _buildRouterFxFromUsage(usage, seedKey) {
+  function _buildRouterFxFromUsage(usage, seedKey, opts) {
+    opts = opts || {};
     if (!usage) return null;
     // User-pref gate: the viewer has hidden the router-fx visualisation, so
     // no history strip is built. Distinct from the operator routing flag below
@@ -4668,7 +4546,7 @@ const ChatView = (() => {
         && !_routerFxConfigTiers.has(tier.toLowerCase())) {
       return null;
     }
-    _routerFxRegisterTier(tier);
+    _routerFxRememberTierDecision(tier, usage.routed_model || usage.model || '');
     const decision = {
       tier,
       model: usage.routed_model || usage.model || '',
@@ -4678,7 +4556,7 @@ const ChatView = (() => {
       routing_applied: usage.routing_applied !== false,
       rollout_phase: usage.rollout_phase || 'full',
     };
-    if (decision.model) _routerFxModels[tier.toLowerCase()] = decision.model;
+    const requestKind = _routerFxRequestKindFromDecision(decision, opts.requestKind);
     // The cached seed from _routerFxResolveSeed already encodes
     // (stamp, tier, turnIndex) — pass it through verbatim so that
     // live and history paths derive the SAME shuffle for the same
@@ -4688,6 +4566,7 @@ const ChatView = (() => {
     return _buildRouterFxElement(decision, {
       preSettled: true,
       seedKey: seedKey != null ? String(seedKey) : ('history:' + tier),
+      requestKind: requestKind,
     });
   }
 
@@ -5615,9 +5494,13 @@ const ChatView = (() => {
     // keyed by (sessionKey, userMsgIndex, tier); using this counter
     // means live + history rebuilds for the same turn reuse the same layout.
     let _histUserIdx = 0;
+    let _histLastUserRequestKind = 'text';
     const consumedHistoryElements = new Set();
     messages.forEach((msg) => {
-        if (msg.role === 'user') _histUserIdx++;
+        if (msg.role === 'user') {
+          _histUserIdx++;
+          _histLastUserRequestKind = _routerFxRequestKindFromAttachments(msg.attachments || []);
+        }
         const rawText = msg.text || '';
         const displayText = msg.role === 'user' ? _stripTimePrefix(rawText) : rawText;
         const stableIdentity = _historyStableMessageIdentity(msg);
@@ -5743,7 +5626,9 @@ const ChatView = (() => {
                 if (existingStrip) _routerFxRemoveStrip(existingStrip);
                 const hint = msg.timestamp || msg.ts || msg.message_id || '';
                 const cachedSeed = _routerFxResolveLayoutSeed(_sessionKey, hint);
-                const routerStrip = _buildRouterFxFromUsage(savedUsage, cachedSeed);
+                const routerStrip = _buildRouterFxFromUsage(savedUsage, cachedSeed, {
+                  requestKind: _histLastUserRequestKind,
+                });
                 if (routerStrip) {
                   routerStrip.dataset.sessionKey = _sessionKey || '';
                   routerStrip.dataset.turnIndex = String(_histUserIdx);
@@ -6186,6 +6071,7 @@ const ChatView = (() => {
     }
     const normalizationProvenance = _inputNormalizationProvenanceFromAttachments(_pendingAttachments);
     if (normalizationProvenance) params.inputProvenance = normalizationProvenance;
+    const routerFxRequestKind = _routerFxRequestKindFromAttachments(params.attachments || []);
 
     // Clear input and attachments
     _textarea.value = '';
@@ -6196,7 +6082,9 @@ const ChatView = (() => {
     // Start streaming UI. Delay the routing scan briefly so request-time
     // compaction can claim the turn without a competing one-frame router flash.
     _startStreaming();
-    const routerScanStarted = _scheduleRouterFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey));
+    const routerScanStarted = _scheduleRouterFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey), {
+      requestKind: routerFxRequestKind,
+    });
     _chatDiag('send.start', {
       textLen: providerText.length,
       attachments: params.attachments ? params.attachments.length : 0,
@@ -6536,6 +6424,38 @@ const ChatView = (() => {
     return true;
   }
 
+  function _clearStreamActiveMarkReveal() {
+    if (_streamActiveMarkTimer) {
+      clearTimeout(_streamActiveMarkTimer);
+      _streamActiveMarkTimer = null;
+    }
+    _streamActiveMarkVisibleStartedAt = 0;
+    if (_streamBubble) _streamBubble.classList.remove(_STREAM_ACTIVE_MARK_CLASS);
+  }
+
+  function _beginStreamActiveMarkRevealWindow() {
+    _streamActiveMarkVisibleStartedAt = Date.now();
+    _scheduleStreamActiveMarkReveal();
+  }
+
+  function _maybeRevealStreamActiveMark() {
+    if (!_isStreaming || !_streamBubble) return false;
+    const elapsedMs = _streamActiveMarkVisibleStartedAt ? Date.now() - _streamActiveMarkVisibleStartedAt : 0;
+    if (elapsedMs < _STREAM_ACTIVE_MARK_DELAY_MS) return false;
+    _streamBubble.classList.add(_STREAM_ACTIVE_MARK_CLASS);
+    return true;
+  }
+
+  function _scheduleStreamActiveMarkReveal() {
+    if (_streamActiveMarkTimer) clearTimeout(_streamActiveMarkTimer);
+    const generation = _streamGeneration;
+    _streamActiveMarkTimer = setTimeout(() => {
+      _streamActiveMarkTimer = null;
+      if (_streamGeneration !== generation) return;
+      _maybeRevealStreamActiveMark();
+    }, _STREAM_ACTIVE_MARK_DELAY_MS);
+  }
+
   function _startStreaming() {
     _chatDiag('stream.start.before', {
       wasStreaming: _isStreaming,
@@ -6609,6 +6529,7 @@ const ChatView = (() => {
       }
 
       _thread.appendChild(_streamBubble);
+      _beginStreamActiveMarkRevealWindow();
 
       // Create the first text segment
       _newTextSegment();
@@ -6616,6 +6537,7 @@ const ChatView = (() => {
         streamBubble: _chatDiagDescribeElement(_streamBubble),
       });
     }
+    _maybeRevealStreamActiveMark();
     return _streamBubble;
   }
 
@@ -6714,6 +6636,7 @@ const ChatView = (() => {
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
     _clearStreamIdleTimer();
+    _clearStreamActiveMarkReveal();
     _streamIdlePausedForApproval = false;
     _approvalPendingForCurrentSession = false;
     if (_streamBubble) {
@@ -9289,6 +9212,7 @@ const ChatView = (() => {
     // Clear the root --composer-h so other views' toasts don't keep that offset.
     document.documentElement.style.removeProperty('--composer-h');
     if (_isStreaming) _endStreaming();
+    _clearStreamActiveMarkReveal();
     _hideThinkingIndicator();
     _cancelPendingRouterFxScan('destroy');
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
