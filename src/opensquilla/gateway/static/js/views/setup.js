@@ -524,6 +524,9 @@ const SetupView = (() => {
   }
 
   function _tierRow(name, tier) {
+    const isImageModel = name === 'image_model';
+    const imageCheckedAttr = isImageModel ? ' checked disabled' :
+      (tier.supportsImage || tier.supports_image ? ' checked' : '');
     return `<div class="setup-tier-table__row" role="row" data-tier="${_esc(name)}">
       <span><code>${_esc(name)}</code></span>
       <input ${_tierControlAttrs(name, 'provider', 'provider')} data-tier-field="provider" value="${_esc(tier.provider || '')}">
@@ -531,7 +534,7 @@ const SetupView = (() => {
       <select ${_tierControlAttrs(name, 'thinkingLevel', 'thinking level')} data-tier-field="thinkingLevel">
         ${['', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map(v => `<option value="${v}"${v === (tier.thinkingLevel || tier.thinking_level || '') ? ' selected' : ''}>${v || '-'}</option>`).join('')}
       </select>
-      <input ${_tierControlAttrs(name, 'supportsImage', 'supports image')} type="checkbox" data-tier-field="supportsImage"${tier.supportsImage || tier.supports_image ? ' checked' : ''}>
+      <input ${_tierControlAttrs(name, 'supportsImage', 'supports image')} type="checkbox" data-tier-field="supportsImage"${imageCheckedAttr}>
     </div>`;
   }
 
@@ -1580,6 +1583,10 @@ const SetupView = (() => {
         const key = input.dataset.tierField;
         tier[key] = input.type === 'checkbox' ? input.checked : input.value;
       });
+      if (row.dataset.tier === 'image_model') {
+        tier.supportsImage = true;
+        tier.image_only = true;
+      }
       tiers[row.dataset.tier] = tier;
     });
     try {

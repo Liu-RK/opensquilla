@@ -918,11 +918,14 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
 
         image_tiers = {k: v for k, v in tiers.items() if v.get("supports_image", False)}
         if not image_tiers:
-            log.debug(
+            log.warning(
                 "squilla_router.no_image_tier",
                 note="image detected but no supports_image tier",
             )
-            return ctx
+            raise RuntimeError(
+                "No image-capable SquillaRouter tier is configured for this image request. "
+                "Configure squilla_router.tiers.image_model with supports_image=true."
+            )
         tier_name = random.choice(list(image_tiers.keys()))
         decision = RoutingDecision(
             tier=tier_name,

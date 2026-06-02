@@ -782,6 +782,30 @@ async def test_image_input_routes_directly_to_vision_model_without_prompt_inject
 
 
 @pytest.mark.asyncio
+async def test_image_attachment_without_image_tier_fails_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail(
+            "image routing without image tier should not invoke text strategy"
+        ),
+    )
+    ctx = make_context(
+        "What is in this screenshot?",
+        attachments=[{"type": "image", "mime_type": "image/png"}],
+    )
+    ctx.config.squilla_router.tiers["image_model"]["supports_image"] = False
+
+    with pytest.raises(
+        RuntimeError,
+        match="No image-capable SquillaRouter tier is configured",
+    ):
+        await apply_squilla_router(ctx)
+
+
+@pytest.mark.asyncio
 async def test_non_image_attachment_does_not_force_vision_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
