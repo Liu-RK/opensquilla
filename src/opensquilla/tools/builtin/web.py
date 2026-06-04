@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlparse
 import httpx
 
 from opensquilla.env import trust_env as _trust_env
-from opensquilla.sandbox.integration import sandboxed
+from opensquilla.sandbox.integration import current_managed_network_proxy_url, sandboxed
 from opensquilla.search.canonical import run_canonical_web_search
 from opensquilla.search.normalize import canonicalize_url, extract_domain
 from opensquilla.search.types import (
@@ -245,7 +245,10 @@ async def http_request(
 
     content: bytes | None = body.encode() if body else None
 
-    async with httpx.AsyncClient(timeout=timeout, trust_env=_trust_env()) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        **managed_network_httpx_kwargs(),
+    ) as client:
         response = await client.request(
             method=method_upper,
             url=url,
@@ -407,7 +410,12 @@ def _format_search_error(provider_name: str, exc: Exception) -> tuple[str, str]:
 def _search_provider_kwargs(provider_name: str) -> dict[str, object]:
     from opensquilla.search.runtime_config import get_resolved_search_runtime
 
-    return get_resolved_search_runtime().provider_kwargs(provider_name)
+    kwargs = get_resolved_search_runtime().provider_kwargs(provider_name)
+    managed_proxy = current_managed_network_proxy_url()
+    if managed_proxy:
+        kwargs["proxy"] = managed_proxy
+        kwargs["use_env_proxy"] = False
+    return kwargs
 
 
 def _ensure_builtin_search_providers() -> None:
