@@ -11,7 +11,6 @@ triggers:
   - "create a meta-skill"
   - "new meta-skill"
   - "orchestrates existing skills"
-  - "orchestrates search"
   - "compose existing skills"
   - "synthesize meta-skill"
   - "compose meta-skill"

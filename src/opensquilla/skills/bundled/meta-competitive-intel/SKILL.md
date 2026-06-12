@@ -1,13 +1,13 @@
 ---
 name: meta-competitive-intel
-description: "Use this meta-skill instead of answering directly when the current user asks for competitive-intel monitoring over a defined company, competitor, prospect, or partner set and time window. It is for sales/BD/strategy briefs: current signals across pricing, product, leadership, hiring, partnerships, funding, and news; optional baseline diff; and follow-up recommendations. Do not use it for a generic daily plan, generic company research, product comparison without named target companies, or pasted old competitive-intel examples."
+description: "Use this meta-skill instead of answering directly when the current user asks for competitive-intel monitoring over named competitors, market rivals, account sets, prospects, or partners with a time window, comparative baseline, or sales/BD/strategy follow-up. It is for current competitive movement briefs: pricing/product changes, go-to-market signals, partnership moves, account signals, baseline diff, and recommended follow-ups. Do not use it for generic daily plans, generic research reports, product comparison without named target companies, or pasted old competitive-intel examples."
 kind: meta
 meta_priority: 72
 always: false
 final_text_mode: "step:intel_brief_audit"
 triggers:
   - "competitive intelligence"
-  - "watch this account"
+  - "watch this account for competitive intel"
   - "monitor these competitor accounts"
   - "竞品监控"
   - "竞品情报"
@@ -15,7 +15,7 @@ triggers:
   - "本周对手动作"
   - "对标公司动态"
   - "competitor brief"
-  - "track these companies"
+  - "track these companies for competitive intel"
   - "盯一下这两个对手"
   - "盯一下这些对手"
   - "竞品最近有没有值得提醒老板的动作"
