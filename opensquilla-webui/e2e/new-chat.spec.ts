@@ -8,11 +8,10 @@ test.describe('New chat draft state', () => {
     await page.goto(CONTROL_URL)
     await page.waitForSelector('.conn-pill', { timeout: 10000 })
 
-    // The primary "New chat" button opens the draft instantly against the
-    // preferred agent with no picker dialog.
-    await page.locator('.sidebar-new-session').click()
+    await page.getByRole('button', { name: 'New chat' }).click()
+    await expect(page.getByRole('dialog', { name: 'New chat' })).toBeVisible()
+    await page.getByRole('button', { name: 'Start chat' }).click()
 
-    await expect(page.getByRole('dialog', { name: 'New chat' })).toHaveCount(0)
     await expect(page).toHaveURL(/\/chat\/new\?agent=/)
     expect(new URL(page.url()).searchParams.get('session')).toBeNull()
 

@@ -6,7 +6,6 @@ from typing import Any
 
 from opensquilla.application.approval_queue import get_approval_queue
 from opensquilla.application.approval_rpc import (
-    approval_extend_rpc_payload,
     approval_forget_rpc_payload,
     approval_request_rpc_payload,
     approval_resolve_rpc_payload,
@@ -15,7 +14,7 @@ from opensquilla.application.approval_rpc import (
     approval_status_rpc_payload,
     approval_wait_decision_rpc_payload,
 )
-from opensquilla.gateway.rpc import RpcContext, get_dispatcher
+from opensquilla.gateway.rpc import RpcContext, RpcHandlerError, get_dispatcher
 from opensquilla.sandbox.escalation import (
     apply_sandbox_approval_choice,
     deny_matching_pending_sandbox_approvals,
@@ -25,6 +24,14 @@ from opensquilla.sandbox.escalation import (
 )
 
 _d = get_dispatcher()
+
+
+def _require_owner_for_sandbox_approval_resolution(ctx: RpcContext) -> None:
+    if not getattr(ctx.principal, "is_owner", False):
+        raise RpcHandlerError(
+            "UNAUTHORIZED",
+            "exec.approval.resolve requires owner principal.",
+        )
 
 
 def _complete_sandbox_resolution_claim(
@@ -169,6 +176,8 @@ async def _handle_exec_approval_resolve(params: dict | None, ctx: RpcContext) ->
     pending = queue.get(params["id"])
     normalized_choice = str(choice).strip() if isinstance(choice, str) and choice.strip() else None
     sandbox_approval = is_sandbox_approval_kind(pending.params.get("approvalKind"))
+    if sandbox_approval and approved:
+        _require_owner_for_sandbox_approval_resolution(ctx)
 
     validate_sandbox_approval_choice(
         pending.params,
@@ -227,42 +236,6 @@ async def _handle_exec_approval_resolve(params: dict | None, ctx: RpcContext) ->
         )
 
     return approval_status_rpc_payload(queue, params["id"], queue.get_settings().mode)
-
-
-# Bounds for an extend request: a positive push, capped so a stuck client
-# cannot pin a request open indefinitely.
-_EXTEND_DEFAULT_SECONDS = 300.0
-_EXTEND_MAX_SECONDS = 3600.0
-
-
-def _coerce_extend_seconds(raw: Any) -> float:
-    if raw is None:
-        return _EXTEND_DEFAULT_SECONDS
-    try:
-        seconds = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("params.seconds must be a number") from exc
-    if seconds <= 0:
-        raise ValueError("params.seconds must be positive")
-    return min(seconds, _EXTEND_MAX_SECONDS)
-
-
-@_d.method("exec.approval.extend", scope="operator.approvals")
-async def _handle_exec_approval_extend(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
-    if not isinstance(params, dict) or "id" not in params:
-        raise ValueError("params.id is required")
-    seconds = _coerce_extend_seconds(params.get("seconds"))
-    queue = get_approval_queue()
-    return approval_extend_rpc_payload(queue, params["id"], seconds)
-
-
-@_d.method("plugin.approval.extend", scope="operator.approvals")
-async def _handle_plugin_approval_extend(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
-    if not isinstance(params, dict) or "id" not in params:
-        raise ValueError("params.id is required")
-    seconds = _coerce_extend_seconds(params.get("seconds"))
-    queue = get_approval_queue()
-    return approval_extend_rpc_payload(queue, params["id"], seconds)
 
 
 @_d.method("plugin.approval.request", scope="operator.approvals")

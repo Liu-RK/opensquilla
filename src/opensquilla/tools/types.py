@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from opensquilla.sandbox.operation_runtime import SandboxToolDescriptor
+
 
 class CallerKind(StrEnum):
     """Entry-point caller type — used in ToolContext for filtering decisions."""
@@ -65,7 +67,6 @@ class ToolContext:
     workspace_file_writes: list[dict[str, Any]] = field(default_factory=list)
     allowed_tools: set[str] | None = None
     denied_tools: set[str] = field(default_factory=set)
-    coding_mode: bool = False  # operator coding-mode toggle (affects tool defaults)
     on_memory_source_write: Callable[[str, str], None] | None = None
     on_bootstrap_source_write: Callable[[str, str], None] | None = None
     # Legacy elevated mode compatibility. New code should treat only "full" as
@@ -121,7 +122,6 @@ CRON_AGENT_ALLOW: frozenset[str] = frozenset(
         "session_status",
         "sessions_history",
         "sessions_list",
-        "web_discover",
         "web_fetch",
         "web_search",
     }
@@ -157,6 +157,9 @@ class ToolSpec:
     execution_timeout_argument: str | None = None
     execution_timeout_padding: float = 0.0
     result_budget_class: str | None = None
+    sandbox: SandboxToolDescriptor = field(
+        default_factory=lambda: SandboxToolDescriptor.custom(kind="")
+    )
 
 
 # Registered tool implementation: async fn that accepts keyword args and returns str.

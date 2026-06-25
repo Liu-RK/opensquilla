@@ -41,8 +41,6 @@ def approval_status_rpc_payload(
         "mode": resolved_mode,
         "approved": status["approved"],
         "resolved": status["resolved"],
-        "resolution": status.get("resolution", ""),
-        "deadline": status.get("deadline"),
         "consumed": status["consumed"],
         "pending": not status["resolved"],
     }
@@ -110,19 +108,6 @@ def approval_forget_rpc_payload(intent_cache: Any, target: Any = None) -> dict[s
     return {"scope": "all"}
 
 
-def approval_extend_rpc_payload(
-    queue: ApprovalQueue,
-    approval_id: str,
-    seconds: float,
-) -> dict[str, Any]:
-    """Push a pending approval's deadline out and return its status payload."""
-
-    deadline = queue.extend(approval_id, seconds)
-    payload = approval_status_rpc_payload(queue, approval_id, queue.get_settings().mode)
-    payload["deadline"] = deadline
-    return payload
-
-
 def approval_resolve_rpc_payload(
     queue: ApprovalQueue,
     approval_id: str,
@@ -146,7 +131,6 @@ def approval_resolve_rpc_payload(
 
 
 __all__ = [
-    "approval_extend_rpc_payload",
     "approval_forget_rpc_payload",
     "approval_request_rpc_payload",
     "approval_resolve_rpc_payload",

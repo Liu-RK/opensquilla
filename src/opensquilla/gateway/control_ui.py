@@ -152,20 +152,15 @@ def _vite_asset_url(raw_url: str, base_path: str) -> str:
     return raw_url
 
 
-def _read_vite_assets(base_path: str) -> tuple[str, list[str]]:
-    """Read the Vite-generated index.html and extract the main JS module and
-    every entry stylesheet.
+def _read_vite_assets(base_path: str) -> tuple[str, str]:
+    """Read the Vite-generated index.html and extract the main JS/CSS assets.
 
-    Returns (js_url, css_urls) relative to the static directory. Vite emits more
-    than one entry stylesheet (e.g. a shared Icon chunk plus the main bundle),
-    and their order in index.html is not stable — extracting only the first
-    drops the main bundle and renders the page unstyled, so all of them must be
-    injected.
+    Returns (js_url, css_url) relative to the static directory.
     """
     dist_index = _DIST_DIR / "index.html"
     if not dist_index.exists():
-        # Fallback: return empty assets; template serves a degraded experience.
-        return ("", [])
+        # Fallback: return empty strings; template will serve a degraded experience
+        return ("", "")
 
     html = dist_index.read_text(encoding="utf-8")
 
@@ -173,13 +168,11 @@ def _read_vite_assets(base_path: str) -> tuple[str, list[str]]:
     js_match = re.search(r'<script type="module"[^>]*src="([^"]+)"', html)
     js_url = _vite_asset_url(js_match.group(1) if js_match else "", base_path)
 
-    # Extract every stylesheet link, preserving document (cascade) order.
-    css_urls = [
-        _vite_asset_url(href, base_path)
-        for href in re.findall(r'<link rel="stylesheet"[^>]*href="([^"]+)"', html)
-    ]
+    # Extract the main CSS link
+    css_match = re.search(r'<link rel="stylesheet"[^>]*href="([^"]+)"', html)
+    css_url = _vite_asset_url(css_match.group(1) if css_match else "", base_path)
 
-    return (js_url, css_urls)
+    return (js_url, css_url)
 
 
 def create_control_ui_routes(config: GatewayConfig) -> list[Route | Mount]:
@@ -197,11 +190,9 @@ def create_control_ui_routes(config: GatewayConfig) -> list[Route | Mount]:
         if frontend == "vue":
             # Re-read latest Vite assets on every request so rebuilds are picked up
             # without restarting the gateway.
-            live_js, live_css_urls = _read_vite_assets(base)
+            live_js, live_css = _read_vite_assets(base)
             ctx["vite_js_url"] = live_js
-            ctx["vite_css_urls"] = live_css_urls
-            # Back-compat single URL (first) for any consumer expecting one.
-            ctx["vite_css_url"] = live_css_urls[0] if live_css_urls else ""
+            ctx["vite_css_url"] = live_css
         html = template.render(**ctx)
         response = HTMLResponse(html)
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"

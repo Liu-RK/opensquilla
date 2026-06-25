@@ -260,7 +260,6 @@ export function runningIndex(state: MetaRibbonState): number {
 }
 
 export function headerIndex(state: MetaRibbonState): number {
-  if (state.runOutcome === 'succeeded') return state.total
   const running = runningIndex(state)
   return running >= 0 ? running + 1 : completedCount(state)
 }

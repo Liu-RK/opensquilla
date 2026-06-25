@@ -391,3 +391,5 @@ onUnmounted(() => {
   disposeTileControllers()
 })
 </script>
+
+<style scoped src="../../styles/chat-view.css"></style>

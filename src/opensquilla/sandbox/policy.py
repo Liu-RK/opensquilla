@@ -29,6 +29,7 @@ from opensquilla.sandbox.types import (
 
 _DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
+    "PATHEXT",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -40,6 +41,20 @@ _DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
     "PWD",
     "WORKSPACE_DIR",
     "PROJECT_ROOT",
+    "COMSPEC",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "PSModulePath",
 )
 
 
@@ -59,9 +74,7 @@ class LevelHints:
     high_impact: bool = False
 
 
-_NETWORK_TAGS: frozenset[str] = frozenset(
-    {"network.fetch", "network.http", "web.discover", "web.fetch", "web.search"}
-)
+_NETWORK_TAGS: frozenset[str] = frozenset({"network.fetch", "network.http", "web.fetch"})
 _FS_READ_TAGS: frozenset[str] = frozenset({"fs.read", "fs.list", "fs.grep"})
 _FS_WRITE_TAGS: frozenset[str] = frozenset({"fs.write", "fs.edit", "patch.apply"})
 _CODE_TAGS: frozenset[str] = frozenset({"code.exec", "shell.exec", "shell.background"})

@@ -88,7 +88,6 @@ METHOD_SCOPES: dict[str, str] = {
     "config.schema.lookup": READ_SCOPE,
     "sessions.get": READ_SCOPE,
     "sessions.list": READ_SCOPE,
-    "sessions.search": READ_SCOPE,
     "sessions.preview": READ_SCOPE,
     "sessions.resolve": READ_SCOPE,
     "sessions.subscribe": READ_SCOPE,
@@ -114,6 +113,7 @@ METHOD_SCOPES: dict[str, str] = {
     "tools.effective": READ_SCOPE,
     "tools.search_provider": READ_SCOPE,  # OpenSquilla-only; classified read.
     "sandbox.status": READ_SCOPE,  # OpenSquilla-only; sandbox posture summary.
+    "sandbox.setup.status": READ_SCOPE,  # OpenSquilla-only; setup readiness.
     "sandbox.explain": READ_SCOPE,  # OpenSquilla-only; deterministic sandbox explanation.
     "sandbox.run_context.get": READ_SCOPE,  # OpenSquilla-only; session sandbox mode.
     "sandbox.path.list": READ_SCOPE,  # OpenSquilla-only; inline path browser listing.
@@ -135,7 +135,6 @@ METHOD_SCOPES: dict[str, str] = {
     "cron.unsubscribe": READ_SCOPE,  # OpenSquilla-only; classified read.
     "usage.status": READ_SCOPE,
     "usage.cost": READ_SCOPE,
-    "meta.list": READ_SCOPE,  # OpenSquilla-only; invokable meta-skill catalog.
     "meta.runs.list": READ_SCOPE,
     "meta.runs.failures": READ_SCOPE,
     "meta.runs.cost": READ_SCOPE,
@@ -174,12 +173,11 @@ METHOD_SCOPES: dict[str, str] = {
     "sandbox.domain.remove": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded handler.
     "sandbox.bundle.enable": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded handler.
     "sandbox.bundle.disable": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded handler.
+    "sandbox.setup.ensure": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded setup.
     "sandbox.run_context.set": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded handler.
     "sandbox.path.pick": WRITE_SCOPE,  # OpenSquilla-only; owner-guarded host directory picker.
     # OpenSquilla-only; explicit override of `config.` admin prefix.
     "config.patch.safe": WRITE_SCOPE,
-    # OpenSquilla-only; manual ``/meta`` command launch stamp.
-    "meta.run": WRITE_SCOPE,
     # ----- approvals -----
     # Policy getters/setters explicitly override the ``exec.approvals.`` prefix
     # so that approval workers (which hold operator.approvals) can read/set the
@@ -191,11 +189,9 @@ METHOD_SCOPES: dict[str, str] = {
     "exec.approval.snapshot": APPROVALS_SCOPE,
     "exec.approval.forget": APPROVALS_SCOPE,
     "exec.approval.resolve": APPROVALS_SCOPE,
-    "exec.approval.extend": APPROVALS_SCOPE,
     "plugin.approval.request": APPROVALS_SCOPE,
     "plugin.approval.waitDecision": APPROVALS_SCOPE,
     "plugin.approval.resolve": APPROVALS_SCOPE,
-    "plugin.approval.extend": APPROVALS_SCOPE,
     # ----- proposals (auto-propose UI: list/show) -----
     # ``exec.proposals.*`` prefix sits OUTSIDE the ``exec.approvals.``
     # admin prefix so that proposal browsing can remain operator-visible.

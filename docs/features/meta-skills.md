@@ -47,34 +47,7 @@ requirements from child skills.
   `meta-paper-write` surfaces LaTeX/PDF requirements and
   `meta-short-drama` surfaces local video-tool requirements.
 
-## Run MetaSkills
-
-MetaSkills are manual-only by default. They do not auto-trigger from message
-keywords or appear in the runtime prompt unless you explicitly opt into the old
-automatic behavior.
-
-In Web chat and the CLI gateway TUI:
-
-```text
-/meta
-/meta meta-kid-project-planner
-```
-
-`/meta` lists available MetaSkills. `/meta <name>` starts the selected
-workflow. Channel and standalone CLI surfaces can list MetaSkills with `/meta`,
-but they do not run MetaSkills from chat text.
-
-To restore automatic model-triggered behavior, set:
-
-```toml
-[meta_skill]
-auto_trigger = true
-```
-
-Use this compatibility mode only when you want MetaSkills to be considered by
-the model during ordinary chat turns.
-
-## How to Prepare the Request
+## How to Ask
 
 Ask for the outcome and the standard:
 
@@ -83,10 +56,10 @@ Plan a safe 20-minute balcony plant science project for a 7-year-old. Include
 materials, adult setup, child steps, safety notes, and a presentation outline.
 ```
 
-When you start a workflow, include the task after the command:
+For important or easily confused work, name the workflow:
 
 ```text
-/meta meta-kid-project-planner
+Use meta-skill `meta-kid-project-planner`.
 
 Plan a safe 20-minute balcony plant science project for a 7-year-old. Include
 materials, adult setup, child steps, safety notes, and a presentation outline.
@@ -103,13 +76,7 @@ A strong request usually includes:
 
 ## Discover Meta-Skills
 
-Use chat slash commands for the runtime list:
-
-```text
-/meta
-```
-
-Use the CLI for inventory and inspection:
+List and search skills:
 
 ```sh
 opensquilla skills list

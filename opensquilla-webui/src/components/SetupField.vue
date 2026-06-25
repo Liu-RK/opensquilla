@@ -1,38 +1,24 @@
 <template>
-  <div
-    class="control-row"
-    :class="{ 'control-row--stack': stack }"
-    :data-name="field.name"
-    :data-scope="scope"
-    :data-show-when="showWhenAttr"
-  >
-    <div class="control-row__label-block">
-      <label class="control-row__label" :for="fieldId">{{ field.label }}{{ field.required ? ' *' : '' }}</label>
-      <span v-if="field.description" class="control-row__desc">{{ field.description }}</span>
-    </div>
-    <div class="control-row__control">
-      <template v-if="field.type === 'bool'">
-        <ControlSwitch
-          :id="fieldId"
-          :name="fieldName"
-          :checked="fieldValue === true || fieldValue === 'true'"
-          @change="onBoolChange"
-        />
-      </template>
-      <select
-        v-else-if="field.type === 'select'"
+  <label :data-name="field.name" :data-scope="scope" :data-show-when="showWhenAttr" :for="fieldId">
+    <span>{{ field.label }}{{ field.required ? ' *' : '' }}</span>
+    <small v-if="field.description" class="setup-field-desc">{{ field.description }}</small>
+    <template v-if="field.type === 'bool'">
+      <input
         :id="fieldId"
-        class="control-input"
         :name="fieldName"
-        :value="fieldValue"
-        @change="onInputChange"
+        type="checkbox"
+        :checked="fieldValue === true || fieldValue === 'true'"
+        @change="onBoolChange"
       >
+    </template>
+    <template v-else-if="field.type === 'select'">
+      <select :id="fieldId" :name="fieldName" :value="fieldValue" @change="onInputChange">
         <option v-for="choice in field.choices" :key="choice" :value="choice">{{ choice }}</option>
       </select>
+    </template>
+    <template v-else>
       <input
-        v-else
         :id="fieldId"
-        class="control-input"
         :name="fieldName"
         :type="inputType"
         :value="fieldValue"
@@ -40,13 +26,12 @@
         :data-secret="isSecret"
         @input="onInputChange"
       >
-    </div>
-  </div>
+    </template>
+  </label>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import ControlSwitch from '@/components/ControlSwitch.vue'
 
 interface FieldSpec {
   name: string
@@ -61,13 +46,11 @@ interface FieldSpec {
   showWhen?: Record<string, string>
 }
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   field: FieldSpec
   value: string | boolean | number
   scope: string
-  /** Render label-on-top with a full-width control (long free-text: URLs, paths). */
-  stack?: boolean
-}>(), { stack: false })
+}>()
 
 const emit = defineEmits<{
   (e: 'update', name: string, value: unknown): void
@@ -100,7 +83,50 @@ function onInputChange(event: Event) {
   emit('update', props.field.name, target.value)
 }
 
-function onBoolChange(checked: boolean) {
-  emit('update', props.field.name, checked)
+function onBoolChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  emit('update', props.field.name, target.checked)
 }
 </script>
+
+<style scoped>
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+label > span:first-child {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+
+input,
+select,
+textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  padding: 8px 12px;
+  width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+input[type="checkbox"] {
+  width: auto;
+}
+
+.setup-field-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+</style>

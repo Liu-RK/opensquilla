@@ -4,7 +4,6 @@ import type { RouteRecordRaw } from 'vue-router'
 import type { IconName } from '@/utils/icons'
 import i18n from '@/i18n'
 import { desktopRoutes } from './desktopRoutes'
-import { CONSOLE_GROUP_ORDER, type NavGroup } from './meta'
 import { sharedRoutes } from './sharedRoutes'
 import { webRoutes } from './webRoutes'
 
@@ -16,25 +15,22 @@ export interface NavigationItem {
   icon: IconName
 }
 
-export interface NavGroupSection {
-  group: NavGroup
-  label: string
-  items: NavigationItem[]
-}
+// Operations surfaces folded behind the sidebar's single Console row.
+const CONSOLE_PATHS = [
+  '/agents',
+  '/channels',
+  '/cron',
+  '/skills',
+  '/overview',
+  '/usage',
+  '/logs',
+]
 
 const navRoutes = [
   ...sharedRoutes,
   ...webRoutes,
   ...desktopRoutes,
 ]
-
-// Operator-facing band labels for the console fold, decoupled from the routing
-// `group` key so the wording reads as goals (Manage / Monitor) without renaming
-// the taxonomy the routes are keyed on.
-const CONSOLE_GROUP_LABELS: Partial<Record<NavGroup, string>> = {
-  Operate: 'Manage',
-  Observe: 'Monitor',
-}
 
 function routePlatforms(platforms: unknown): PlatformId[] {
   if (!Array.isArray(platforms)) return ['web', 'desktop']
@@ -68,38 +64,9 @@ export function getNavigationItems(slot: NavigationSlot): NavigationItem[] {
     }))
 }
 
-// Console fold, grouped by meta.group and ordered by CONSOLE_GROUP_ORDER. The
-// primary slot is already platform-filtered and navOrder-sorted, so intra-band
-// order is correct for free; CONSOLE_GROUP_ORDER excludes Work (the fixed top
-// rows), leaving the same Operate-then-Observe row set the fold renders today.
-export function getConsoleNavigationSections(): NavGroupSection[] {
-  const primary = getNavigationItems('primary')
-  const groupOf = new Map(
-    navRoutes
-      .filter((route) => route.meta?.nav === 'primary')
-      .map((route) => [route.path, route.meta?.group ?? 'Operate']),
-  )
-  return CONSOLE_GROUP_ORDER
-    .map((group) => ({
-      group,
-      label: CONSOLE_GROUP_LABELS[group] ?? group,
-      items: primary.filter((item) => groupOf.get(item.path) === group),
-    }))
-    .filter((section) => section.items.length > 0)
-}
-
-// The Work band: the always-visible level-1 destinations that pin to the rail
-// (and to the mobile drawer). Same platform-filtered, navOrder-sorted primary
-// source as the console fold, so the rail, the drawer, and the command palette
-// all read one taxonomy instead of drifting hardcoded lists. Chat is excluded
-// because it is the dedicated New-chat action, not a navigation row.
-export function getWorkNavigationSection(): NavigationItem[] {
-  const groupOf = new Map(
-    navRoutes
-      .filter((route) => route.meta?.nav === 'primary')
-      .map((route) => [route.path, route.meta?.group ?? 'Operate']),
-  )
-  return getNavigationItems('primary').filter(
-    (item) => groupOf.get(item.path) === 'Work' && item.path !== '/chat',
-  )
+export function getConsoleNavigationItems(): NavigationItem[] {
+  const byPath = new Map(getNavigationItems('primary').map((item) => [item.path, item]))
+  return CONSOLE_PATHS
+    .map((path) => byPath.get(path))
+    .filter((item): item is NavigationItem => !!item)
 }

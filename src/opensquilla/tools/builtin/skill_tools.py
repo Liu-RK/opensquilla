@@ -9,7 +9,6 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,21 +30,9 @@ logger = structlog.get_logger(__name__)
 
 # Module-level reference set at boot
 _loader: SkillLoader | None = None
+
 # Layers that user may mutate — workspace only
 _MUTABLE_LAYERS = frozenset({SkillLayer.WORKSPACE})
-
-
-def _skill_available(name: str) -> bool:
-    """Whether ``name`` may be surfaced/invoked under the live operator config.
-
-    Delegates to the shared eligibility gate (single source of truth) so the
-    skill_list / skill_view paths honor exactly the same coding-mode / disabled
-    rules as the pre-turn filter and the meta-skill executors.
-    """
-    from opensquilla.skills.eligibility import is_skill_available_live
-
-    return is_skill_available_live(name)
-
 
 # Valid skill name pattern: lowercase alphanumeric + hyphens
 _SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9\-]{0,62}$")
@@ -145,9 +132,7 @@ def _find_install_spec(skill_name: str, install_id: str) -> SkillInstallSpec:
         raise ToolError("Skill loader not available")
 
     skill = _loader.get_by_name(skill_name)
-    if skill is None or not _skill_available(skill_name):
-        # Coding-mode-gated skills are reported as not-found so deps cannot be
-        # previewed or installed via install_skill_deps while OFF (codex review).
+    if skill is None:
         raise ToolError(f"Skill not found: {skill_name}")
     if skill.metadata is None or not skill.metadata.install:
         raise ToolError(f"Skill has no install metadata: {skill_name}")
@@ -197,19 +182,10 @@ async def _run_install_argv(argv: list[str]) -> tuple[int, str, str, bool]:
     return proc.returncode or 0, _cap_output(stdout), _cap_output(stderr), False
 
 
-def create_skill_tools(
-    loader: SkillLoader, skills_cfg_getter: Callable[[], object] | None = None
-) -> None:
-    """Register skill tools (list, view, create, edit, delete) with the global registry.
-
-    ``skills_cfg_getter`` returns the live skills config so operator gating
-    (coding mode / disabled) is honored at call time, not boot time.
-    """
-    from opensquilla.skills.eligibility import set_live_skills_config_getter
-
+def create_skill_tools(loader: SkillLoader) -> None:
+    """Register skill tools (list, view, create, edit, delete) with the global registry."""
     global _loader
     _loader = loader
-    set_live_skills_config_getter(skills_cfg_getter)
 
     @tool(
         name="skill_list",
@@ -223,12 +199,6 @@ def create_skill_tools(
             return "No skills installed."
 
         from opensquilla.skills.eligibility import EligibilityContext, diagnose_eligibility
-
-        # Hide operator-gated skills (coding mode off / disabled) so the list
-        # does not reveal a skill the agent cannot use.
-        skills = [s for s in skills if _skill_available(s.name)]
-        if not skills:
-            return "No skills installed."
 
         ctx = EligibilityContext.auto()
         lines = [f"Available skills ({len(skills)}):"]
@@ -255,7 +225,8 @@ def create_skill_tools(
                     lines.append(f"      Hint: Set environment variable {e}")
                 for group in report.missing_env_any:
                     lines.append(
-                        "      Hint: Set one of environment variables " + " or ".join(group)
+                        "      Hint: Set one of environment variables "
+                        + " or ".join(group)
                     )
         return "\n".join(lines)
 
@@ -277,14 +248,7 @@ def create_skill_tools(
     async def skill_view(name: str, file_path: str | None = None) -> str:
         if _loader is None:
             return "No skill loader available."
-        # Gate operator-disabled / coding-mode skills here too: removing them
-        # from <available_skills> is not enough if skill_view can fetch any
-        # skill by name. Same message as not-found so it leaks no bypass hint.
-        if not _skill_available(name):
-            logger.info("skill_view.blocked_by_operator_config", skill=name)
-            skill = None
-        else:
-            skill = _loader.get_by_name(name)
+        skill = _loader.get_by_name(name)
         if skill is None:
             return (
                 f"Skill not found: {name}. This skill is not available in the "

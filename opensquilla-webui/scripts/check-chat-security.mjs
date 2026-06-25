@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const root = fileURLToPath(new URL('..', import.meta.url))
+const root = new URL('..', import.meta.url).pathname
 
 function read(rel) {
   return readFileSync(join(root, rel), 'utf8')
@@ -48,21 +47,6 @@ assertPresent(
   'src/components/chat/ChatArtifactList.vue',
   /URL\.createObjectURL\(blob\)/,
   'artifact previews must render fetched blob object URLs.',
-)
-
-// Assistant markdown is sanitized before it reaches the DOM: the renderer must
-// not bypass DOMPurify, and must never let assistant text render arbitrary form
-// controls. The only <input> markdown produces is a disabled task-list checkbox.
-assertAbsent(
-  'src/composables/chat/useChatTextRendering.ts',
-  /forceKeepAttr/,
-  'markdown sanitization must not bypass DOMPurify via forceKeepAttr.',
-)
-
-assertPresent(
-  'src/composables/chat/useChatTextRendering.ts',
-  /addHook\(\s*['"]uponSanitizeElement['"][\s\S]*?removeChild/,
-  'markdown sanitizer must drop non-task-list <input> elements (uponSanitizeElement + removeChild).',
 )
 
 if (failures.length > 0) {

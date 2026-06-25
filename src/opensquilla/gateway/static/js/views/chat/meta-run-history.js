@@ -11,8 +11,6 @@
     if (typeof rpc.waitForConnection === 'function') {
       await rpc.waitForConnection();
     }
-    const existing = document.querySelector('.meta-run-history');
-    if (existing) existing.remove();
     const panel = renderRunHistoryPanel({ runs: [], loading: true });
     document.body.appendChild(panel);
     try {

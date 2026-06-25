@@ -1,4 +1,5 @@
 import type { Ref } from 'vue'
+import { toCanvas } from 'html-to-image'
 import { downloadBlob } from '@/utils/browser'
 
 export type ShareExportTheme = 'light' | 'dark'
@@ -18,6 +19,9 @@ export interface ShareImageResult {
 }
 
 const EXPORT_WIDTH = 704
+const CAPTURE_STAGE_GUTTER = 48
+const CAPTURE_STAGE_MIN_WIDTH = 640
+const CAPTURE_STAGE_MAX_WIDTH = 1040
 const MAX_EXPORT_HEIGHT = 24000
 const SHARE_TEMPLATE_WIDTH = 760
 const SHARE_TEMPLATE_MARGIN = 28
@@ -26,9 +30,7 @@ const SHARE_TEMPLATE_BRAND_HEIGHT = 24
 const SHARE_TEMPLATE_BRAND_GAP = 14
 const SHARE_TEMPLATE_FOOTER_HEIGHT = 96
 const SHARE_TEMPLATE_QR_SIZE = 64
-const EXPORT_SCALE = 2
-const SHARE_EXPORT_BOTTOM_SAFE_AREA = 32
-const SHARE_EXPORT_USER_BUBBLE_RIGHT_OFFSET = 10
+const CAPTURE_SCALE_LIMIT = 2
 
 const SHARE_FILENAME_PREFIX = 'opensquilla'
 const SHARE_FILENAME_FALLBACK = 'chat'
@@ -158,7 +160,7 @@ function selectedShareElements(thread: HTMLElement | null, selectedIds: Set<stri
 }
 
 export function buildShareDom(sourceElements: HTMLElement[], theme: ShareExportTheme = 'light'): HTMLElement {
-  const stageWidth = EXPORT_WIDTH
+  const stageWidth = captureStageWidth(sourceElements)
   const stage = document.createElement('section')
   stage.id = SHARE_STAGE_ID
   // Forcing data-theme on the stage root re-resolves the token custom
@@ -176,7 +178,7 @@ export function buildShareDom(sourceElements: HTMLElement[], theme: ShareExportT
     'top:16px',
     `width:${stageWidth}px`,
     `max-width:${stageWidth}px`,
-    'padding:0',
+    'padding:0 0 8px',
     'box-sizing:border-box',
     `background:${tokens.card}`,
     `color:${tokens.text}`,
@@ -193,54 +195,17 @@ export function buildShareDom(sourceElements: HTMLElement[], theme: ShareExportT
   const stack = document.createElement('div')
   stack.className = 'chat-share-export-stack'
   sourceElements.forEach((element) => {
-    const clone = cleanupShareClone(element.cloneNode(true) as HTMLElement)
-    inlineBlobBackedImages(element, clone)
-    stack.appendChild(clone)
+    stack.appendChild(cleanupShareClone(element.cloneNode(true) as HTMLElement))
   })
   stage.appendChild(stack)
 
   return stage
 }
 
-// Image artifacts render from blob: object URLs. html-to-image inlines images
-// by fetch()-ing the src, but the gateway CSP allows blob: under img-src yet
-// not connect-src, so that fetch is blocked and the picture drops out of the
-// export. Bypass the fetch entirely: paint the live, already-decoded <img>
-// (matched by its artifact key) onto a canvas and hand the clone a data: URL,
-// which the rasteriser embeds directly without a network request.
-function inlineBlobBackedImages(original: HTMLElement, clone: HTMLElement): void {
-  clone.querySelectorAll<HTMLImageElement>('img').forEach((cloneImg) => {
-    if (!cloneImg.src.startsWith('blob:')) return
-    const key = cloneImg.dataset.artifactKey
-    const source = key
-      ? original.querySelector<HTMLImageElement>(`img[data-artifact-key="${CSS.escape(key)}"]`)
-      : null
-    // Only a fully-decoded same-origin image can be painted; otherwise leave the
-    // blob src and let the capture's onImageErrorHandler degrade it gracefully.
-    if (!source || !source.complete || !source.naturalWidth) return
-    try {
-      const canvas = document.createElement('canvas')
-      canvas.width = source.naturalWidth
-      canvas.height = source.naturalHeight
-      const context = canvas.getContext('2d')
-      if (!context) return
-      context.drawImage(source, 0, 0)
-      cloneImg.src = canvas.toDataURL('image/png')
-      cloneImg.removeAttribute('srcset')
-    } catch {
-      // A tainted canvas (cross-origin artifact without CORS) throws here; keep
-      // the blob src so the export still composes without the offending image.
-    }
-  })
-}
-
 function shareTemplateMetrics() {
   return {
     width: SHARE_TEMPLATE_WIDTH,
     contentWidth: EXPORT_WIDTH,
-    exportScale: captureScale(),
-    bottomSafeArea: SHARE_EXPORT_BOTTOM_SAFE_AREA,
-    userBubbleRightOffset: SHARE_EXPORT_USER_BUBBLE_RIGHT_OFFSET,
     top: SHARE_TEMPLATE_TOP,
     brandHeight: SHARE_TEMPLATE_BRAND_HEIGHT,
     brandGap: SHARE_TEMPLATE_BRAND_GAP,
@@ -264,6 +229,15 @@ function shareThemeTokens(themeEl: HTMLElement) {
     muted: token('--text-muted', '#4f5550'),
     fontSans: token('--font-sans', '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'),
   }
+}
+
+function captureStageWidth(sourceElements: HTMLElement[]): number {
+  const sourceWidth = Math.max(
+    ...sourceElements.map(element => element.getBoundingClientRect().width),
+    0,
+  )
+  const naturalWidth = Math.ceil(sourceWidth + CAPTURE_STAGE_GUTTER)
+  return Math.max(CAPTURE_STAGE_MIN_WIDTH, Math.min(CAPTURE_STAGE_MAX_WIDTH, naturalWidth))
 }
 
 function cleanupShareClone(clone: HTMLElement): HTMLElement {
@@ -331,13 +305,6 @@ function shareExportCss(): string {
       flex-direction: column;
       gap: 0;
       width: 100%;
-      padding-bottom: ${SHARE_EXPORT_BOTTOM_SAFE_AREA}px;
-      box-sizing: border-box;
-    }
-
-    #${SHARE_STAGE_ID} .msg-user {
-      padding-right: ${SHARE_EXPORT_USER_BUBBLE_RIGHT_OFFSET}px;
-      box-sizing: border-box;
     }
 
     #${SHARE_STAGE_ID} button,
@@ -371,94 +338,18 @@ function shareExportCss(): string {
     #${SHARE_STAGE_ID} .msg-ai-meta > span {
       opacity: 1 !important;
     }
-
-    /* Markdown blocks the scoped chat CSS does not reach in a cloned stage.
-       Mirrors styles/chat-markdown.css so exported images render tables,
-       headings, quotes, links and rules the same as the live chat. */
-    #${SHARE_STAGE_ID} .msg-ai-text table {
-      display: block;
-      width: max-content;
-      max-width: 100%;
-      overflow-x: auto;
-      border-collapse: collapse;
-      border: 1px solid var(--border);
-      margin: var(--sp-2) 0;
-      font-size: 0.9375em;
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text th,
-    #${SHARE_STAGE_ID} .msg-ai-text td {
-      padding: var(--sp-1) var(--sp-3);
-      border: 1px solid var(--border);
-      text-align: left;
-      vertical-align: top;
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text th {
-      background: var(--bg-elevated);
-      font-weight: 600;
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text h1,
-    #${SHARE_STAGE_ID} .msg-ai-text h2,
-    #${SHARE_STAGE_ID} .msg-ai-text h3,
-    #${SHARE_STAGE_ID} .msg-ai-text h4,
-    #${SHARE_STAGE_ID} .msg-ai-text h5,
-    #${SHARE_STAGE_ID} .msg-ai-text h6 {
-      font-family: var(--font-display);
-      font-weight: 600;
-      line-height: 1.3;
-      margin: var(--sp-3) 0 var(--sp-2);
-      color: var(--text);
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text h1 { font-size: 1.4em; }
-    #${SHARE_STAGE_ID} .msg-ai-text h2 { font-size: 1.25em; }
-    #${SHARE_STAGE_ID} .msg-ai-text h3 { font-size: 1.1em; }
-    #${SHARE_STAGE_ID} .msg-ai-text h4 { font-size: 1em; }
-    #${SHARE_STAGE_ID} .msg-ai-text h5,
-    #${SHARE_STAGE_ID} .msg-ai-text h6 { font-size: 0.9em; color: var(--text-muted); }
-    #${SHARE_STAGE_ID} .msg-ai-text blockquote {
-      border-left: 2px solid var(--border-strong);
-      color: var(--text-muted);
-      margin: var(--sp-2) 0;
-      padding-left: var(--sp-3);
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text a { color: var(--accent); text-decoration: none; }
-    #${SHARE_STAGE_ID} .msg-ai-text hr {
-      border: 0;
-      border-top: 1px solid var(--border);
-      margin: var(--sp-3) 0;
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text li:has(> input[type='checkbox']) {
-      list-style: none;
-      margin-left: -1.1em;
-    }
-    #${SHARE_STAGE_ID} .msg-ai-text li > input[type='checkbox'] {
-      margin: 0 0.4em 0 0;
-      vertical-align: middle;
-      accent-color: var(--accent);
-    }
   `
 }
 
 async function captureStageWithDom(stage: HTMLElement): Promise<HTMLCanvasElement> {
   const rect = stage.getBoundingClientRect()
   const height = assertShareStageHeight(stage, rect)
-  // Load the rasteriser on demand so it stays out of the chat critical path.
-  const { toCanvas } = await import('html-to-image')
   const canvas = await toCanvas(stage, {
     backgroundColor: shareThemeTokens(stage).card,
-    // Cache-busting must stay OFF: chat image artifacts render from blob:
-    // object URLs, and html-to-image's cache-bust glues a "?<ts>" query onto
-    // every image src. A blob: URL with a query string is not a registered
-    // object URL, so the fetch fails, the cloned <img> src is cleared, and the
-    // resulting error event rejects the whole capture. These same-origin blob
-    // and static resources never need cache-busting anyway.
-    cacheBust: false,
+    cacheBust: true,
     pixelRatio: captureScale(),
     width: Math.ceil(rect.width),
     height,
-    // Defence in depth: a single image that still can't be embedded (e.g. its
-    // blob URL was revoked mid-export) must not abort the PNG. Swallow the
-    // error so that one image comes through blank instead of failing the share.
-    onImageErrorHandler: () => {},
     style: {
       transform: 'none',
       margin: '0',
@@ -598,7 +489,7 @@ async function waitForStablePaint(): Promise<void> {
 }
 
 function captureScale(): number {
-  return EXPORT_SCALE
+  return Math.min(window.devicePixelRatio || 1, CAPTURE_SCALE_LIMIT)
 }
 
 function blobFromCanvas(canvas: HTMLCanvasElement): Promise<Blob> {

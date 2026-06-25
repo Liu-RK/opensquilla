@@ -6,8 +6,9 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import structlog
@@ -17,14 +18,18 @@ from opensquilla.result_budget import (
     DEFAULT_TOOL_RUN_BUDGET_POLICY,
     ToolRunBudgetPolicy,
 )
-from opensquilla.sandbox.integration import managed_network_httpx_kwargs, sandboxed
+from opensquilla.sandbox.integration import managed_network_httpx_kwargs
+from opensquilla.sandbox.operation_runtime import (
+    NetworkOperationRequest,
+    SandboxToolDescriptor,
+)
 from opensquilla.tools.registry import tool
 from opensquilla.tools.ssrf import validate_http_url_for_fetch
 from opensquilla.tools.types import SSRFBlockedError, current_tool_context
 
 log = structlog.get_logger(__name__)
 
-# 15-minute cache keyed by (url, extract_mode, extractor preference)
+# 15-minute cache keyed by (url, extract_mode)
 _cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 
 # Escalate to Firecrawl when local readability returns None or content below
@@ -62,7 +67,15 @@ _XML_ATTR_ESCAPES = {
     "'": "&apos;",
 }
 
-_RAW_TOOL_RESULT_KEY = "_raw_tool_result"
+
+def _web_fetch_request(args: Mapping[str, Any]) -> NetworkOperationRequest:
+    url = str(args.get("url", "") or "")
+    parsed = urlparse(url)
+    return NetworkOperationRequest(
+        url=url,
+        method="GET",
+        host=parsed.hostname or "",
+    )
 
 
 def _check_ssrf(url: str) -> None:
@@ -94,34 +107,21 @@ def _markdown_to_text(markdown: str) -> str:
     return h.handle(markdown)
 
 
-async def _try_firecrawl(url: str, api_key: str) -> tuple[str, str, str] | None:
-    """Try Firecrawl API. Returns (content, extractor, title) or None."""
+async def _try_firecrawl(url: str, api_key: str) -> tuple[str, str] | None:
+    """Try Firecrawl API. Returns (content, extractor) or None."""
     try:
         async with httpx.AsyncClient(
             timeout=30.0,
             **managed_network_httpx_kwargs(),
         ) as client:
             resp = await client.post(
-                "https://api.firecrawl.dev/v2/scrape",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "url": url,
-                    "formats": ["markdown"],
-                    "onlyMainContent": True,
-                    "maxAge": 900_000,
-                },
+                "https://api.firecrawl.dev/v1/scrape",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"url": url, "formats": ["markdown"]},
             )
             data = resp.json()
             if data.get("success"):
-                scraped = data.get("data") or {}
-                if not isinstance(scraped, dict):
-                    return None
-                metadata = scraped.get("metadata") or {}
-                title = metadata.get("title") if isinstance(metadata, dict) else ""
-                return str(scraped.get("markdown") or ""), "firecrawl", str(title or "")
+                return data["data"]["markdown"], "firecrawl"
             log.warning("web_fetch.firecrawl_unsuccessful", url=url, response=data)
     except Exception as exc:
         log.warning("web_fetch.firecrawl_error", url=url, error=str(exc))
@@ -179,77 +179,66 @@ def _active_run_budget_policy() -> ToolRunBudgetPolicy:
     return DEFAULT_TOOL_RUN_BUDGET_POLICY
 
 
-async def run_web_fetch_payload(
+@tool(
+    name="web_fetch",
+    description=(
+        "Fetch a URL and extract readable content as markdown or plain text. "
+        "Uses a multi-extractor pipeline (readability → Firecrawl escalation → "
+        "html2text). Includes SSRF protection and a 15-minute response cache."
+    ),
+    params={
+        "url": {
+            "type": "string",
+            "description": "HTTP or HTTPS URL to fetch.",
+        },
+        "extract_mode": {
+            "type": "string",
+            "description": 'Extraction format: "markdown" (default) or "text".',
+            "enum": ["markdown", "text"],
+        },
+        "max_chars": {
+            "type": "integer",
+            "description": (
+                "Maximum characters to return (minimum 100). "
+                "Defaults to 20,000 when omitted; override default with "
+                "OPENSQUILLA_WEB_FETCH_MAX_CHARS."
+            ),
+            "minimum": 100,
+        },
+    },
+    required=["url"],
+    result_budget_class="external",
+    sandbox=SandboxToolDescriptor.network(
+        kind="web.fetch",
+        argv_factory=lambda a: (
+            "web_fetch",
+            str(a.get("url", "")),
+            str(a.get("extract_mode", "markdown")),
+        ),
+        request_factory=_web_fetch_request,
+        record_payload=False,
+    ),
+)
+async def web_fetch(
     url: str,
     extract_mode: str = "markdown",
     max_chars: int | None = None,
-    extractor: str = "auto",
-) -> dict[str, Any]:
+) -> str:
     # --- SSRF guard ---
     _check_ssrf(url)
     from opensquilla.tools.builtin.web import _sensitive_body_block, _sensitive_url_marker
 
     marker = _sensitive_url_marker(url)
     if marker is not None:
-        return {_RAW_TOOL_RESULT_KEY: _sensitive_body_block("web_fetch", marker)}
+        return _sensitive_body_block("web_fetch", marker)
 
     effective_max_chars = _resolve_effective_max_chars(max_chars)
 
     # --- Cache lookup ---
-    extractor_preference = extractor or "auto"
-    cache_key = (url, extract_mode, extractor_preference)
+    cache_key = (url, extract_mode)
     if cache_key in _cache:
         cached: dict[str, Any] = dict(_cache[cache_key])
-        return _apply_max_chars(cached, effective_max_chars)
-
-    if extractor_preference == "firecrawl":
-        firecrawl_key = os.environ.get("FIRECRAWL_API_KEY", "")
-        if not firecrawl_key:
-            return {
-                "url": url,
-                "final_url": url,
-                "status": 0,
-                "content_type": "",
-                "title": "",
-                "extract_mode": extract_mode,
-                "extractor": "firecrawl",
-                "truncated": False,
-                "length": 0,
-                "text": "",
-                "error": "FIRECRAWL_API_KEY is required for explicit Firecrawl extraction.",
-            }
-        fc_result = await _try_firecrawl(url, firecrawl_key)
-        if fc_result is None:
-            return {
-                "url": url,
-                "final_url": url,
-                "status": 0,
-                "content_type": "",
-                "title": "",
-                "extract_mode": extract_mode,
-                "extractor": "firecrawl",
-                "truncated": False,
-                "length": 0,
-                "text": "",
-                "error": "Firecrawl scrape did not return content.",
-            }
-        extracted_content, extractor_used, title = fc_result
-        if extract_mode == "text":
-            extracted_content = _markdown_to_text(extracted_content)
-        firecrawl_payload = {
-            "url": url,
-            "final_url": url,
-            "status": 200,
-            "content_type": "text/markdown",
-            "title": title,
-            "extract_mode": extract_mode,
-            "extractor": extractor_used,
-            "truncated": False,
-            "length": len(extracted_content),
-            "text": _wrap_content(url, extracted_content),
-        }
-        _cache[cache_key] = firecrawl_payload
-        return _apply_max_chars(firecrawl_payload, effective_max_chars)
+        return json.dumps(_apply_max_chars(cached, effective_max_chars), ensure_ascii=False)
 
     # --- Fetch ---
     title = ""
@@ -298,7 +287,24 @@ async def run_web_fetch_payload(
         except SSRFBlockedError:
             raise
         except httpx.TimeoutException:
-            raise
+            timeout_result = {
+                "url": url,
+                "final_url": url,
+                "status": 0,
+                "content_type": "",
+                "title": "",
+                "extract_mode": extract_mode,
+                "extractor": "none",
+                "truncated": False,
+                "length": 0,
+                "text": "",
+                "error": "timed_out",
+                "hint": (
+                    "The source timed out while loading; skip it, retry later, "
+                    "or use another source."
+                ),
+            }
+            return json.dumps(timeout_result, ensure_ascii=False)
         except Exception as exc:
             last_error = str(exc)
             if attempt_idx == 0:
@@ -317,7 +323,7 @@ async def run_web_fetch_payload(
                 "text": "",
                 "error": last_error,
             }
-            return result
+            return json.dumps(result, ensure_ascii=False)
 
         is_transient = status in _TRANSIENT_STATUSES
         is_empty_success = 200 <= status < 300 and not raw_html.strip()
@@ -342,7 +348,7 @@ async def run_web_fetch_payload(
             "text": _wrap_content(final_url, raw_html),
         }
         _cache[cache_key] = result
-        return _apply_max_chars(result, effective_max_chars)
+        return json.dumps(_apply_max_chars(result, effective_max_chars), ensure_ascii=False)
 
     # --- Error HTTP status: return empty ---
     if status >= 400:
@@ -367,7 +373,7 @@ async def run_web_fetch_payload(
         }
         if status not in _TRANSIENT_STATUSES:
             _cache[cache_key] = result
-        return result
+        return json.dumps(result, ensure_ascii=False)
 
     # --- Extraction pipeline ---
     # Try local extractors first (zero-cost, handles ~90% of mainstream pages),
@@ -394,8 +400,7 @@ async def run_web_fetch_payload(
         )
         fc_result = await _try_firecrawl(url, firecrawl_key)
         if fc_result is not None:
-            extracted_content, extractor_used, firecrawl_title = fc_result
-            title = title or firecrawl_title
+            extracted_content, extractor_used = fc_result
 
     # 3. html2text fallback — always succeeds on valid HTML
     if not extracted_content:
@@ -418,70 +423,7 @@ async def run_web_fetch_payload(
         "text": _wrap_content(final_url, extracted_content),
     }
     _cache[cache_key] = result
-    return _apply_max_chars(result, effective_max_chars)
-
-
-@tool(
-    name="web_fetch",
-    description=(
-        "Fetch a URL and extract readable content as markdown or plain text. "
-        "Uses a multi-extractor pipeline (readability → Firecrawl escalation → "
-        "html2text). Includes SSRF protection and a 15-minute response cache."
-    ),
-    params={
-        "url": {
-            "type": "string",
-            "description": "HTTP or HTTPS URL to fetch.",
-        },
-        "extract_mode": {
-            "type": "string",
-            "description": 'Extraction format: "markdown" (default) or "text".',
-            "enum": ["markdown", "text"],
-        },
-        "max_chars": {
-            "type": "integer",
-            "description": (
-                "Maximum characters to return (minimum 100). "
-                "Defaults to 20,000 when omitted; override default with "
-                "OPENSQUILLA_WEB_FETCH_MAX_CHARS."
-            ),
-            "minimum": 100,
-        },
-        "extractor": {
-            "type": "string",
-            "description": 'Extractor preference: "auto" (default) or "firecrawl".',
-            "enum": ["auto", "firecrawl"],
-        },
-    },
-    required=["url"],
-    result_budget_class="external",
-)
-@sandboxed(
-    kind="web.fetch",
-    argv_factory=lambda a: (
-        "web_fetch",
-        str(a.get("url", "")),
-        str(a.get("extract_mode", "markdown")),
-        str(a.get("extractor", "auto")),
-    ),
-    record_payload=False,
-)
-async def web_fetch(
-    url: str,
-    extract_mode: str = "markdown",
-    max_chars: int | None = None,
-    extractor: str = "auto",
-) -> str:
-    payload = await run_web_fetch_payload(
-        url,
-        extract_mode=extract_mode,
-        max_chars=max_chars,
-        extractor=extractor,
-    )
-    raw_tool_result = payload.get(_RAW_TOOL_RESULT_KEY)
-    if isinstance(raw_tool_result, str):
-        return raw_tool_result
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(_apply_max_chars(result, effective_max_chars), ensure_ascii=False)
 
 
 def _wrap_content(source: str, content: str) -> str:

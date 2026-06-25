@@ -9,13 +9,12 @@ import logging
 import mimetypes
 import re
 import secrets
-from collections.abc import Iterator
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opensquilla.attachment_refs import _atomic_write_bytes, _link_or_copy, _validate_sha256
+from opensquilla.attachment_refs import _atomic_write_bytes, _validate_sha256
 
 _log = logging.getLogger(__name__)
 
@@ -26,8 +25,6 @@ ARTIFACT_MATERIAL_NAME = "data"
 ARTIFACT_THUMBNAIL_NAME = "thumb.webp"
 ARTIFACT_THUMBNAIL_MAX_EDGE = 512
 ARTIFACT_THUMBNAIL_QUALITY = 80
-ARTIFACT_STORE_TOKEN_CHARS = 12
-LEGACY_ARTIFACT_STORE_TOKEN_CHARS = 16
 DEFAULT_ARTIFACT_MAX_BYTES = 30 * 1024 * 1024
 DEFAULT_ARTIFACT_DISK_BUDGET_BYTES = 512 * 1024 * 1024
 INSTALLER_ARTIFACT_MAX_BYTES = DEFAULT_ARTIFACT_DISK_BUDGET_BYTES
@@ -368,126 +365,31 @@ class ArtifactStore:
         sha256 = _validate_sha256(sha256)
         safe_name = _safe_filename(name)
         safe_mime = _safe_mime(mime) if mime else None
-        for root in self._artifact_session_roots(session_id):
-            if not root.exists():
-                continue
-            for meta_path in sorted(root.glob("*/meta.json")):
-                try:
-                    ref = ArtifactRef.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
-                except (OSError, ValueError, json.JSONDecodeError):
-                    continue
-                if ref.session_id != session_id or ref.session_key != session_key:
-                    continue
-                if ref.sha256 != sha256 or ref.name != safe_name:
-                    continue
-                if safe_mime is not None and ref.mime != safe_mime:
-                    continue
-                try:
-                    self.resolve_for_download(ref.id, session_id=session_id)
-                except (ArtifactNotFoundError, ArtifactIntegrityError):
-                    continue
-                return ref
-        return None
-
-    def copy_session_artifacts(
-        self,
-        *,
-        source_session_id: str,
-        target_session_id: str,
-        target_session_key: str,
-    ) -> int:
-        """Duplicate every artifact owned by ``source_session_id`` into ``target_session_id``.
-
-        Used when a session is forked: the child transcript references each artifact by
-        its stable id and a session-less download URL, but the store is session-scoped
-        and ``resolve_for_download`` rejects a mismatched session id, so the child needs
-        its own copy. Each artifact keeps its id; the copied ``meta.json`` is rebound to
-        the child's session id/key and the material (plus any thumbnail) is materialized
-        under the child's session bucket. Idempotent and best-effort: already-copied or
-        unreadable artifacts are skipped. Returns the number of artifacts copied.
-        """
-        source_session_id = _validate_non_empty("source_session_id", source_session_id)
-        target_session_id = _validate_non_empty("target_session_id", target_session_id)
-        target_session_key = _validate_non_empty("target_session_key", target_session_key)
-        if target_session_id == source_session_id:
-            return 0
-        copied = 0
-        for meta_path in self._iter_session_meta_paths(source_session_id):
+        root = (
+            self.media_root
+            / ARTIFACT_STORE
+            / ARTIFACT_SESSION_BUCKET
+            / _session_store_token(session_id)
+        )
+        if not root.exists():
+            return None
+        for meta_path in sorted(root.glob("*/meta.json")):
             try:
                 ref = ArtifactRef.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-            if ref.session_id != source_session_id:
+            if ref.session_id != session_id or ref.session_key != session_key:
+                continue
+            if ref.sha256 != sha256 or ref.name != safe_name:
+                continue
+            if safe_mime is not None and ref.mime != safe_mime:
                 continue
             try:
-                if self._copy_one_artifact(ref, target_session_id, target_session_key):
-                    copied += 1
-            except (OSError, ValueError):
-                # Best-effort: a single bad artifact (filesystem error, invalid sha)
-                # must not stop the rest. ArtifactError is a ValueError subclass.
+                self.resolve_for_download(ref.id, session_id=session_id)
+            except (ArtifactNotFoundError, ArtifactIntegrityError):
                 continue
-        return copied
-
-    def _iter_session_meta_paths(self, session_id: str) -> Iterator[Path]:
-        """Yield every artifact ``meta.json`` for ``session_id`` across all store layouts."""
-        roots = (
-            *self._artifact_session_roots(session_id),
-            self.media_root
-            / ARTIFACT_STORE
-            / _safe_token(_validate_non_empty("session_id", session_id)),
-        )
-        seen: set[Path] = set()
-        for root in roots:
-            if not root.exists():
-                continue
-            for meta_path in sorted(root.glob("*/meta.json")):
-                resolved = meta_path.resolve()
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                yield meta_path
-
-    def _copy_one_artifact(
-        self,
-        ref: ArtifactRef,
-        target_session_id: str,
-        target_session_key: str,
-    ) -> bool:
-        """Materialize one artifact under the child session; return True when copied."""
-        source_material = self.path_for(ref)
-        if not source_material.exists():
-            return False
-        target_dir = self._artifact_dir(target_session_id, ref.id)
-        target_material = target_dir / ARTIFACT_MATERIAL_NAME
-        target_meta = target_dir / "meta.json"
-        if target_meta.exists() and target_material.exists():
-            return False
-        target_dir.mkdir(parents=True, exist_ok=True)
-        if not target_material.exists():
-            _link_or_copy(source_material, target_material)
-        has_thumbnail = False
-        if ref.has_thumbnail:
-            target_thumb = target_dir / ARTIFACT_THUMBNAIL_NAME
-            source_thumb = self.thumbnail_path_for(ref)
-            if target_thumb.exists():
-                has_thumbnail = True
-            elif source_thumb.exists():
-                _link_or_copy(source_thumb, target_thumb)
-                has_thumbnail = True
-        # Only advertise a thumbnail the child actually has on disk: a source whose
-        # sidecar cannot be located (e.g. a legacy layout without one) is copied
-        # without it rather than leaving a dangling has_thumbnail in the child meta.
-        child_ref = replace(
-            ref,
-            session_id=target_session_id,
-            session_key=target_session_key,
-            has_thumbnail=has_thumbnail,
-        )
-        _atomic_write_bytes(
-            target_meta,
-            json.dumps(child_ref.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8"),
-        )
-        return True
+            return ref
+        return None
 
     def resolve_thumbnail_for_download(
         self,
@@ -513,58 +415,21 @@ class ArtifactStore:
 
     def path_for(self, ref: ArtifactRef) -> Path:
         _validate_sha256(ref.sha256)
-        for artifact_dir in (
-            self._artifact_dir(ref.session_id, ref.id),
-            self._legacy_short_artifact_dir(ref.session_id, ref.id),
-        ):
-            material_path = artifact_dir / ARTIFACT_MATERIAL_NAME
-            if material_path.exists():
-                return material_path
+        material_path = self._artifact_dir(ref.session_id, ref.id) / ARTIFACT_MATERIAL_NAME
+        if material_path.exists():
+            return material_path
         return self._legacy_artifact_dir(ref.session_id, ref.id) / ref.sha256
 
     def thumbnail_path_for(self, ref: ArtifactRef) -> Path:
-        for artifact_dir in (
-            self._artifact_dir(ref.session_id, ref.id),
-            self._legacy_short_artifact_dir(ref.session_id, ref.id),
-        ):
-            thumbnail_path = artifact_dir / ARTIFACT_THUMBNAIL_NAME
-            if thumbnail_path.exists():
-                return thumbnail_path
         return self._artifact_dir(ref.session_id, ref.id) / ARTIFACT_THUMBNAIL_NAME
 
     def _artifact_dir(self, session_id: str, artifact_id: str) -> Path:
-        return self._short_artifact_dir(
-            session_id,
-            artifact_id,
-            token_chars=ARTIFACT_STORE_TOKEN_CHARS,
-        )
-
-    def _legacy_short_artifact_dir(self, session_id: str, artifact_id: str) -> Path:
-        return self._short_artifact_dir(
-            session_id,
-            artifact_id,
-            token_chars=LEGACY_ARTIFACT_STORE_TOKEN_CHARS,
-        )
-
-    def _short_artifact_dir(self, session_id: str, artifact_id: str, *, token_chars: int) -> Path:
         return (
             self.media_root
             / ARTIFACT_STORE
             / ARTIFACT_SESSION_BUCKET
-            / _session_store_token(session_id, chars=token_chars)
-            / _artifact_store_token(artifact_id, chars=token_chars)
-        )
-
-    def _artifact_session_roots(self, session_id: str) -> tuple[Path, ...]:
-        return (
-            self.media_root
-            / ARTIFACT_STORE
-            / ARTIFACT_SESSION_BUCKET
-            / _session_store_token(session_id, chars=ARTIFACT_STORE_TOKEN_CHARS),
-            self.media_root
-            / ARTIFACT_STORE
-            / ARTIFACT_SESSION_BUCKET
-            / _session_store_token(session_id, chars=LEGACY_ARTIFACT_STORE_TOKEN_CHARS),
+            / _session_store_token(session_id)
+            / _artifact_store_token(artifact_id)
         )
 
     def _legacy_artifact_dir(self, session_id: str, artifact_id: str) -> Path:
@@ -578,7 +443,6 @@ class ArtifactStore:
     def _resolve_meta_path(self, session_id: str, artifact_id: str) -> Path:
         for artifact_dir in (
             self._artifact_dir(session_id, artifact_id),
-            self._legacy_short_artifact_dir(session_id, artifact_id),
             self._legacy_artifact_dir(session_id, artifact_id),
         ):
             meta_path = artifact_dir / "meta.json"
@@ -650,14 +514,14 @@ def _safe_token(value: str) -> str:
     return cleaned[:180] or "session"
 
 
-def _session_store_token(session_id: str, *, chars: int = ARTIFACT_STORE_TOKEN_CHARS) -> str:
+def _session_store_token(session_id: str) -> str:
     raw = _validate_non_empty("session_id", session_id)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:chars]
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _artifact_store_token(artifact_id: str, *, chars: int = ARTIFACT_STORE_TOKEN_CHARS) -> str:
+def _artifact_store_token(artifact_id: str) -> str:
     raw = _validate_artifact_id(artifact_id)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:chars]
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _validate_artifact_id(value: Any) -> str:

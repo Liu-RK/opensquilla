@@ -21,6 +21,7 @@ import json
 import time
 import weakref
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -41,6 +42,11 @@ from opensquilla.result_budget import (
 from opensquilla.safety.injection_guard import (
     REFUSAL_REASON_TOOL_CALL_IN_UNTRUSTED,
     extract_tool_call_refusal_reason,
+)
+from opensquilla.sandbox.operation_runtime import (
+    prepare_tool_operation_guard,
+    record_tool_operation_success,
+    run_tool_handler_with_operation_guard,
 )
 from opensquilla.tool_boundary import AgentToolHandler, ToolCall, ToolResult
 from opensquilla.tools.envelope import build_tool_failure_envelope
@@ -142,7 +148,7 @@ def _build_envelope_result(
     )
 
 
-async def _emit_web_retrieval_tool_run_diagnostics(
+async def _emit_webresearch_tool_run_diagnostics(
     *,
     tool_call: ToolCall,
     effective_ctx: ToolContext | None,
@@ -165,7 +171,7 @@ async def _emit_web_retrieval_tool_run_diagnostics(
     if raw_result is not None:
         result_chars = len(raw_result if isinstance(raw_result, str) else str(raw_result))
     log.debug(
-        "dispatch.web_retrieval_tool_run_diagnostics",
+        "dispatch.webresearch_tool_run_diagnostics",
         tool=tool_call.tool_name,
         tool_use_id=tool_call.tool_use_id,
         agent_id=effective_ctx.agent_id if effective_ctx else None,
@@ -600,7 +606,35 @@ def build_tool_handler(
             len(effective_ctx.published_artifacts) if effective_ctx is not None else 0
         )
         try:
-            raw_result = await registered.handler(**reservation.arguments)
+            sandbox_descriptor = registered.spec.sandbox
+            if sandbox_descriptor.enforce:
+                workspace = (
+                    Path(effective_ctx.workspace_dir)
+                    if effective_ctx is not None and effective_ctx.workspace_dir
+                    else None
+                )
+                sandbox_guard = await prepare_tool_operation_guard(
+                    sandbox_descriptor,
+                    tool_name=tool_call.tool_name,
+                    arguments=reservation.arguments,
+                    workspace=workspace,
+                    run_mode=getattr(effective_ctx, "run_mode", None),
+                )
+                raw_result = await run_tool_handler_with_operation_guard(
+                    registered.handler,
+                    reservation.arguments,
+                    sandbox_guard,
+                )
+                if sandbox_guard.denial_payload is None and sandbox_guard.record_payload:
+                    try:
+                        await record_tool_operation_success(sandbox_guard, raw_result)
+                    except Exception:  # pragma: no cover - cache failures should not fail tools
+                        log.exception(
+                            "dispatch.sandbox_record_success_failed",
+                            tool=tool_call.tool_name,
+                        )
+            else:
+                raw_result = await registered.handler(**reservation.arguments)
             await run_budget_tracker.commit_tool_result(reservation, raw_result)
         except asyncio.CancelledError as exc:
             exception = exc
@@ -629,7 +663,7 @@ def build_tool_handler(
                                 error=str(hook_exc),
                             )
                 if not isinstance(exception, asyncio.CancelledError):
-                    await _emit_web_retrieval_tool_run_diagnostics(
+                    await _emit_webresearch_tool_run_diagnostics(
                         tool_call=tool_call,
                         effective_ctx=effective_ctx,
                         reservation=reservation,

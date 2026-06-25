@@ -93,8 +93,11 @@ def _preexec(limits: SandboxLimits):  # pragma: no cover — runs in child
     return _apply
 
 
-def _filtered_env(whitelist: Sequence[str]) -> dict[str, str]:
-    parent = os.environ
+def _filtered_env(
+    whitelist: Sequence[str],
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    parent = os.environ if env is None else env
     return {key: parent[key] for key in whitelist if key in parent}
 
 
@@ -137,12 +140,7 @@ def run_sandboxed(
             limits=effective,
         )
 
-    child_env = _filtered_env(effective.env_whitelist)
-    if env:
-        allowlist = set(effective.env_whitelist)
-        child_env.update(
-            {key: value for key, value in env.items() if key in allowlist}
-        )
+    child_env = _filtered_env(effective.env_whitelist, env)
 
     try:
         proc = subprocess.Popen(  # noqa: S603 — cmd is caller-controlled
