@@ -9,6 +9,8 @@ __pycache__/
 opensquilla.toml
 .gateway.log
 .gateway-test.html
+# Locally rendered review/explainer/plan pages — never published.
+*.local.html
 *.db
 *.db-shm
 *.db-wal
@@ -45,17 +47,9 @@ GEMINI.md
 /docs/plans/
 /docs/proposals/
 /docs/superpowers/
-!/docs/superpowers/
-!/docs/superpowers/plans/
-!/docs/superpowers/plans/**
-!/docs/superpowers/specs/
-!/docs/superpowers/specs/2026-05-28-tui-frontend-architecture-design.md
-!/docs/superpowers/specs/2026-05-28-tui-real-terminal-harness-design.md
-!/docs/superpowers/specs/2026-05-29-live-textual-tui-design.md
-!/docs/superpowers/specs/2026-05-30-opentui-tui-protocol-refactor-and-visual-hierarchy-design.md
-!/docs/superpowers/specs/2026-05-31-opentui-fullscreen-conversation-design.md
-!/docs/superpowers/specs/2026-05-30-opentui-footer-tui-design.md
-!/docs/superpowers/specs/2026-06-02-opentui-block-protocol-architecture-design.md
+# Local-only tree. To publish one doc, force-add it once:
+#   git add -f docs/superpowers/specs/<filename>.md
+# (A bare "!" re-include can't override an excluded parent directory.)
 *.png
 # Brand assets are intentionally tracked: top-level assets/ for branding,
 # and the WebUI static asset path so the gateway page renders the mark.
