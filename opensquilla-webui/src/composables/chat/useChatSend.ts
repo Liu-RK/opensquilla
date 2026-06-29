@@ -50,6 +50,9 @@ export interface UseChatSendOptions {
   pendingAttachments: Ref<Attachment[]>
   pendingSessionIntent: Ref<string | null>
   aborted: Ref<boolean>
+  // Task id rendered by the live stream; a fresh turn binds it from the
+  // chat.send response so a prior task's late events can't leak in (issue #344).
+  activeStreamTaskId: Ref<string>
   autoScroll: Ref<boolean>
   stream: ChatRpcStreamApi
   normalizeElevatedMode: (mode: string) => string
@@ -165,6 +168,14 @@ export function useChatSend(options: UseChatSendOptions) {
 
     try {
       const res = await options.rpc.call<ChatSendResponse>('chat.send', params)
+      // Bind the live stream to this turn's task so a prior task's late events
+      // can't bleed into it (issue #344). Only a fresh turn takes over rendering
+      // — a steer/queue send rides the in-flight stream and must not rebind —
+      // and only while this session is still the one on screen.
+      const acceptedTaskId = res?.task_id || res?.taskId || ''
+      if (!wasStreaming && acceptedTaskId && options.sessionKey.value === requestSessionKey) {
+        options.activeStreamTaskId.value = acceptedTaskId
+      }
       const decision = decideSendResponseSession({
         requestSessionKey,
         currentSessionKey: options.sessionKey.value,
@@ -261,6 +272,14 @@ export function useChatSend(options: UseChatSendOptions) {
 
     try {
       const res = await options.rpc.call<ChatSendResponse>('chat.send', params)
+      // Bind the live stream to this turn's task so a prior task's late events
+      // can't bleed into it (issue #344). Only a fresh turn takes over rendering
+      // — a steer/queue send rides the in-flight stream and must not rebind —
+      // and only while this session is still the one on screen.
+      const acceptedTaskId = res?.task_id || res?.taskId || ''
+      if (!wasStreaming && acceptedTaskId && options.sessionKey.value === requestSessionKey) {
+        options.activeStreamTaskId.value = acceptedTaskId
+      }
       const decision = decideSendResponseSession({
         requestSessionKey,
         currentSessionKey: options.sessionKey.value,

@@ -158,6 +158,8 @@ export interface SessionEventPayload {
   sessionKey?: string
   epoch?: number
   stream_seq?: number
+  task_id?: string
+  taskId?: string
   reason?: string
   status?: string
   run_status?: string
@@ -246,6 +248,8 @@ export interface ChatSendParams {
 
 export interface ChatSendResponse {
   sessionKey?: string
+  task_id?: string
+  taskId?: string
 }
 
 export interface ChatHistoryMessage {

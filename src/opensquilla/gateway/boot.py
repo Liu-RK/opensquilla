@@ -874,6 +874,7 @@ async def dispatch_task_runtime_turn(
             idle_timeout=stream_idle_timeout,
             heartbeat_interval=heartbeat_interval,
             stream_event_sink=getattr(run, "stream_event_sink", None),
+            task_id=getattr(run, "task_id", None),
         )
     except TaskRuntimeStreamError as exc:
         if exc.code in {
@@ -1049,8 +1050,15 @@ async def _emit_task_runtime_stream_events(
     idle_timeout: float | None = 180.0,
     heartbeat_interval: float | None = None,
     stream_event_sink: Any = None,
+    task_id: str | None = None,
 ) -> None:
-    """Emit turn events and fail the task if the stream reports an error."""
+    """Emit turn events and fail the task if the stream reports an error.
+
+    ``task_id`` is stamped onto every emitted ``session.event.*`` payload so
+    the WebUI can bind the live stream to a single turn. Without it, a stale
+    task's late ``tool_use_start`` / ``error`` / ``done`` events are
+    indistinguishable from the current turn's and leak into it (issue #344).
+    """
     from dataclasses import asdict, is_dataclass
 
     from opensquilla.engine.stream_wrappers import wrap_stream
@@ -1121,6 +1129,8 @@ async def _emit_task_runtime_stream_events(
             event_dict["terminal_message"] = terminal_message
             event_dict["terminal_reason"] = terminal_payload["terminal_reason"]
             event_dict["error_message"] = safe_error_message
+        if task_id:
+            event_dict["task_id"] = task_id
         await event_emitter(
             session_key,
             f"session.event.{event_kind}",

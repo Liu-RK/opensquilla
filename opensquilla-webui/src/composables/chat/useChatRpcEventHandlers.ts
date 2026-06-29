@@ -22,7 +22,9 @@ import {
   acceptStreamSeq as decideStreamSeq,
   activeTaskGroupRunState as buildActiveTaskGroupRunState,
   isCurrentSessionPayload as payloadIsCurrentSession,
+  isCurrentTaskPayload as payloadIsCurrentTask,
   isStaleEpoch as payloadIsStaleEpoch,
+  payloadTaskId,
   sessionChangeIsTerminal as payloadSessionChangeIsTerminal,
   sessionErrorMessage as eventSessionErrorMessage,
   taskGroupId as eventTaskGroupId,
@@ -69,6 +71,10 @@ export interface UseChatRpcEventHandlersOptions {
   currentEpoch: Ref<number>
   lastStreamSeq: Ref<number>
   activeTaskGroups: Ref<Set<string>>
+  // Task id of the turn whose output the live stream is currently rendering.
+  // Empty = unknown (no guard). Set when a fresh turn starts (see useChatSend)
+  // and on task.running; reset on session switch.
+  activeStreamTaskId: Ref<string>
   aborted: Ref<boolean>
   messages: Ref<ChatMessage[]>
   pendingQueue: Ref<ChatPendingItem[]>
@@ -127,6 +133,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     currentEpoch,
     lastStreamSeq,
     activeTaskGroups,
+    activeStreamTaskId,
     aborted,
     messages,
     pendingQueue,
@@ -228,6 +235,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   watch(sessionKey, () => {
     streamThinking.value = null
     turnReasoningLog.length = 0
+    // The newly shown session has its own (possibly running) task; forget the
+    // previous session's active task so we stay lenient until it re-asserts.
+    activeStreamTaskId.value = ''
   })
 
   function isStaleEpoch(payload: SessionEventPayload): boolean {
@@ -236,6 +246,13 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
   function isCurrentSessionPayload(payload: SessionEventPayload): boolean {
     return payloadIsCurrentSession(payload, sessionKey.value)
+  }
+
+  // Drop late events tagged with a different task than the one rendering now,
+  // so a stale turn's tool_use/error/done can't leak into the current turn
+  // (issue #344). Lenient: untagged events and unknown active task pass.
+  function isCurrentTaskPayload(payload: SessionEventPayload): boolean {
+    return payloadIsCurrentTask(payload, activeStreamTaskId.value)
   }
 
   function acceptStreamSeq(payload: SessionEventPayload): boolean {
@@ -289,6 +306,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
   function handleRpcTextDelta(payload: TextDeltaPayload) {
     if (isStaleEpoch(payload)) return
+    if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     stream.appendDelta(payload.text || '')
@@ -297,6 +315,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   function handleRpcToolUseStart(payload: ToolUsePayload) {
     if (isStaleEpoch(payload)) return
     if (aborted.value) return
+    if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     stream.appendToolCall(payload)
@@ -305,6 +324,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   function handleRpcToolUseDelta(payload: ToolDeltaPayload) {
     if (isStaleEpoch(payload)) return
     if (aborted.value) return
+    if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     stream.appendToolDelta(payload)
@@ -313,6 +333,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   function handleRpcToolResult(payload: ToolResultPayload) {
     if (isStaleEpoch(payload)) return
     if (aborted.value) return
+    if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     stream.appendToolResult(payload)
@@ -321,6 +342,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   function handleRpcArtifact(payload: ArtifactPayload) {
     if (isStaleEpoch(payload)) return
     if (aborted.value) return
+    if (!isCurrentTaskPayload(payload)) return
     if (!acceptStreamSeq(payload)) return
     stream.resetStreamIdleTimer()
     stream.appendArtifact(payload)
@@ -400,6 +422,10 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
   function handleRpcTaskRunning(payload: SessionEventPayload) {
     if (!isCurrentSessionPayload(payload)) return
+    // task.running is the authoritative "this task now owns the live stream"
+    // signal; bind subsequent stream events to it.
+    const taskId = payloadTaskId(payload)
+    if (taskId) activeStreamTaskId.value = taskId
     options.applySessionRunState({ run_status: 'running', active_task: { ...(payload || {}), status: 'running' } })
   }
 
@@ -455,6 +481,10 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
       })
       return
     }
+    // A stale task's terminal/done/error must not end the current turn's stream
+    // or push its "Turn failed" into the live transcript (issue #344). Approvals
+    // above stay ungated; everything below mutates the current turn.
+    if (!isCurrentTaskPayload(payloadObj)) return
     const terminalStatus = eventTaskTerminalStatus(rawEvent)
     if (terminalStatus) {
       if (!isCurrentSessionPayload(payloadObj)) return

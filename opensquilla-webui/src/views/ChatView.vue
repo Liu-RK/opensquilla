@@ -658,6 +658,9 @@ const runStatus = ref<ChatRunStatus>({ status: 'idle', label: t('chat.status.idl
 const currentEpoch = ref(0)
 const lastStreamSeq = ref(0)
 const activeTaskGroups = ref<Set<string>>(new Set())
+// Task id whose output the live stream renders; binds late events to the
+// current turn so a prior task can't leak into it (issue 344).
+const activeStreamTaskId = ref<string>('')
 
 // Pending session intent
 const pendingSessionIntent = ref<string | null>(null)
@@ -1149,6 +1152,7 @@ const chatSend = useChatSend({
   pendingAttachments,
   pendingSessionIntent,
   aborted,
+  activeStreamTaskId,
   autoScroll,
   stream: chatStream,
   normalizeElevatedMode,
@@ -1212,6 +1216,7 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   currentEpoch,
   lastStreamSeq,
   activeTaskGroups,
+  activeStreamTaskId,
   aborted,
   messages,
   pendingQueue,

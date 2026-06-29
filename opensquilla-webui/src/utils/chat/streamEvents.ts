@@ -16,6 +16,26 @@ export function isCurrentSessionPayload(payload: SessionEventPayload | null | un
   return !key || !sessionKey || key === sessionKey
 }
 
+export function payloadTaskId(payload: SessionEventPayload | null | undefined): string {
+  const id = payload?.task_id ?? payload?.taskId
+  return typeof id === 'string' ? id : ''
+}
+
+// Identity guard for the live stream: an event belongs to the current turn
+// unless it is tagged with a *different* task than the one rendering now.
+// Lenient on both sides — a missing activeTaskId (legacy/unknown) or a payload
+// with no task_id (non-TaskRuntime events: approvals, task groups, router…)
+// always passes, so only positively-mismatched TaskRuntime events are dropped.
+export function isCurrentTaskPayload(
+  payload: SessionEventPayload | null | undefined,
+  activeTaskId: string,
+): boolean {
+  if (!activeTaskId) return true
+  const taskId = payloadTaskId(payload)
+  if (!taskId) return true
+  return taskId === activeTaskId
+}
+
 export function isStaleEpoch(payload: SessionEventPayload | null | undefined, currentEpoch: number): boolean {
   const ep = payload?.epoch
   if (typeof ep !== 'number' || !Number.isFinite(ep)) return false
