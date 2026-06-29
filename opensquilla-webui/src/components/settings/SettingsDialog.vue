@@ -398,7 +398,13 @@ function closeOverlay() {
   const target = usableInvoker() ?? sidebarSettingsButton()
   target?.focus()
   invokerEl = null
-  void router.push(returnTo ?? '/')
+  // Never route close through bare '/': its redirect re-runs the saved-route
+  // logic and could bounce back into Settings. Push the platform default view
+  // directly (same breakpoint as the '/' redirect in sharedRoutes) so close is a
+  // single, predictable, loop-proof exit. `returnTo` is already null for a cold
+  // deep link (onMounted rejects any '/settings…' back-entry).
+  const fallback = window.matchMedia('(max-width: 768px)').matches ? '/chat' : '/sessions'
+  void router.push(returnTo ?? fallback)
 }
 
 // Closes unless a section carries unsaved edits and the user keeps them.

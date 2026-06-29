@@ -7,9 +7,12 @@
 export const LAST_ROUTE_KEY = 'opensquilla-last-route'
 
 // Top-level views that are safe to reopen on launch. Deliberately excludes '/'
-// (would redirect-loop) and '/chat/new' (a fresh draft — restoring it every
-// launch would spawn empty drafts). Chat restores to the chat surface, not a
-// specific session, since the query is dropped.
+// (would redirect-loop), '/chat/new' (a fresh draft — restoring it every launch
+// would spawn empty drafts), and the '/settings' overlay (a modal rendered over
+// the default view, not a standalone page — restoring it reopens the dialog on
+// cold boot with nothing behind it and traps close in a '/' → '/settings'
+// redirect loop). Chat restores to the chat surface, not a specific session,
+// since the query is dropped.
 const RESTORABLE = new Set<string>([
   '/chat',
   '/sessions',
@@ -25,10 +28,7 @@ const RESTORABLE = new Set<string>([
 
 export function isRestorableRoute(path: string): boolean {
   if (!path || typeof path !== 'string') return false
-  if (RESTORABLE.has(path)) return true
-  // Settings overlay and its sections, e.g. /settings, /settings/router
-  if (path === '/settings' || path.startsWith('/settings/')) return true
-  return false
+  return RESTORABLE.has(path)
 }
 
 /**

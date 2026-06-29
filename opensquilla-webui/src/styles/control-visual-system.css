@@ -52,7 +52,12 @@
 }
 
 @media (min-width: 769px) {
-  .main:not(.docked) .control-stage__header {
+  /* The absolute .topbar — and its right cluster (connection pill + language
+     switcher + theme) — floats over the top of .content in BOTH dock states, so
+     the header must clear it regardless of `.docked`. Gating on :not(.docked)
+     left the DEFAULT docked layout with its action buttons under the topbar
+     cluster (the sidebar defaults to docked). */
+  .control-stage__header {
     padding-top: calc(36px + var(--sp-2));
   }
 }

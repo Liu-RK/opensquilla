@@ -5,18 +5,20 @@ import { isRestorableRoute, saveLastRoute, readLastRoute, LAST_ROUTE_KEY } from 
 beforeEach(() => localStorage.clear())
 
 describe('isRestorableRoute', () => {
-  it('accepts the known top-level views and settings sections', () => {
+  it('accepts the known top-level views', () => {
     for (const p of [
       '/chat', '/sessions', '/approvals', '/agents', '/channels',
       '/cron', '/skills', '/overview', '/usage', '/logs',
-      '/settings', '/settings/router', '/settings/auto',
     ]) {
       expect(isRestorableRoute(p)).toBe(true)
     }
   })
 
-  it('rejects root, the chat draft, and unknown/removed paths', () => {
-    for (const p of ['/', '/chat/new', '/health', '/nope', '/settingsx', '']) {
+  it('rejects root, the chat draft, the settings overlay, and unknown/removed paths', () => {
+    for (const p of [
+      '/', '/chat/new', '/settings', '/settings/router', '/settings/auto',
+      '/health', '/nope', '/settingsx', '',
+    ]) {
       expect(isRestorableRoute(p)).toBe(false)
     }
   })
@@ -26,8 +28,17 @@ describe('saveLastRoute / readLastRoute', () => {
   it('round-trips a restorable view', () => {
     saveLastRoute('/cron')
     expect(readLastRoute()).toBe('/cron')
-    saveLastRoute('/settings/router')
-    expect(readLastRoute()).toBe('/settings/router')
+    saveLastRoute('/overview')
+    expect(readLastRoute()).toBe('/overview')
+  })
+
+  it('never persists the settings overlay, and re-validates an already-saved one to null', () => {
+    saveLastRoute('/settings/runtime')
+    expect(localStorage.getItem(LAST_ROUTE_KEY)).toBeNull()
+    // A value written by an older build (pre-fix) is dropped on read, so a user
+    // already trapped on /settings after relaunch self-heals to the default.
+    localStorage.setItem(LAST_ROUTE_KEY, '/settings/runtime')
+    expect(readLastRoute()).toBeNull()
   })
 
   it('never persists a non-restorable path (draft / root)', () => {
