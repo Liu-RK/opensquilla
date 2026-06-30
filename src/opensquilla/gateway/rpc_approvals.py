@@ -25,8 +25,32 @@ from opensquilla.sandbox.escalation import (
 
 _d = get_dispatcher()
 
+_NON_OWNER_SANDBOX_APPROVAL_CHOICES = frozenset(
+    {
+        "allow_once",
+        "allow_chat",
+        "allow_public_chat",
+        "allow_bundle_chat",
+        "mount_ro_chat",
+        "mount_rw_chat",
+    }
+)
 
-def _require_owner_for_sandbox_approval_resolution(ctx: RpcContext) -> None:
+
+def _sandbox_choice_requires_owner(choice: str | None) -> bool:
+    normalized_choice = str(choice or "").strip()
+    if not normalized_choice:
+        return True
+    return normalized_choice not in _NON_OWNER_SANDBOX_APPROVAL_CHOICES
+
+
+def _require_owner_for_sandbox_approval_resolution(
+    ctx: RpcContext,
+    *,
+    choice: str | None,
+) -> None:
+    if not _sandbox_choice_requires_owner(choice):
+        return
     if not getattr(ctx.principal, "is_owner", False):
         raise RpcHandlerError(
             "UNAUTHORIZED",
@@ -177,7 +201,7 @@ async def _handle_exec_approval_resolve(params: dict | None, ctx: RpcContext) ->
     normalized_choice = str(choice).strip() if isinstance(choice, str) and choice.strip() else None
     sandbox_approval = is_sandbox_approval_kind(pending.params.get("approvalKind"))
     if sandbox_approval and approved:
-        _require_owner_for_sandbox_approval_resolution(ctx)
+        _require_owner_for_sandbox_approval_resolution(ctx, choice=normalized_choice)
 
     validate_sandbox_approval_choice(
         pending.params,

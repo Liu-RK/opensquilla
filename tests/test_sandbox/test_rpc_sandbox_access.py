@@ -237,9 +237,8 @@ async def test_rpc_run_context_get_includes_bundles_and_temporary_grants() -> No
 
 
 @pytest.mark.asyncio
-async def test_exec_approval_resolve_rejects_non_owner_sandbox_grant_approval() -> None:
+async def test_exec_approval_resolve_allows_non_owner_chat_scoped_sandbox_grant() -> None:
     from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
-    from opensquilla.gateway.rpc import RpcHandlerError
     from opensquilla.gateway.rpc_approvals import _handle_exec_approval_resolve
     from opensquilla.sandbox.escalation import build_network_approval_params
     from opensquilla.sandbox.network_guard import NetworkDecision
@@ -262,9 +261,55 @@ async def test_exec_approval_resolve_rejects_non_owner_sandbox_grant_approval() 
     queue = get_approval_queue()
     approval_id = queue.request(namespace="exec", params=params)
 
+    result = await _handle_exec_approval_resolve(
+        {"id": approval_id, "approved": True, "choice": "allow_chat"},
+        _ctx(
+            manager,
+            is_owner=False,
+            scopes=frozenset(["operator.approvals"]),
+        ),
+    )
+
+    assert result["resolved"] is True
+    assert result["approved"] is True
+    context = await get_run_context(
+        manager,
+        manager.node.session_key,
+        config=_ctx(manager).config,
+        workspace="/tmp/ws",
+    )
+    assert ("example.com", "chat") in [(grant.domain, grant.scope) for grant in context.domains]
+
+    reset_approval_queue()
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_resolve_rejects_non_owner_workspace_sandbox_grant() -> None:
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from opensquilla.gateway.rpc import RpcHandlerError
+    from opensquilla.gateway.rpc_approvals import _handle_exec_approval_resolve
+
+    reset_approval_queue()
+    manager = _SessionManager()
+    queue = get_approval_queue()
+    approval_id = queue.request(
+        namespace="exec",
+        params={
+            "approvalKind": "sandbox_network",
+            "host": "example.com",
+            "fingerprint": "fp123",
+            "sessionKey": manager.node.session_key,
+            "workspace": "/tmp/ws",
+            "choices": [
+                {"id": "allow_user", "label": "Allow always", "approved": True},
+                {"id": "deny", "label": "Deny", "approved": False},
+            ],
+        },
+    )
+
     with pytest.raises(RpcHandlerError, match="requires owner principal"):
         await _handle_exec_approval_resolve(
-            {"id": approval_id, "approved": True, "choice": "allow_chat"},
+            {"id": approval_id, "approved": True, "choice": "allow_user"},
             _ctx(
                 manager,
                 is_owner=False,
@@ -274,13 +319,99 @@ async def test_exec_approval_resolve_rejects_non_owner_sandbox_grant_approval() 
 
     pending = queue.get(approval_id)
     assert pending.resolved is False
+
+    reset_approval_queue()
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_resolve_rejects_non_owner_missing_sandbox_choice() -> None:
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from opensquilla.gateway.rpc import RpcHandlerError
+    from opensquilla.gateway.rpc_approvals import _handle_exec_approval_resolve
+    from opensquilla.sandbox.escalation import build_network_approval_params
+    from opensquilla.sandbox.network_guard import NetworkDecision
+
+    reset_approval_queue()
+    manager = _SessionManager()
+    params = build_network_approval_params(
+        NetworkDecision(
+            status="ask",
+            normalized_host="example.com",
+            reason="unknown_domain",
+            source=None,
+        ),
+        session_key=manager.node.session_key,
+        workspace="/tmp/ws",
+        fingerprint="fp123",
+    )
+    assert params is not None
+    queue = get_approval_queue()
+    approval_id = queue.request(namespace="exec", params=params)
+
+    with pytest.raises(RpcHandlerError, match="requires owner principal"):
+        await _handle_exec_approval_resolve(
+            {"id": approval_id, "approved": True},
+            _ctx(
+                manager,
+                is_owner=False,
+                scopes=frozenset(["operator.approvals"]),
+            ),
+        )
+
+    pending = queue.get(approval_id)
+    assert pending.resolved is False
+
+    reset_approval_queue()
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_resolve_allows_non_owner_chat_scoped_path_mount(tmp_path) -> None:
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from opensquilla.gateway.rpc_approvals import _handle_exec_approval_resolve
+    from opensquilla.sandbox.escalation import build_path_approval_params
+    from opensquilla.sandbox.path_validation import MountDecision
+    from opensquilla.sandbox.run_context import get_run_context
+
+    reset_approval_queue()
+    manager = _SessionManager()
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    params = build_path_approval_params(
+        MountDecision(
+            status="request",
+            normalized_path=str(outside.resolve(strict=False)),
+            access="ro",
+            reason="outside_sandbox_mounts",
+        ),
+        session_key=manager.node.session_key,
+        workspace=str(workspace),
+    )
+    assert params is not None
+    queue = get_approval_queue()
+    approval_id = queue.request(namespace="exec", params=params)
+
+    result = await _handle_exec_approval_resolve(
+        {"id": approval_id, "approved": True, "choice": "mount_ro_chat"},
+        _ctx(
+            manager,
+            is_owner=False,
+            scopes=frozenset(["operator.approvals"]),
+        ),
+    )
+
+    assert result["resolved"] is True
+    assert result["approved"] is True
     context = await get_run_context(
         manager,
         manager.node.session_key,
         config=_ctx(manager).config,
-        workspace="/tmp/ws",
+        workspace=str(workspace),
     )
-    assert context.domains == ()
+    assert (str(outside.resolve(strict=False)), "ro", "chat") in [
+        (grant.path, grant.access, grant.scope) for grant in context.mounts
+    ]
 
     reset_approval_queue()
 
