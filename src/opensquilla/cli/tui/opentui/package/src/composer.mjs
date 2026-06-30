@@ -284,6 +284,12 @@ export function createComposer(deps) {
   let inputText = "";
   // Caret position as a grapheme index into Array.from(inputText), range [0, len].
   let cursorPos = 0;
+  // Goal column for vertical (Up/Down) motion, measured in DISPLAY CELLS so the
+  // caret tracks the same visual column across lines that mix narrow and wide
+  // (CJK) glyphs. Preserved across consecutive vertical moves — passing through a
+  // short line keeps the original column — and reset to null by any other caret
+  // motion (see the keypress handler). null means "recompute from the caret".
+  let desiredVisualCol = null;
   // Pulse FRAME COUNTER is owned by main.mjs; tickPulse(frame) updates this copy
   // so the status pill glyph advances.
   let pulseFrame = 0;
@@ -718,6 +724,7 @@ export function createComposer(deps) {
     inputText = text;
     composer.text = text;
     cursorPos = Array.from(text).length;
+    desiredVisualCol = null; // history recall / programmatic set ends a vertical run
   }
 
   // Up/Down arrows walk the input history. The slot past the end (index ===
@@ -734,24 +741,6 @@ export function createComposer(deps) {
     updateMenuFromInput();
     wakeCursor();
     rerenderInputRegion();
-  }
-
-  // Caret line/column from cursorPos. Lines split on "\n"; column is the grapheme
-  // offset within the line the caret sits on.
-  function caretLineCol() {
-    const chars = Array.from(inputText);
-    const pos = Math.max(0, Math.min(cursorPos, chars.length));
-    let line = 0;
-    let col = 0;
-    for (let i = 0; i < pos; i += 1) {
-      if (chars[i] === "\n") {
-        line += 1;
-        col = 0;
-      } else {
-        col += 1;
-      }
-    }
-    return { line, col, chars, pos };
   }
 
   function caretVisualLineCol() {
@@ -788,31 +777,49 @@ export function createComposer(deps) {
     setCursorPosition.call(renderer, x, y, false);
   }
 
-  // Convert a (line, col) back to a grapheme index into the char array.
-  function lineColToPos(chars, targetLine, targetCol) {
+  // Grapheme index of the caret on `targetLine` whose DISPLAY-CELL column is
+  // closest to `targetVisualCol`. Snaps to a grapheme boundary: when the goal
+  // falls mid-glyph (e.g. inside a width-2 CJK char), land on whichever side is
+  // nearer, and never past the line's end.
+  function lineVisualColToPos(chars, targetLine, targetVisualCol) {
     let line = 0;
-    let col = 0;
-    for (let i = 0; i < chars.length; i += 1) {
-      if (line === targetLine && col === targetCol) return i;
-      if (chars[i] === "\n") {
-        if (line === targetLine) return i; // target col past end of this line
+    let col = 0; // display cells consumed on the current line so far
+    let lineStart = 0;
+    for (let i = 0; i <= chars.length; i += 1) {
+      const atEnd = i === chars.length || chars[i] === "\n";
+      if (line === targetLine && (atEnd || col >= targetVisualCol)) {
+        // Boundary before chars[i] sits at column `col`. If we stepped over the
+        // goal mid-glyph, the previous boundary may be the nearer one.
+        if (!atEnd && i > lineStart && col > targetVisualCol) {
+          const prevCol = col - cellWidth(chars[i - 1]);
+          if (targetVisualCol - prevCol < col - targetVisualCol) return i - 1;
+        }
+        return i;
+      }
+      if (atEnd) {
+        if (line === targetLine) return i; // goal past the end of this line
         line += 1;
         col = 0;
+        lineStart = i + 1;
       } else {
-        col += 1;
+        col += cellWidth(chars[i]);
       }
     }
     return chars.length;
   }
 
   // Move caret up/down a line. Returns true if it moved within the text; false if
-  // already at the very first/last line (caller may then switch history).
+  // already at the very first/last line (caller may then switch history). Tracks a
+  // desired VISUAL column (display cells) so the caret keeps its on-screen column
+  // across lines with wide (CJK) glyphs, and preserves it across consecutive moves.
   function moveCaretVertical(direction) {
-    const { line, col, chars } = caretLineCol();
+    const { line, col } = caretVisualLineCol();
+    const chars = Array.from(inputText);
     const lineCount = inputText.split("\n").length;
     const target = line + direction;
     if (target < 0 || target >= lineCount) return false;
-    cursorPos = lineColToPos(chars, target, col);
+    if (desiredVisualCol === null) desiredVisualCol = col;
+    cursorPos = lineVisualColToPos(chars, target, desiredVisualCol);
     return true;
   }
 
@@ -822,6 +829,7 @@ export function createComposer(deps) {
   }
 
   function insertAtCursor(insertText) {
+    desiredVisualCol = null; // editing (incl. paste) ends a vertical-motion run
     const chars = Array.from(inputText);
     const pos = Math.max(0, Math.min(cursorPos, chars.length));
     const insertChars = Array.from(insertText);
@@ -886,6 +894,9 @@ export function createComposer(deps) {
 
   function installKeyboardHandlers() {
     renderer.keyInput.on("keypress", (key) => {
+      // Any key other than Up/Down ends a vertical-motion run, so the next Up/Down
+      // recomputes the goal column from the caret's current visual position.
+      if (key.name !== "up" && key.name !== "down") desiredVisualCol = null;
       // The theme picker is modal: it consumes every key while open.
       if (themePicker?.active) {
         handleThemePickerKey(key.name);

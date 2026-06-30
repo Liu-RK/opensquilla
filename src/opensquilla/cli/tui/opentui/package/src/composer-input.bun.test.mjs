@@ -163,3 +163,58 @@ test("Alt+D and Ctrl+Delete delete the next word", async () => {
   expect(await submittedAfter([...typed("foo bar"), ctrl("a"), alt("d")])).toBe(" bar");
   expect(await submittedAfter([...typed("foo bar"), ctrl("a"), { name: "delete", ctrl: true }])).toBe(" bar");
 });
+
+// Vertical (Up/Down) caret movement tracks the DISPLAY-CELL column, so the caret
+// keeps its visual column across lines that mix narrow and wide (CJK) glyphs, and
+// preserves a goal column through short intervening lines (finding #5). nl inserts
+// a newline without submitting (Alt/Option+Return).
+const nl = { name: "return", meta: true };
+
+test("Up keeps the visual column on an all-ASCII draft (regression)", async () => {
+  // "abcdef" / "ghijkl": from after "ghij" (col 4) Up lands after "abcd".
+  expect(
+    await submittedAfter([
+      ...typed("abcdef"), nl, ...typed("ghijkl"),
+      { name: "left" }, { name: "left" }, { name: "up" }, ...typed("X"),
+    ]),
+  ).toBe("abcdXef\nghijkl");
+});
+
+test("Up into a wide (CJK) line lands at the visual column, not the char index", async () => {
+  // "你好world" / "abcdefgh": from visual col 5 on the ASCII line, Up must land
+  // after "你好w" (你=2 + 好=2 + w=1 = col 5) -> "你好wXorld", NOT the char-index-5
+  // result "你好worXld".
+  expect(
+    await submittedAfter([
+      ...typed("你好world"), nl, ...typed("abcdefgh"),
+      { name: "left" }, { name: "left" }, { name: "left" }, // col 8 -> col 5
+      { name: "up" }, ...typed("X"),
+    ]),
+  ).toBe("你好wXorld\nabcdefgh");
+});
+
+test("Down into a wide (CJK) line keeps the visual column", async () => {
+  // "abcdefgh" / "你好world": from col 5 on the ASCII line, Down lands after "你好w".
+  expect(
+    await submittedAfter([
+      ...typed("abcdefgh"), nl, ...typed("你好world"),
+      { name: "up" }, // -> line 0 (goal 9 clamps to end, col 8)
+      { name: "left" }, { name: "left" }, { name: "left" }, // -> col 5, resets goal
+      { name: "down" }, ...typed("X"),
+    ]),
+  ).toBe("abcdefgh\n你好wXorld");
+});
+
+test("the goal column is preserved across a short intervening line", async () => {
+  // "abcdefgh" / "你好" / "ABCDEFGH": from col 7 on line 0, Down through the short
+  // wide line "你好" (width 4) returns to col 7 on line 2 -> "ABCDEFGXH".
+  expect(
+    await submittedAfter([
+      ...typed("abcdefgh"), nl, ...typed("你好"), nl, ...typed("ABCDEFGH"),
+      { name: "up" }, { name: "up" }, // -> line 0 end (col 8), goal seeded 8
+      { name: "left" }, // -> col 7, resets goal
+      { name: "down" }, { name: "down" }, // through "你好" (clamps) back to col 7 on line 2
+      ...typed("X"),
+    ]),
+  ).toBe("abcdefgh\n你好\nABCDEFGXH");
+});
