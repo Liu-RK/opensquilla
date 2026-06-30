@@ -27,43 +27,58 @@ _LOCAL_CONTEXT_WINDOW = _OLLAMA_DEFAULT_NUM_CTX
 _LOCAL_PROVIDERS = frozenset({"ollama", "lm_studio", "ovms", "vllm", "local"})
 
 # Static fallback for squilla-router tier models + default model.
-# Used when OpenRouter API is unreachable at boot.
+# Used when the OpenRouter API is unreachable at boot.
 # Format: model_id → (max_output_tokens, context_window)
+#
+# Keys are provider-agnostic basenames (no "vendor/" prefix); a model that
+# was previously listed under both spellings is merged to ONE conservative
+# (per-dimension min) tuple. Conservative because over-estimating the
+# context window causes silent server-side truncation, while
+# under-estimating only triggers compaction earlier. Lookups normalize the
+# requested id via ``_static_fallback_entry`` so either spelling resolves
+# to the same entry. When offline, the live catalog still overrides this.
 _STATIC_FALLBACK: dict[str, tuple[int, int]] = {
-    "anthropic/claude-opus-4.8": (128_000, 1_000_000),
-    "anthropic/claude-sonnet-4.6": (128_000, 1_000_000),
-    "google/gemini-3.5-flash": (65_536, 1_048_576),
-    "moonshotai/kimi-k2.6": (262_144, 262_144),
-    "openai/gpt-5.4-mini": (128_000, 400_000),
-    "openai/gpt-5.5": (128_000, 1_050_000),
-    "qwen/qwen3-coder-plus": (65_536, 1_000_000),
-    "x-ai/grok-4.3": (DEFAULT_MAX_TOKENS, 1_000_000),
-    "z-ai/glm-4.6": (131_072, 202_752),
+    "claude-opus-4.8": (128_000, 1_000_000),
+    "claude-sonnet-4.6": (128_000, 1_000_000),
+    "gemini-3.5-flash": (65_536, 1_048_576),
     "gpt-5.4-nano": (128_000, 400_000),
     "gpt-5.4-mini": (128_000, 400_000),
     "gpt-5.5": (128_000, 1_000_000),
-    "minimax/minimax-m2.7": (8192, 196_608),
-    "stepfun/step-3.5-flash": (16_384, 256_000),
-    "z-ai/glm-4.5-air": (98_304, 131_072),
-    "minimax/minimax-m2.5": (65_536, 196_608),
-    "deepseek/deepseek-v4-flash": (16_384, 1_048_576),
-    "deepseek/deepseek-v4-pro": (16_384, 1_048_576),
-    "deepseek-v4-flash": (393_216, 1_048_576),
-    "deepseek-v4-pro": (393_216, 1_048_576),
-    "deepseek/deepseek-v3.2": (16_384, 163_840),
+    "qwen3-coder-plus": (65_536, 1_000_000),
+    "grok-4.3": (DEFAULT_MAX_TOKENS, 1_000_000),
+    "glm-4.5-air": (98_304, 131_072),
+    "glm-4.6": (131_072, 202_752),
     "glm-4.7-flashx": (128_000, 200_000),
-    "glm-5": (128_000, 200_000),
+    "glm-5": (80_000, 80_000),
     "glm-5.1": (128_000, 200_000),
-    "z-ai/glm-5": (80_000, 80_000),
-    "z-ai/glm-5.1": (202_752, 202_752),
-    "z-ai/glm-5.2": (262_144, 1_048_576),
+    "glm-5.2": (262_144, 1_048_576),
+    "minimax-m2.5": (65_536, 196_608),
+    "minimax-m2.7": (8192, 196_608),
+    "step-3.5-flash": (16_384, 256_000),
+    "deepseek-v4-flash": (16_384, 1_048_576),
+    "deepseek-v4-pro": (16_384, 1_048_576),
+    "deepseek-v3.2": (16_384, 163_840),
     "moonshot-v1-8k": (8192, 8192),
     "moonshot-v1-32k": (32_768, 32_768),
     "moonshot-v1-128k": (131_072, 131_072),
     "kimi-k2.5": (32_768, 262_144),
     "kimi-k2.6": (32_768, 262_144),
-    "moonshotai/kimi-k2.5": (65_535, 262_144),
 }
+
+
+def _static_fallback_entry(model_id: str) -> tuple[int, int] | None:
+    """Return the static ``(max_output, context_window)`` for a model.
+
+    Tries the id verbatim, then the basename after the final ``/`` so the
+    same physical model resolves identically whether referenced as a bare
+    id (``glm-5``) or a provider-qualified id (``z-ai/glm-5``).
+    """
+    entry = _STATIC_FALLBACK.get(model_id)
+    if entry is not None:
+        return entry
+    if "/" in model_id:
+        return _STATIC_FALLBACK.get(model_id.rsplit("/", 1)[-1])
+    return None
 
 
 class ModelCatalog:
@@ -264,8 +279,8 @@ class ModelCatalog:
             effective = user_override
         elif info and info.max_output_tokens > 0:
             effective = info.max_output_tokens
-        elif model_id in _STATIC_FALLBACK:
-            effective = _STATIC_FALLBACK[model_id][0]
+        elif (static := _static_fallback_entry(model_id)) is not None:
+            effective = static[0]
         else:
             effective = DEFAULT_MAX_TOKENS
 
@@ -289,8 +304,9 @@ class ModelCatalog:
         info = self._models.get(model_id)
         if info and info.context_window > 0:
             return info.context_window
-        if model_id in _STATIC_FALLBACK:
-            return _STATIC_FALLBACK[model_id][1]
+        static = _static_fallback_entry(model_id)
+        if static is not None:
+            return static[1]
         if provider and provider.strip().lower() in _LOCAL_PROVIDERS:
             return _LOCAL_CONTEXT_WINDOW
         return DEFAULT_CONTEXT_WINDOW
