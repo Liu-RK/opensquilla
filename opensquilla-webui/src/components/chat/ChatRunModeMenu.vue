@@ -77,6 +77,7 @@ const runModeOptions: Array<{ value: RunMode; label: string; caption: string }> 
   { value: 'trusted', label: 'Trusted-Sandbox', caption: 'Managed sandbox' },
   { value: 'full', label: 'Full Host Access', caption: 'Direct host access' },
 ]
+const safeRunModes: RunMode[] = ['standard', 'trusted']
 
 const props = defineProps<{
   runMode: RunMode
@@ -100,7 +101,7 @@ const allowedRunModes = computed<RunMode[]>(() => {
   const allowed = props.allowedRunModes.filter((mode, index, modes) => {
     return runModeOptions.some(option => option.value === mode) && modes.indexOf(mode) === index
   })
-  return allowed.length ? allowed : runModeOptions.map(option => option.value)
+  return allowed.length ? allowed : [...safeRunModes]
 })
 
 const defaultAllowedRunMode = computed<RunMode>(() => {

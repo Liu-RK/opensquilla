@@ -44,6 +44,14 @@ def _sandbox_choice_requires_owner(choice: str | None) -> bool:
     return normalized_choice not in _NON_OWNER_SANDBOX_APPROVAL_CHOICES
 
 
+def _require_owner_for_approval_resolution(ctx: RpcContext) -> None:
+    if not getattr(ctx.principal, "is_owner", False):
+        raise RpcHandlerError(
+            "UNAUTHORIZED",
+            "exec.approval.resolve requires owner principal.",
+        )
+
+
 def _require_owner_for_sandbox_approval_resolution(
     ctx: RpcContext,
     *,
@@ -51,11 +59,7 @@ def _require_owner_for_sandbox_approval_resolution(
 ) -> None:
     if not _sandbox_choice_requires_owner(choice):
         return
-    if not getattr(ctx.principal, "is_owner", False):
-        raise RpcHandlerError(
-            "UNAUTHORIZED",
-            "exec.approval.resolve requires owner principal.",
-        )
+    _require_owner_for_approval_resolution(ctx)
 
 
 def _complete_sandbox_resolution_claim(
@@ -202,6 +206,8 @@ async def _handle_exec_approval_resolve(params: dict | None, ctx: RpcContext) ->
     sandbox_approval = is_sandbox_approval_kind(pending.params.get("approvalKind"))
     if sandbox_approval and approved:
         _require_owner_for_sandbox_approval_resolution(ctx, choice=normalized_choice)
+        if allow_always or remember_intent:
+            _require_owner_for_approval_resolution(ctx)
 
     validate_sandbox_approval_choice(
         pending.params,

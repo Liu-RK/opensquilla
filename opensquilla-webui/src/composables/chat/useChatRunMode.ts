@@ -21,6 +21,7 @@ export interface UseChatRunModeOptions {
 }
 
 const RUN_MODES: RunMode[] = ['standard', 'trusted', 'full']
+const SAFE_RUN_MODES: RunMode[] = ['standard', 'trusted']
 
 export function normalizeRunMode(mode: unknown, fallback: RunMode = 'trusted'): RunMode {
   const value = String(mode || '').trim().toLowerCase().replace(/_/g, '-')
@@ -36,11 +37,11 @@ export function useChatRunMode(options: UseChatRunModeOptions) {
   })
   const allowedRunModes = computed<RunMode[]>(() => {
     const policyAllowed = runModePolicy.value?.allowedRunModes
-    if (!policyAllowed) return [...RUN_MODES]
+    if (!policyAllowed) return [...SAFE_RUN_MODES]
     const allowed = policyAllowed
       .map(mode => normalizeRunMode(mode))
       .filter((mode, index, modes) => RUN_MODES.includes(mode) && modes.indexOf(mode) === index)
-    return allowed.length ? allowed : [...RUN_MODES]
+    return allowed.length ? allowed : [...SAFE_RUN_MODES]
   })
   const defaultRunMode = computed<RunMode>(() => {
     const allowed = allowedRunModes.value

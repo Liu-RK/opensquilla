@@ -284,6 +284,70 @@ async def test_exec_approval_resolve_allows_non_owner_chat_scoped_sandbox_grant(
 
 
 @pytest.mark.asyncio
+async def test_exec_approval_resolve_rejects_non_owner_persistent_sandbox_grant() -> None:
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from opensquilla.gateway.rpc import RpcHandlerError
+    from opensquilla.gateway.rpc_approvals import _handle_exec_approval_resolve
+    from opensquilla.sandbox.escalation import build_network_approval_params
+    from opensquilla.sandbox.network_guard import NetworkDecision
+
+    reset_approval_queue()
+    manager = _SessionManager()
+    params = build_network_approval_params(
+        NetworkDecision(
+            status="ask",
+            normalized_host="example.com",
+            reason="unknown_domain",
+            source=None,
+        ),
+        session_key=manager.node.session_key,
+        workspace="/tmp/ws",
+        fingerprint="fp123",
+    )
+    assert params is not None
+    queue = get_approval_queue()
+    approval_id = queue.request(namespace="exec", params=params)
+
+    with pytest.raises(RpcHandlerError, match="requires owner principal"):
+        await _handle_exec_approval_resolve(
+            {
+                "id": approval_id,
+                "approved": True,
+                "choice": "allow_chat",
+                "allowAlways": True,
+            },
+            _ctx(
+                manager,
+                is_owner=False,
+                scopes=frozenset(["operator.approvals"]),
+            ),
+        )
+
+    pending = queue.get(approval_id)
+    assert pending.resolved is False
+
+    with pytest.raises(RpcHandlerError, match="requires owner principal"):
+        await _handle_exec_approval_resolve(
+            {
+                "id": approval_id,
+                "approved": True,
+                "choice": "allow_chat",
+                "rememberIntent": True,
+            },
+            _ctx(
+                manager,
+                is_owner=False,
+                scopes=frozenset(["operator.approvals"]),
+            ),
+        )
+
+    pending = queue.get(approval_id)
+    assert pending.resolved is False
+
+    reset_approval_queue()
+
+
+@pytest.mark.asyncio
 async def test_exec_approval_resolve_rejects_non_owner_workspace_sandbox_grant() -> None:
     from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
     from opensquilla.gateway.rpc import RpcHandlerError

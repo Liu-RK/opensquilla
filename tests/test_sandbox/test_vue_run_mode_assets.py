@@ -57,3 +57,14 @@ def test_vue_sandbox_setup_prompt_is_loaded_on_first_chat_mount() -> None:
     assert "sandbox.setup.ensure" in composable
     assert "sandboxSetupPromptDismissed" in composable
     assert "if (mode === 'full') return true" in composable
+
+
+def test_vue_run_mode_policy_fails_closed_without_valid_policy() -> None:
+    composable = _read(CHAT_RUN_MODE_COMPOSABLE)
+    menu = _read(CHAT_RUN_MODE)
+
+    assert "const SAFE_RUN_MODES: RunMode[] = ['standard', 'trusted']" in composable
+    assert "if (!policyAllowed) return [...SAFE_RUN_MODES]" in composable
+    assert "return allowed.length ? allowed : [...SAFE_RUN_MODES]" in composable
+    assert "const safeRunModes: RunMode[] = ['standard', 'trusted']" in menu
+    assert "return allowed.length ? allowed : [...safeRunModes]" in menu
