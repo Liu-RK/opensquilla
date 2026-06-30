@@ -783,8 +783,14 @@ export function createComposer(deps) {
     // home position — the candidate window drifts to a corner instead of the
     // caret. Showing the real cursor here lets the IME attach candidates at the
     // caret cell. The composer no longer paints its own "▏" (see caretGlyph) so
-    // there is exactly one caret. (matches OpenTUI's own TextEditor.renderCursor.)
-    setCursorPosition.call(renderer, x, y, true);
+    // there is exactly one caret.
+    //
+    // +1 on both axes: x/y above are 0-based screen cells, but OpenTUI's native
+    // cursor path is 1-based — its own TextEditor.renderCursor passes
+    // screenX/Y + visual + 1. Without the +1 the reported cell is one row too
+    // high and one column too far left, so the IME (and the visible caret) land
+    // off the true caret cell. Match OpenTUI's convention exactly.
+    setCursorPosition.call(renderer, x + 1, y + 1, true);
   }
 
   // Grapheme index of the caret on `targetLine` whose DISPLAY-CELL column is
