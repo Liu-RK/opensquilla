@@ -174,22 +174,25 @@ test("completion menu clips long rows to the menu body width", () => {
   );
 });
 
-test("composer anchors the terminal cursor at the visual caret for IME popovers", () => {
+test("composer shows the terminal cursor at the visual caret for IME popovers", () => {
+  // visible MUST be true: macOS IME anchors the candidate popover to the VISIBLE
+  // hardware cursor. With visible:false OpenTUI keeps the cursor hidden at home
+  // and the popover drifts to a corner. x advances by display cells (CJK = 2).
   const { press, lastCursor } = makeHarness();
 
-  assert.deepEqual(lastCursor(), { x: 3, y: 19, visible: false });
+  assert.deepEqual(lastCursor(), { x: 3, y: 19, visible: true });
 
   press({ name: "h", sequence: "h" });
   press({ name: "i", sequence: "i" });
-  assert.deepEqual(lastCursor(), { x: 5, y: 19, visible: false });
+  assert.deepEqual(lastCursor(), { x: 5, y: 19, visible: true });
 
   press({ name: "backspace" });
   press({ name: "backspace" });
   press({ name: "你", sequence: "你" });
   press({ name: "好", sequence: "好" });
-  assert.deepEqual(lastCursor(), { x: 7, y: 19, visible: false });
+  assert.deepEqual(lastCursor(), { x: 7, y: 19, visible: true });
 
   press({ name: "return", option: true });
   press({ name: "a", sequence: "a" });
-  assert.deepEqual(lastCursor(), { x: 4, y: 20, visible: false });
+  assert.deepEqual(lastCursor(), { x: 4, y: 20, visible: true });
 });

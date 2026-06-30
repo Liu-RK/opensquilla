@@ -393,11 +393,13 @@ export function createComposer(deps) {
     return route;
   }
 
-  // Render the caret as a thin bar when visible, a blank (same width) when the
-  // blink is off so the line layout never jumps. Cursor blinks regardless of the
-  // composer being disabled, so a running turn still shows a live caret.
+  // The caret is now the REAL hardware terminal cursor (positioned + shown via
+  // syncTerminalCursorToCaret with visible:true), which is what macOS IME anchors
+  // its candidate popover to. So the composer no longer paints its own caret —
+  // doing both would render two carets. Keep a blank cell here so the input line
+  // layout is unchanged and the hardware cursor sits on an empty cell.
   function caretGlyph() {
-    return cursorVisible ? "▏" : " ";
+    return " ";
   }
 
   function resetMenu() {
@@ -774,7 +776,15 @@ export function createComposer(deps) {
       footerTop + COMPOSER_CONTENT_TOP_OFFSET,
       maxY,
     );
-    setCursorPosition.call(renderer, x, y, false);
+    // visible:true is REQUIRED for IME anchoring. OpenTUI's native renderer only
+    // emits a CUP move (and shows the hardware cursor) when visible is true; with
+    // false it keeps the hardware cursor hidden at home, so macOS terminals
+    // (Terminal.app/iTerm2) anchor the Pinyin candidate popover to that hidden
+    // home position — the candidate window drifts to a corner instead of the
+    // caret. Showing the real cursor here lets the IME attach candidates at the
+    // caret cell. The composer no longer paints its own "▏" (see caretGlyph) so
+    // there is exactly one caret. (matches OpenTUI's own TextEditor.renderCursor.)
+    setCursorPosition.call(renderer, x, y, true);
   }
 
   // Grapheme index of the caret on `targetLine` whose DISPLAY-CELL column is
