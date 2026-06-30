@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from opensquilla.sandbox.backend.seatbelt import (
     render_seatbelt_profile,
 )
 from opensquilla.sandbox.config import SandboxSettings
+from opensquilla.sandbox.operation_runtime import SandboxOperation, SandboxOperationResult
 from opensquilla.sandbox.types import (
     MountSpec,
     NetworkMode,
@@ -23,6 +25,7 @@ from opensquilla.sandbox.types import (
     SandboxBackendError,
     SandboxPolicy,
     SandboxRequest,
+    SandboxResult,
     SecurityLevel,
 )
 
@@ -550,3 +553,104 @@ async def test_run_backend_notes_empty_on_success(
     result = await SeatbeltBackend().run(_request(_policy(tmp_path), tmp_path))
 
     assert result.backend_notes == ()
+
+
+@pytest.mark.asyncio
+async def test_run_operation_delegates_filesystem_to_seatbelt_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "notes.txt"
+    captured: dict[str, object] = {}
+
+    async def fake_run(self: SeatbeltBackend, request: SandboxRequest) -> object:
+        payload_path = Path(request.argv[-1])
+        captured["request"] = request
+        captured["payload_path"] = payload_path
+        captured["payload"] = json.loads(payload_path.read_text(encoding="utf-8"))
+        return SandboxResult(
+            returncode=0,
+            stdout=json.dumps({"message": f"Written 5 bytes to {target}", "created": True}),
+            stderr="",
+            wall_time_s=0.0,
+            backend_used=self.name,
+        )
+
+    monkeypatch.setattr(SeatbeltBackend, "run", fake_run)
+
+    result = await SeatbeltBackend().run_operation(
+        SandboxOperation.filesystem(
+            kind="write_text",
+            workspace=workspace,
+            run_mode="trusted",
+            path=target,
+            paths=(target,),
+            content="hello",
+        )
+    )
+
+    assert result == SandboxOperationResult(
+        message=f"Written 5 bytes to {target}",
+        created=True,
+    )
+    request = captured["request"]
+    assert isinstance(request, SandboxRequest)
+    assert request.action_kind == "fs.worker.write_text"
+    assert request.cwd == workspace / ".opensquilla-cache" / "fs-worker"
+    assert request.policy.network == NetworkMode.NONE
+    assert "opensquilla.sandbox.filesystem_worker" in request.argv
+    assert captured["payload"] == {
+        "domain": "filesystem",
+        "kind": "write_text",
+        "workspace": str(workspace),
+        "runMode": "trusted",
+        "toolName": "filesystem",
+        "operationId": "",
+        "summary": "",
+        "permissions": {
+            "filesystem": {},
+            "network": {},
+            "process": {},
+            "artifact": {},
+            "media": {},
+        },
+        "approval": {
+            "required": False,
+            "reason": "",
+            "namespace": "sandbox",
+            "payload": {},
+        },
+        "request": {
+            "path": str(target),
+            "paths": [str(target)],
+            "displayPath": "",
+            "content": "hello",
+            "oldText": "",
+            "newText": "",
+            "patch": "",
+            "root": None,
+            "offset": None,
+            "limit": None,
+            "pattern": "",
+            "include": None,
+            "maxResults": None,
+        },
+        "path": str(target),
+        "paths": [str(target)],
+        "displayPath": "",
+        "content": "hello",
+        "oldText": "",
+        "newText": "",
+        "patch": "",
+        "root": None,
+        "offset": None,
+        "limit": None,
+        "pattern": "",
+        "include": None,
+        "maxResults": None,
+    }
+    payload_path = captured["payload_path"]
+    assert isinstance(payload_path, Path)
+    assert not payload_path.exists()

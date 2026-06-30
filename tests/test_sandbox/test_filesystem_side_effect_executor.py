@@ -59,12 +59,12 @@ class _UnsupportedWindowsBackend:
         return frozenset()
 
 
-def test_linux_backend_supports_filesystem_operations() -> None:
+def test_native_process_backends_support_filesystem_operations() -> None:
     from opensquilla.sandbox.backend.bubblewrap import BubblewrapBackend
     from opensquilla.sandbox.backend.seatbelt import SeatbeltBackend
 
     assert "filesystem" in BubblewrapBackend().operation_domains_supported()
-    assert "filesystem" not in SeatbeltBackend().operation_domains_supported()
+    assert "filesystem" in SeatbeltBackend().operation_domains_supported()
 
 
 @pytest.mark.asyncio
