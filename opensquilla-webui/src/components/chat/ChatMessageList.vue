@@ -44,6 +44,10 @@
       @toggle-tool-group="$emit('toggleToolGroup', $event)"
       @toggle-tool-item="$emit('toggleToolItem', $event)"
       @show-tool-result="(content, title) => $emit('showToolResult', content, title)"
+      @resolve-interrupt="(id, decision, note) => $emit('resolveInterrupt', id, decision, note)"
+      @extend-interrupt="id => $emit('extendInterrupt', id)"
+      @clarify-submit="(fields, request) => $emit('clarifySubmit', fields, request)"
+      @clarify-dismiss="$emit('clarifyDismiss')"
     />
     <SystemMessage
       v-else
@@ -98,6 +102,10 @@ defineEmits<{
   toggleToolItem: [renderKey: string]
   showToolResult: [content: string, title: string]
   forkConversation: []
+  resolveInterrupt: [id: string, decision: 'allow-once' | 'allow-always' | 'deny', note?: string]
+  extendInterrupt: [id: string]
+  clarifySubmit: [fields: Record<string, string>, request?: NonNullable<Extract<import('@/types/parts').ChatPart, { type: 'interrupt' }>['clarify']>]
+  clarifyDismiss: []
 }>()
 
 // The conversation tip: forking is whole-conversation in this release, so the

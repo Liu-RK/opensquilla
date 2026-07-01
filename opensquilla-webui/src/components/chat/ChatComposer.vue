@@ -136,7 +136,7 @@
     <input
       ref="fileInputEl"
       type="file"
-      accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,.md,.markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,.docx,.xlsx,.pptx,message/rfc822,application/vnd.ms-outlook,.eml,.mbox,.msg"
+      accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,.md,.markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,.docx,.xlsx,.pptx,message/rfc822,application/mbox,application/vnd.ms-outlook,.eml,.mbox,.msg"
       multiple
       class="hidden"
       @change="emit('fileChange', $event)"

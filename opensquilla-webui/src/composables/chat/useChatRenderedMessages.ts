@@ -29,6 +29,11 @@ import {
   normalizeRouterTier,
   sortRouterTiers,
 } from '@/utils/chat/routerTiers'
+import type { RouterVisualMode } from '@/utils/chat/routerVisualMode'
+import type { InterruptViewState } from '@/types/parts'
+import { toParts, toolState, type ToPartsInterrupt } from '@/utils/chat/toParts'
+import { toSources } from '@/utils/chat/toSources'
+import { relativeTime } from '@/utils/messageTime'
 
 export interface NormalizedRouterDecision extends Record<string, unknown> {
   tier: string
@@ -46,11 +51,13 @@ export interface NormalizedRouterDecision extends Record<string, unknown> {
 
 export interface UseChatRenderedMessagesOptions {
   messages: Ref<ChatMessage[]>
+  interruptState?: Ref<ReadonlyMap<string, InterruptViewState>>
   sessionKey: Ref<string>
   routerSlots: Ref<string[]>
   routerModels: Ref<Record<string, string>>
   routerTierConfigs: Ref<Record<string, ChatRouterTierConfig>>
   routerVisualEffectsEnabled: Ref<boolean>
+  routerVisualMode: Ref<RouterVisualMode>
   renderMarkdown: (text: string) => string
   stripGeneratedArtifactMarkers: (text: string) => string
   stripTimePrefix: (text: string) => string
@@ -58,6 +65,93 @@ export interface UseChatRenderedMessagesOptions {
 }
 
 type ChatRouterRequestKind = 'text' | 'image'
+
+const ROUTER_LEGACY_GRID_CELLS = 15
+const ROUTER_LEGACY_REAL_ANCHORS = [1, 6, 8, 13, 11, 3, 5, 9, 12, 14, 0, 4, 7, 10, 2]
+const ROUTER_LEGACY_DECOY_MODELS = [
+  'gpt-5.5',
+  'claude-opus-4.8',
+  'gemini-3.5-flash',
+  'qwen3-coder-plus',
+  'grok-4.3',
+  'gpt-5.4-mini',
+  'claude-sonnet-4.6',
+  'gemini-3.1-pro',
+  'deepseek-v3.2',
+  'kimi-k2.6',
+  'command-a-plus',
+  'grok-build-0.1',
+  'glm-4.6',
+  'mistral-medium-3.5',
+  'claude-haiku-4.5',
+]
+
+function clarifyRequestFromArgs(args: unknown): ToPartsInterrupt | null {
+  if (!args || typeof args !== 'object') return null
+  const raw = args as Record<string, unknown>
+  if (raw.kind !== 'user_input' || raw.paused !== true) return null
+  const schema = raw.clarify_schema
+  if (!schema || typeof schema !== 'object') return null
+  const schemaObj = schema as Record<string, unknown>
+  const fieldsRaw = Array.isArray(schemaObj.fields) ? schemaObj.fields : []
+  const fields = fieldsRaw.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const field = entry as Record<string, unknown>
+    const name = String(field.name || '').trim()
+    if (!name) return []
+    return [{
+      name,
+      prompt: String(field.prompt || ''),
+      type: String(field.type || 'string').toLowerCase(),
+      required: field.required === true,
+      defaultValue: field.default == null ? '' : String(field.default),
+      choices: Array.isArray(field.choices) ? field.choices.map(String) : [],
+    }]
+  })
+  if (!fields.length) return null
+  const runId = typeof raw.run_id === 'string' ? raw.run_id : ''
+  const step = typeof raw.step === 'string' ? raw.step : ''
+  const approvalId = `${runId}|${step}` === '|' ? 'clarify:history' : `${runId}|${step}`
+  return {
+    kind: 'clarify',
+    approvalId,
+    data: {
+      intro: String(schemaObj.intro || ''),
+      fields,
+      runId,
+      step,
+    },
+  }
+}
+
+function historicalClarifyInterrupts(segments: RawToolCallPayload[] | undefined): ToPartsInterrupt[] {
+  if (!Array.isArray(segments) || !segments.length) return []
+  const inputByToolId = new Map<string, unknown>()
+  const out: ToPartsInterrupt[] = []
+  const seen = new Set<string>()
+
+  for (const segment of segments) {
+    const type = String(segment?.type || '')
+    const toolId = String(segment?.tool_use_id || segment?.toolId || segment?.id || '')
+    if (type === 'tool_use' && toolId) {
+      inputByToolId.set(toolId, segment.input)
+      const direct = clarifyRequestFromArgs(segment.input)
+      if (direct && !seen.has(direct.approvalId)) {
+        seen.add(direct.approvalId)
+        out.push(direct)
+      }
+      continue
+    }
+    if (type !== 'tool_result') continue
+    const direct = clarifyRequestFromArgs(segment.arguments)
+    const fromMatchingInput = direct || clarifyRequestFromArgs(inputByToolId.get(toolId))
+    if (fromMatchingInput && !seen.has(fromMatchingInput.approvalId)) {
+      seen.add(fromMatchingInput.approvalId)
+      out.push(fromMatchingInput)
+    }
+  }
+  return out
+}
 
 export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions) {
   const renderedMessages = computed((): ChatRenderedMessage[] => {
@@ -106,14 +200,15 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
       if (collapsible) prevRole = displayRole
 
       const ownerKey = msg.messageId || `${msg.role}-${i}`
-      result.push({
+      const rendered: ChatRenderedMessage = {
         id: `${msg.role}-${i}`,
         sourceIndex: i,
         role: msg.role,
         displayRole,
         roleLabel,
         text: msg.role === 'assistant' ? options.stripGeneratedArtifactMarkers(msg.text) : msg.text,
-        timeStr: msg.ts ? relTime(msg.ts) : '',
+        timeStr: relativeTime(msg.ts),
+        ts: msg.ts ?? null,
         showHeader: !sameGroup,
         messageId: msg.messageId,
         hasAttachments: !!msg.attachments?.length,
@@ -125,7 +220,32 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
         reasoning: msg.role === 'assistant' ? msg.reasoning : undefined,
         interrupted: msg.interrupted,
         provenanceKind: msg.provenanceKind,
-      })
+      }
+      // Additive: derive discriminated parts from the finished rendered
+      // object so they cannot drift from the fields the components read. Only
+      // assistant turns fold a parts body; other roles render through the
+      // ChatMessageList role branch and stay parts:[].
+      rendered.parts = rendered.displayRole === 'assistant'
+        ? toParts(
+            rendered,
+            options.renderMarkdown,
+            toolCallGroups,
+            ownerKey,
+            historicalClarifyInterrupts(msg.tool_calls),
+            options.interruptState?.value,
+          )
+        : []
+      rendered.sources = rendered.displayRole === 'assistant' ? toSources(rendered) : []
+      // statusHistory is a stored snapshot (not re-derivable from tool_calls), so
+      // read it straight off the message for assistant turns. A reloaded thread
+      // has no snapshot → []; non-assistant roles stay [] like parts/sources.
+      rendered.statusHistory = rendered.displayRole === 'assistant'
+        ? (msg.statusHistory ?? [])
+        : []
+      if (import.meta.env.DEV && rendered.displayRole === 'assistant') {
+        assertPartsParity(rendered, ownerKey)
+      }
+      result.push(rendered)
     }
 
     return result
@@ -148,7 +268,8 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
       displayRole: 'router',
       roleLabel: 'Router',
       text: '',
-      timeStr: msg.ts ? relTime(msg.ts) : '',
+      timeStr: relativeTime(msg.ts),
+      ts: msg.ts ?? null,
       showHeader: false,
       sourceIndex: index,
       isRouterStrip: true,
@@ -157,6 +278,7 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
       routerObserve: decision.routing_applied === false,
       routerStatic: msg.restoredFromHistory === true,
       routerSettled: msg.routerSettled === true,
+      routerPanel: routerPanelDataset(options.routerVisualMode.value),
       gridCells: cells,
       winnerIdx: routerWinnerCellIndex(cells, decision.tier),
       messageId: messageId || `${index}-router`,
@@ -195,6 +317,12 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
   }
 
   function routerDecisionCellsForRequest(decision: NormalizedRouterDecision, requestKind: ChatRouterRequestKind): ChatRouterCell[] {
+    const realCells = realRouterDecisionCellsForRequest(decision, requestKind)
+    if (realCells.length <= 1 || options.routerVisualMode.value !== 'legacy_grid') return realCells
+    return legacyRouterGridCells(realCells)
+  }
+
+  function realRouterDecisionCellsForRequest(decision: NormalizedRouterDecision, requestKind: ChatRouterRequestKind): ChatRouterCell[] {
     const winnerTier = normalizeRouterTier(decision.tier)
     const configuredTiers = options.routerSlots.value.length
       ? options.routerSlots.value.map(normalizeRouterTier).filter(Boolean)
@@ -226,6 +354,20 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
 
     return Array.from(realByModel.values())
       .sort((a, b) => (a.displayName || a.tier).localeCompare(b.displayName || b.tier))
+  }
+
+  function legacyRouterGridCells(realCells: ChatRouterCell[]): ChatRouterCell[] {
+    const cells = Array.from({ length: ROUTER_LEGACY_GRID_CELLS }, (_, index): ChatRouterCell => ({
+      kind: 'decoy',
+      tier: '',
+      tiers: [],
+      displayName: ROUTER_LEGACY_DECOY_MODELS[index % ROUTER_LEGACY_DECOY_MODELS.length],
+      model: '',
+    }))
+    realCells.slice(0, ROUTER_LEGACY_GRID_CELLS).forEach((cell, index) => {
+      cells[ROUTER_LEGACY_REAL_ANCHORS[index] ?? index] = cell
+    })
+    return cells
   }
 
   function routerTierConfig(tier: string): ChatRouterTierConfig {
@@ -350,6 +492,7 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
         call.status = call.isError ? 'error' : 'success'
         call.result = resultStr
         call.resultPreview = truncate(resultStr, 200)
+        if (segment.sources !== undefined) call.sources = segment.sources
       }
     })
 
@@ -377,6 +520,100 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
   }
 }
 
+/**
+ * DEV-only soft parity check: confirms the derived `parts[]` cover exactly what
+ * the assistant message components render today (text, tools, artifacts,
+ * reasoning) and that tool keys/state match their originating calls. Logs
+ * console.error on any mismatch and NEVER throws, so it is invisible in
+ * production and only surfaces fold regressions during `npm run dev` / e2e.
+ */
+function assertPartsParity(rendered: ChatRenderedMessage, ownerKey: string): void {
+  try {
+    const parts = rendered.parts ?? []
+    const problems: string[] = []
+
+    // (1) text/timeline coverage
+    const textPartKeys = new Set(parts.filter(p => p.type === 'text').map(p => p.key))
+    if (rendered.timelineItems?.length) {
+      const timelineTextKeys = new Set(
+        rendered.timelineItems.filter(item => item.type === 'text').map(item => item.key),
+      )
+      if (!sameSet(textPartKeys, timelineTextKeys)) {
+        problems.push(`text keys diverge from timeline: parts=${[...textPartKeys].join(',')} timeline=${[...timelineTextKeys].join(',')}`)
+      }
+    } else {
+      const expectsText = !!rendered.text
+      const hasTextPart = textPartKeys.has(`${ownerKey}:text`)
+      if (expectsText !== hasTextPart) {
+        problems.push(`plain text part presence ${hasTextPart} != text non-empty ${expectsText}`)
+      }
+    }
+
+    // (2) tool coverage — callIds + keys vs the originating calls
+    const expectedCalls: ChatToolCallRenderItem[] = rendered.timelineItems?.length
+      ? rendered.timelineItems.flatMap(item => (item.type === 'tool-group' ? item.group.calls : []))
+      : toolCallGroups(rendered.toolCalls, ownerKey).flatMap(g => g.calls)
+    const expectedToolKeys = multiset(expectedCalls.map(call => call.renderKey))
+    const toolParts = parts.filter(p => p.type === 'tool')
+    const actualToolKeys = multiset(toolParts.map(p => p.key))
+    if (!sameMultiset(expectedToolKeys, actualToolKeys)) {
+      problems.push('tool part keys diverge from originating call renderKeys')
+    }
+    const callByKey = new Map(expectedCalls.map(call => [call.renderKey, call]))
+    for (const part of toolParts) {
+      if (part.type !== 'tool') continue
+      const call = callByKey.get(part.key)
+      if (!call) continue
+      if (part.callId !== call.toolId) problems.push(`tool callId ${part.callId} != ${call.toolId}`)
+      if (part.state !== toolState(call)) problems.push(`tool state ${part.state} != ${toolState(call)} for ${part.key}`)
+    }
+
+    // (3) artifact coverage
+    const artifactParts = parts.filter(p => p.type === 'artifact').length
+    if (artifactParts !== (rendered.artifacts?.length ?? 0)) {
+      problems.push(`artifact parts ${artifactParts} != artifacts ${rendered.artifacts?.length ?? 0}`)
+    }
+
+    // (4) reasoning coverage
+    const reasoningParts = parts.filter(p => p.type === 'reasoning').length
+    const expectedReasoning = rendered.reasoning ? 1 : 0
+    if (reasoningParts !== expectedReasoning) {
+      problems.push(`reasoning parts ${reasoningParts} != expected ${expectedReasoning}`)
+    }
+
+    // (5) source coverage — folded list stays consistent and within the cap
+    const sources = rendered.sources ?? []
+    if (sources.length > 12) problems.push(`sources ${sources.length} exceeds MAX_SOURCES`)
+    sources.forEach((source, index) => {
+      if (source.sourceId !== index + 1) problems.push(`source ${index} has sourceId ${source.sourceId}`)
+    })
+
+    if (problems.length) {
+      console.error('[live-turn parity]', { id: rendered.id, messageId: rendered.messageId, problems })
+    }
+  } catch (err) {
+    console.error('[live-turn parity]', { id: rendered.id, error: String(err) })
+  }
+}
+
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const value of a) if (!b.has(value)) return false
+  return true
+}
+
+function multiset(values: string[]): Map<string, number> {
+  const map = new Map<string, number>()
+  for (const value of values) map.set(value, (map.get(value) ?? 0) + 1)
+  return map
+}
+
+function sameMultiset(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false
+  for (const [key, count] of a) if (b.get(key) !== count) return false
+  return true
+}
+
 function upsertRouterStrip(
   result: ChatRenderedMessage[],
   stripItem: ChatRenderedMessage,
@@ -395,16 +632,6 @@ function routerRequestKindFromAttachments(attachments: ChatMessage['attachments'
   return attachments?.some(att => String(att.mime || '').toLowerCase().startsWith('image/'))
     ? 'image'
     : 'text'
-}
-
-export function relTime(ts: string | number | null): string {
-  if (!ts) return ''
-  const d = typeof ts === 'number' ? new Date(ts) : new Date(ts)
-  const diff = (Date.now() - d.getTime()) / 1000
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
 }
 
 export function fmtTok(n: number): string {
@@ -466,7 +693,7 @@ export function shortModelName(model: string): string {
   const raw = String(model || '').trim()
   if (!raw) return ''
   const last = raw.includes('/') ? raw.split('/').pop() || raw : raw
-  return last.replace(/^claude-/, '').replace(/^gpt-/, 'gpt-')
+  return last
 }
 
 function routerFxStripProvider(name: string): string {
@@ -483,6 +710,10 @@ export function routerFxSortTiers(list: string[]): string[] {
 export function routerWinnerCellIndex(cells: ChatRouterCell[], tier: string): number {
   const norm = normalizeRouterTier(tier)
   return cells.findIndex(cell => cell.kind === 'real' && (cell.tiers || []).includes(norm))
+}
+
+export function routerPanelDataset(mode: RouterVisualMode): string {
+  return mode === 'legacy_grid' ? 'legacy-grid' : 'real-candidates'
 }
 
 function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall[] {
@@ -514,6 +745,7 @@ function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall
         isError: false,
         result: '',
         resultPreview: '',
+        sources: undefined,
         isOpen: false,
       }
       byId.set(toolId, item)
@@ -529,24 +761,26 @@ function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall
       item.resultPreview = truncate(resultStr, 200)
       item.status = isError ? 'error' : 'success'
     }
+    if (tc.sources !== undefined) item.sources = tc.sources
     if (isError) {
       item.isError = true
       item.status = 'error'
     }
   })
 
-  return merged.map(tc => ({
-    toolId: tc.toolId,
-    name: tc.name,
-    displayName: tc.displayName,
-    groupId: tc.groupId,
-    inputRaw: tc.inputRaw,
-    inputPreview: tc.inputPreview,
-    isRunning: tc.isRunning,
-    status: tc.status,
-    isError: tc.isError,
-    result: tc.result,
-    resultPreview: tc.resultPreview,
+  return merged.map(item => ({
+    toolId: item.toolId,
+    name: item.name,
+    displayName: item.displayName,
+    groupId: item.groupId,
+    inputRaw: item.inputRaw,
+    inputPreview: item.inputPreview,
+    isRunning: item.isRunning,
+    status: item.status,
+    isError: item.isError,
+    result: item.result,
+    resultPreview: item.resultPreview,
+    sources: item.sources,
     isOpen: false,
   }))
 }

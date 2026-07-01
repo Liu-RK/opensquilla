@@ -1236,6 +1236,16 @@ class GatewayServer:
     _channel_manager: Any = field(default=None, repr=False)
     _services: ServiceContainer | None = field(default=None, repr=False)
     _background_completion_manager: Any = field(default=None, repr=False)
+    _pid_lock: Any = field(default=None, repr=False)
+
+    def _release_pid_lock(self) -> None:
+        pid_lock = self._pid_lock
+        if pid_lock is None:
+            return
+        try:
+            pid_lock.release()
+        finally:
+            self._pid_lock = None
 
     async def close(self, reason: str = "shutdown") -> None:
         """Gracefully shut down: stop channels, broadcast shutdown, close WS, stop server."""

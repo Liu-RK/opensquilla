@@ -23,5 +23,6 @@ export function createWebPlatform(): Platform {
     },
     settings: {},
     onboarding: {},
+    files: {},
   }
 }

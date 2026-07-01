@@ -84,9 +84,11 @@ const ApprovalMonitor = (() => {
         _closeModal();
       }
 
-      if (pending.length > 0 && pending.length !== _lastToastCount) {
-        _lastToastCount = pending.length;
+      if (pending.length > 0 && _lastToastCount === 0) {
         UI.toast('Approval required', 'warn', 2500);
+        _lastToastCount = pending.length;
+      } else if (pending.length > 0) {
+        _lastToastCount = pending.length;
       } else if (pending.length === 0) {
         _lastToastCount = 0;
       }

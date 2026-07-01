@@ -1,6 +1,11 @@
 /// <reference types="vite/client" />
 
-import type { DesktopSettings, DesktopSettingsPayload } from './platform/types'
+import type {
+  ArtifactNativeOpenResult,
+  ArtifactOpenRequest,
+  DesktopSettings,
+  DesktopSettingsPayload,
+} from './platform/types'
 
 declare global {
   interface OpenSquillaDesktopApi {
@@ -10,6 +15,7 @@ declare global {
     getDesktopSettings: () => Promise<DesktopSettings>
     saveDesktopSettings: (payload: DesktopSettingsPayload) => Promise<DesktopSettings>
     resetDesktopSettings: () => Promise<{ ok: boolean }>
+    openArtifact: (payload: ArtifactOpenRequest) => Promise<ArtifactNativeOpenResult>
     getOnboardingDefaults: () => Promise<unknown>
     saveOnboarding: (payload: unknown) => Promise<unknown>
     cancelOnboarding: () => Promise<unknown>

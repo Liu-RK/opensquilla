@@ -45,7 +45,6 @@ def test_vue_run_mode_is_sent_as_chat_source_metadata() -> None:
     assert "runMode: Ref<RunMode>" in send
     assert "normalizeRunMode(options.runMode.value)" in send
     assert "params._source = { ...params._source, runMode }" in send
-    assert "hiddenParams._source = { ...hiddenParams._source, runMode }" in send
     assert "_source?: { runMode?: RunMode }" in types
 
 

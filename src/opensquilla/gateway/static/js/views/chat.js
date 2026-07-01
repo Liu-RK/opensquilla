@@ -12,6 +12,7 @@ const ChatView = (() => {
   let _sessionKey = '';
   let _pendingSessionIntent = null;
 
+  const _RUN_MODE_DEFAULT = 'full';
   const _RUN_MODE_FALLBACK = 'trusted';
   const _RUN_MODE_LABELS = {
     standard: 'Standard-Sandbox',
@@ -23,7 +24,7 @@ const ChatView = (() => {
     trusted: 'Sandboxed execution with fewer routine prompts. Boundary changes still ask.',
     full: 'Host execution without per-command prompts. Use only for trusted workspaces.',
   };
-  let _runModePolicyDefault = _RUN_MODE_FALLBACK;
+  let _runModePolicyDefault = _RUN_MODE_DEFAULT;
   let _allowedRunModes = new Set(['standard', 'trusted', 'full']);
   let _fullHostAccessDisabledReason = null;
   let _runMode = _runModePolicyDefault;
@@ -1320,7 +1321,7 @@ const ChatView = (() => {
             <button class="btn btn--icon btn--danger hidden" id="chat-btn-stop" title="Stop current response (Esc)" aria-label="Stop current response">${icons.stop()}</button>
           </div>
         </div>
-        <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,.md,.markdown" multiple class="hidden" />
+        <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,application/mbox,message/rfc822,application/vnd.ms-outlook,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,.md,.markdown,.docx,.xlsx,.pptx,.eml,.mbox,.msg" multiple class="hidden" />
       </div>`;
 
     // Cache DOM refs
@@ -2544,6 +2545,10 @@ const ChatView = (() => {
   }
 
   function _normalizeRunMode(mode) {
+    const value = String(mode || '').trim().toLowerCase().replace(/_/g, '-');
+    if (value === 'standard' || value === 'standard-sandbox') return 'standard';
+    if (value === 'trusted' || value === 'trust' || value === 'trusted-sandbox') return 'trusted';
+    if (value === 'full' || value === 'full-host-access' || value === 'host') return 'full';
     return _normalizeRunModePolicyValue(mode, _runModePolicyDefault);
   }
 

@@ -8,6 +8,7 @@ export const webCapabilities: PlatformCapabilities = {
   canRestartGateway: false,
   hasDesktopOnboarding: false,
   hasWebConfig: true,
+  canOpenArtifactsNatively: false,
 }
 
 export const desktopCapabilities: PlatformCapabilities = {
@@ -17,7 +18,11 @@ export const desktopCapabilities: PlatformCapabilities = {
   canRevealGatewayLog: true,
   canRestartGateway: true,
   hasDesktopOnboarding: true,
-  hasWebConfig: false,
+  // Desktop now renders the same RPC-backed SettingsDialog as web (its local
+  // gateway serves the same Control UI RPC); a desktop-only Runtime section adds
+  // the owned-gateway controls. See router/index.ts + SettingsDialog.
+  hasWebConfig: true,
+  canOpenArtifactsNatively: true,
 }
 
 export function detectPlatformId(): PlatformId {
