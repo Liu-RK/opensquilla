@@ -36,6 +36,10 @@ class NativeStreamRenderer:
         self._saw_output = False
         self._saw_reasoning = False
         self._reasoning_open = False
+        # True when the last write left the cursor mid-line (no trailing newline),
+        # e.g. streamed answer prose. Block-level rows (tool start) use it to break
+        # to a fresh line so a glyph never collides with preceding text.
+        self._line_open = False
         self._tool_names: dict[str, str] = {}
 
     def __enter__(self) -> NativeStreamRenderer:
@@ -51,11 +55,17 @@ class NativeStreamRenderer:
         if handle is None:
             return
         await handle.write_through(payload)
+        self._line_open = not payload.endswith("\n")
 
     async def _close_reasoning(self) -> None:
         """Separate the dim reasoning section from following answer/tool output."""
         if self._reasoning_open:
             self._reasoning_open = False
+            await self._write("\n")
+
+    async def _ensure_line_start(self) -> None:
+        """Break to a fresh line if the last write left the cursor mid-line."""
+        if self._line_open:
             await self._write("\n")
 
     async def aappend_text(self, delta: str, *, presentation: str = "answer") -> None:
@@ -86,6 +96,10 @@ class NativeStreamRenderer:
     ) -> None:
         del args
         await self._close_reasoning()
+        # Separate the tool row from any preceding answer prose that streamed
+        # without a trailing newline ("I'll check…" + tool call), so the glyph
+        # doesn't render on the same line as the text.
+        await self._ensure_line_start()
         if tool_use_id is not None:
             self._tool_names[tool_use_id] = name
         await self._write(f"[{ACCENT}]⚙ {_escape(name)}[/]\n")

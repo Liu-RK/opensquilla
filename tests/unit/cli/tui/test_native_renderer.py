@@ -36,6 +36,36 @@ async def test_native_renderer_writes_answer_text_to_terminal_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_tool_start_separates_from_midline_answer_text() -> None:
+    # A common "I'll check…" + tool-call sequence: aappend_text streams prose with
+    # no trailing newline, so atool_start must break to a fresh line or the glyph
+    # collides with the text ("I'll check⚙ grep").
+    output = _RecordingOutputHandle()
+    renderer = NativeStreamRenderer(output_handle=output)
+    renderer.__enter__()
+    await renderer.aappend_text("I'll check", presentation="answer")
+    await renderer.atool_start("grep", tool_use_id="t1")
+
+    joined = "".join(output.writes)
+    assert "I'll check⚙" not in joined  # no collision
+    assert "I'll check\n" in joined  # a separator was inserted before the tool row
+    assert f"[{ACCENT}]⚙ grep[/]" in joined
+
+
+@pytest.mark.asyncio
+async def test_native_tool_start_adds_no_blank_line_when_already_at_line_start() -> None:
+    # When prose already ended with a newline, the separator must not add a second
+    # (a spurious blank line before the tool row).
+    output = _RecordingOutputHandle()
+    renderer = NativeStreamRenderer(output_handle=output)
+    renderer.__enter__()
+    await renderer.aappend_text("done\n", presentation="answer")
+    await renderer.atool_start("grep", tool_use_id="t1")
+
+    assert "\n\n" not in "".join(output.writes)
+
+
+@pytest.mark.asyncio
 async def test_native_renderer_pulse_is_a_safe_no_op() -> None:
     # The shared turn-stream loop calls renderer.pulse() unconditionally on every
     # heartbeat; the native renderer must define it so a quiet turn does not raise
