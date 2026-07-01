@@ -32,8 +32,11 @@ describe('ChatComposerSettings coding mode contract', () => {
 
     expect(viewSource).toContain(':run-mode="runMode"')
     expect(viewSource).toContain('@set-run-mode="setComposerRunMode"')
-    expect(viewSource).toContain("const runMode = ref<'standard' | 'trusted' | 'full'>('trusted')")
-    expect(viewSource).toContain("function setComposerRunMode(mode: 'standard' | 'trusted' | 'full')")
+    expect(viewSource).toContain("const runMode = ref<SandboxRunMode>('trusted')")
+    expect(viewSource).toContain('const runModePolicyDefault = computed<SandboxRunMode>')
+    expect(viewSource).toContain('defaultRunMode')
+    expect(viewSource).toContain('runModeUserSelected')
+    expect(viewSource).toContain('function setComposerRunMode(mode: SandboxRunMode)')
   })
 
   it('offers exactly the three sandbox run modes from the shield popover', () => {

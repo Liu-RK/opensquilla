@@ -687,13 +687,19 @@ const {
   normalizeElevatedMode,
 } = chatElevatedMode
 
-const runMode = ref<'standard' | 'trusted' | 'full'>('trusted')
+const runMode = ref<SandboxRunMode>('trusted')
+const runModeUserSelected = ref(false)
 
 function currentRunModePolicy(): RunModePolicy | null {
   const auth = rpc.auth as RpcAuthPayload | null
   const policy = auth?.runModePolicy
   return policy && typeof policy === 'object' ? policy : null
 }
+
+const runModePolicyDefault = computed<SandboxRunMode>(() => {
+  const raw = currentRunModePolicy()?.defaultRunMode
+  return isSandboxRunMode(raw) ? raw : 'trusted'
+})
 
 const allowedRunModes = computed<SandboxRunMode[]>(() => {
   const raw = currentRunModePolicy()?.allowedRunModes
@@ -702,9 +708,18 @@ const allowedRunModes = computed<SandboxRunMode[]>(() => {
   return allowed.length > 0 ? allowed : ['standard', 'trusted', 'full']
 })
 
-watch(allowedRunModes, modes => {
-  if (modes.includes(runMode.value)) return
-  runMode.value = modes.includes('trusted') ? 'trusted' : (modes[0] ?? 'trusted')
+function preferredRunMode(
+  modes: SandboxRunMode[],
+  preferred: SandboxRunMode,
+): SandboxRunMode {
+  if (modes.includes(preferred)) return preferred
+  if (modes.includes('trusted')) return 'trusted'
+  return modes[0] ?? 'trusted'
+}
+
+watch([allowedRunModes, runModePolicyDefault], ([modes, defaultMode]) => {
+  if (runModeUserSelected.value && modes.includes(runMode.value)) return
+  runMode.value = preferredRunMode(modes, defaultMode)
 }, { immediate: true })
 
 // Run status
@@ -1485,7 +1500,8 @@ function readAuthToken(): string {
   }
 }
 
-function setComposerRunMode(mode: 'standard' | 'trusted' | 'full') {
+function setComposerRunMode(mode: SandboxRunMode) {
+  runModeUserSelected.value = true
   runMode.value = mode
 }
 
