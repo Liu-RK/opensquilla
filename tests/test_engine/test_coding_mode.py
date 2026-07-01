@@ -94,6 +94,34 @@ class TestRuntimeToolContextCodingMode:
         assert result.is_error is False
         assert json.loads(result.content) == {"coding_mode": True}
 
+    def test_build_tools_applies_coding_mode_denies_to_live_surface(self):
+        import opensquilla.tools.builtin  # noqa: F401  (registers builtins)
+        from opensquilla.engine.runtime import TurnRunner
+        from opensquilla.tools.registry import get_default_registry
+        from opensquilla.tools.types import CallerKind, ToolContext
+
+        config = GatewayConfig()
+        config.skills.coding_mode = True
+        runner = TurnRunner(
+            provider_selector=None,
+            tool_registry=get_default_registry(),
+            config=config,
+        )
+        ctx = ToolContext(is_owner=True, caller_kind=CallerKind.AGENT)
+
+        tool_defs, _handler = runner._build_tools(ctx)
+        names = {getattr(td, "name", "") for td in tool_defs}
+
+        assert ctx.coding_mode is True
+        assert coding_mode_denied_tools(True) <= ctx.denied_tools
+        assert {
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "execute_code",
+            "git_commit",
+        }.isdisjoint(names)
+
 
 class TestSkillsFilterGate:
     def test_off_gates_codetask(self):

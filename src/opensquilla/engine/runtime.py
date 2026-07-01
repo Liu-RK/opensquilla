@@ -3293,7 +3293,10 @@ class TurnRunner:
         """Build tool definitions and handler from registry, filtered by ToolContext."""
         if self._tool_registry is None:
             return [], None
-        from opensquilla.skills.meta.enabled import is_meta_skill_enabled
+        from opensquilla.skills.meta.enabled import (
+            is_meta_auto_trigger_enabled,
+            is_meta_skill_enabled,
+        )
         from opensquilla.tools.dispatch import build_tool_handler
         from opensquilla.tools.policy import apply_tool_policy_from_config
         from opensquilla.tools.registry import filter_by_profile, resolve_profile
@@ -3305,13 +3308,14 @@ class TurnRunner:
             except Exception:
                 loaded_skills = []
         meta_skill_enabled = is_meta_skill_enabled(self._config)
+        meta_auto_trigger = is_meta_auto_trigger_enabled(self._config)
         has_invokable_meta_skill = any(
             getattr(skill, "kind", "skill") == "meta"
             and not getattr(skill, "disable_model_invocation", False)
             for skill in loaded_skills
         )
         if ctx is not None:
-            if meta_skill_enabled and has_invokable_meta_skill:
+            if meta_skill_enabled and meta_auto_trigger and has_invokable_meta_skill:
                 if ctx.surfaced_tools is None:
                     ctx.surfaced_tools = set()
                 ctx.surfaced_tools.add("meta_invoke")
@@ -3321,8 +3325,7 @@ class TurnRunner:
             metadata["meta_skill_enabled"] = meta_skill_enabled
 
         if ctx is not None:
-            skills_cfg = getattr(self._config, "skills", None)
-            ctx.coding_mode = bool(getattr(skills_cfg, "coding_mode", False))
+            caller_ctx = ctx
             ctx = apply_tool_policy_from_config(
                 ctx,
                 available_tools=self._tool_registry.list_names(),
@@ -3338,6 +3341,20 @@ class TurnRunner:
                     hard_denied=None,
                 )
             ctx = self._apply_runtime_capability_denies(ctx)
+            from opensquilla.tools.policy_config import coding_mode_denied_tools
+
+            skills_cfg = getattr(self._config, "skills", None)
+            coding_mode = bool(getattr(skills_cfg, "coding_mode", False))
+            ctx.denied_tools.update(coding_mode_denied_tools(coding_mode))
+            ctx.coding_mode = coding_mode
+            if ctx is not caller_ctx:
+                caller_ctx.allowed_tools = (
+                    set(ctx.allowed_tools) if ctx.allowed_tools is not None else None
+                )
+                caller_ctx.denied_tools.clear()
+                caller_ctx.denied_tools.update(ctx.denied_tools)
+                caller_ctx.workspace_write_deny_globs[:] = ctx.workspace_write_deny_globs
+                caller_ctx.coding_mode = ctx.coding_mode
             log.debug(
                 "tool_policy.policy_pre",
                 allowed_tool_count=len(self._tool_registry.to_tool_definitions(ctx)),
@@ -3950,9 +3967,11 @@ class TurnRunner:
             apply_prompt_cache,
             apply_squilla_router,
             apply_vision_followup_gate,
+            enforce_coding_mode,
             filter_skills,
             inject_platform_hint,
             inject_subagent_grounding,
+            meta_command_launch,
             meta_resolution,
             observe_reasoning_hint,
             resolve_model,
@@ -4110,6 +4129,8 @@ class TurnRunner:
                 _bounded_apply_squilla_router,
                 observe_reasoning_hint,
                 meta_resolution,
+                enforce_coding_mode,
+                meta_command_launch,
                 filter_skills,
                 inject_subagent_grounding,
                 inject_platform_hint,
