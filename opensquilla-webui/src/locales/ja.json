@@ -1565,7 +1565,15 @@
       "execOff": "オフ",
       "execPrompt": "承認を確認",
       "execBypass": "承認をバイパス",
-      "execFull": "フルアクセス"
+      "execFull": "フルアクセス",
+      "runMode": "実行モード",
+      "runModeStandard": "標準サンドボックス",
+      "runModeStandardDesc": "リスクのあるツール操作の前に確認します。",
+      "runModeTrusted": "信頼済みサンドボックス",
+      "runModeTrustedDesc": "信頼済みサンドボックス操作を自動承認します。",
+      "runModeFull": "完全なホストアクセス",
+      "runModeFullDesc": "サンドボックス分離なしで実行します。",
+      "runModeFullUnavailable": "完全なホストアクセスには owner セッションが必要です。"
     },
     "pending": {
       "label": "保留中 {count}/{max}",

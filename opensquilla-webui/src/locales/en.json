@@ -1565,7 +1565,15 @@
       "execOff": "Off",
       "execPrompt": "Prompt for approvals",
       "execBypass": "Bypass approvals",
-      "execFull": "Full access"
+      "execFull": "Full access",
+      "runMode": "Execution mode",
+      "runModeStandard": "Standard-Sandbox",
+      "runModeStandardDesc": "Ask before risky tool actions.",
+      "runModeTrusted": "Trusted-Sandbox",
+      "runModeTrustedDesc": "Auto-approve trusted sandbox actions.",
+      "runModeFull": "Full Host Access",
+      "runModeFullDesc": "Run without sandbox isolation.",
+      "runModeFullUnavailable": "Full Host Access requires an owner session."
     },
     "pending": {
       "label": "Pending {count}/{max}",

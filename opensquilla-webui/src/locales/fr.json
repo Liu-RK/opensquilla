@@ -1565,7 +1565,15 @@
       "execOff": "Désactivé",
       "execPrompt": "Demander les approbations",
       "execBypass": "Contourner les approbations",
-      "execFull": "Accès complet"
+      "execFull": "Accès complet",
+      "runMode": "Mode d'exécution",
+      "runModeStandard": "Sandbox standard",
+      "runModeStandardDesc": "Demande confirmation avant les actions d'outils risquées.",
+      "runModeTrusted": "Sandbox de confiance",
+      "runModeTrustedDesc": "Approuve automatiquement les actions sandbox de confiance.",
+      "runModeFull": "Accès hôte complet",
+      "runModeFullDesc": "Exécute sans isolation sandbox.",
+      "runModeFullUnavailable": "L'accès hôte complet nécessite une session owner."
     },
     "pending": {
       "label": "En attente {count}/{max}",

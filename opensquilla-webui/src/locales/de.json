@@ -1565,7 +1565,15 @@
       "execOff": "Aus",
       "execPrompt": "Bei Genehmigungen nachfragen",
       "execBypass": "Genehmigungen umgehen",
-      "execFull": "Voller Zugriff"
+      "execFull": "Voller Zugriff",
+      "runMode": "Ausführungsmodus",
+      "runModeStandard": "Standard-Sandbox",
+      "runModeStandardDesc": "Fragt vor riskanten Tool-Aktionen nach.",
+      "runModeTrusted": "Trusted-Sandbox",
+      "runModeTrustedDesc": "Genehmigt vertrauenswürdige Sandbox-Aktionen automatisch.",
+      "runModeFull": "Voller Hostzugriff",
+      "runModeFullDesc": "Ohne Sandbox-Isolierung ausführen.",
+      "runModeFullUnavailable": "Voller Hostzugriff erfordert eine owner-Sitzung."
     },
     "pending": {
       "label": "Ausstehend {count}/{max}",

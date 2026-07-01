@@ -1565,7 +1565,15 @@
       "execOff": "关闭",
       "execPrompt": "提示审批",
       "execBypass": "跳过审批",
-      "execFull": "完全访问"
+      "execFull": "完全访问",
+      "runMode": "执行模式",
+      "runModeStandard": "标准沙箱",
+      "runModeStandardDesc": "高风险工具操作前请求确认。",
+      "runModeTrusted": "可信沙箱",
+      "runModeTrustedDesc": "自动批准可信沙箱操作。",
+      "runModeFull": "完全主机访问",
+      "runModeFullDesc": "不使用沙箱隔离运行。",
+      "runModeFullUnavailable": "完全主机访问需要 owner 会话。"
     },
     "pending": {
       "label": "待发送 {count}/{max}",
