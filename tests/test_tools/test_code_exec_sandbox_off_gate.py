@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from opensquilla.application.approval_queue import get_approval_queue
+from opensquilla.application.approval_queue import get_approval_queue, reset_approval_queue
 from opensquilla.sandbox.config import SandboxSettings
 from opensquilla.sandbox.integration import configure_runtime, reset_runtime
 from opensquilla.tools.builtin import code_exec
@@ -51,9 +51,13 @@ async def test_destructive_code_exec_requires_approval_when_sandbox_disabled(
         current_tool_context.reset(token)
         reset_runtime()
 
-    payload = json.loads(result)
-    assert payload["status"] == "approval_required"
-    # The destructive op must not have run while approval is pending.
-    assert (workspace / "target.txt").exists()
-    pending = get_approval_queue().list_pending("exec")
-    assert len(pending) == 1
+    try:
+        payload = json.loads(result)
+        assert payload["status"] == "approval_required"
+        # The destructive op must not have run while approval is pending.
+        assert (workspace / "target.txt").exists()
+        pending = get_approval_queue().list_pending("exec")
+        assert len(pending) == 1
+    finally:
+        # Do not leak the enqueued approval into the shared queue.
+        reset_approval_queue()
