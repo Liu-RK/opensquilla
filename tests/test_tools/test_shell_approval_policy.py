@@ -57,6 +57,25 @@ async def test_exec_approval_deny_pattern_blocks_shell_command(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_exec_approval_deny_pattern_does_not_depend_on_warnlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_approval_queue().set_settings("prompt", deny_patterns=["git status"])
+    monkeypatch.setattr(
+        shell,
+        "check_safe_bin",
+        lambda _command: PolicyResult(allowed=True, reason="", needs_approval=False),
+    )
+
+    result = await shell.exec_command("git status", workdir=str(tmp_path))
+    payload = json.loads(result)
+
+    assert payload["status"] == "approval_denied"
+    assert payload["command"] == "git status"
+
+
+@pytest.mark.asyncio
 async def test_destructive_code_exec_uses_sandbox_gate_when_runtime_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

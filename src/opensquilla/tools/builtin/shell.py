@@ -23,10 +23,10 @@ from typing import Any, cast
 
 import structlog
 
-from opensquilla.application.approval_queue import (
+from opensquilla.gateway.approval_queue import (
     classify_command as classify_approval_command,
 )
-from opensquilla.application.approval_queue import (
+from opensquilla.gateway.approval_queue import (
     get_approval_queue,
 )
 from opensquilla.sandbox.backend.bubblewrap import (
@@ -3129,14 +3129,13 @@ async def exec_command(
     )
     if sensitive_block is not None:
         return sensitive_block
-    if result.needs_approval:
-        approval_denial = _approval_policy_denial(
-            "exec_command",
-            command,
-            result.reason or "Command requires approval.",
-        )
-        if approval_denial is not None:
-            return json.dumps(approval_denial, ensure_ascii=False)
+    approval_denial = _approval_policy_denial(
+        "exec_command",
+        command,
+        result.reason or "Command denied by approval policy.",
+    )
+    if approval_denial is not None:
+        return json.dumps(approval_denial, ensure_ascii=False)
     path_access = _sandbox_workdir_access_envelope(
         cwd,
         write=_shell_workdir_requires_write(command, profile, stdin=stdin),
@@ -3311,14 +3310,13 @@ async def background_process(
     sensitive_block = _sensitive_shell_block("background_process", command, workdir=cwd)
     if sensitive_block is not None:
         return sensitive_block
-    if result.needs_approval:
-        approval_denial = _approval_policy_denial(
-            "background_process",
-            command,
-            result.reason or "Command requires approval.",
-        )
-        if approval_denial is not None:
-            return json.dumps(approval_denial, ensure_ascii=False)
+    approval_denial = _approval_policy_denial(
+        "background_process",
+        command,
+        result.reason or "Command denied by approval policy.",
+    )
+    if approval_denial is not None:
+        return json.dumps(approval_denial, ensure_ascii=False)
     path_access = _sandbox_workdir_access_envelope(
         cwd,
         write=_shell_workdir_requires_write(command, profile),
