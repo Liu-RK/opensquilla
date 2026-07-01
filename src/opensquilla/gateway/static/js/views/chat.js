@@ -2459,10 +2459,12 @@ const ChatView = (() => {
     _sandboxSetupBanner = banner;
     mode = _normalizeRunMode(mode || _runMode);
     const ready = _sandboxSetupReadyForMode(mode);
+    const pendingPrompt = !!_pendingSandboxSetupMode;
+    const setupKnown = _sandboxSetupStatus !== null;
+    const optionalPrompt = setupKnown && !_sandboxSetupPromptDismissed;
     const shouldShow = mode !== 'full'
       && !ready
-      && !_sandboxSetupPromptDismissed
-      && (!!_pendingSandboxSetupMode || _sandboxSetupStatus !== null);
+      && (pendingPrompt || optionalPrompt);
     banner.classList.toggle('hidden', !shouldShow);
     const detail = banner.querySelector('[data-sandbox-setup-detail]');
     if (detail) {
@@ -2489,7 +2491,7 @@ const ChatView = (() => {
     }
   }
 
-  async function _ensureSandboxSetup(mode) {
+  async function _ensureSandboxSetupOnly(mode) {
     if (!_rpc || _sandboxSetupInFlight) return false;
     _sandboxSetupInFlight = true;
     _refreshSandboxSetupBanner(mode);
@@ -2532,7 +2534,7 @@ const ChatView = (() => {
     if (ensure) {
       ensure.addEventListener('click', async () => {
         const mode = _pendingSandboxSetupMode || _runMode;
-        if (await _ensureSandboxSetup(mode)) {
+        if (await _ensureSandboxSetupOnly(mode)) {
           _pendingSandboxSetupMode = '';
           _setRunMode(mode, { toast: true });
         }

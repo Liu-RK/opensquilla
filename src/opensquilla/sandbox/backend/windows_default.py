@@ -9,7 +9,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -641,7 +641,7 @@ def _prepend_windows_tool_paths(
     existing = _split_windows_path(env.get("PATH", ""))
     merged = [str(root) for root in roots]
     merged.extend(part for part in existing if part)
-    env["PATH"] = os.pathsep.join(_dedupe_path_texts(merged))
+    env["PATH"] = ";".join(_dedupe_path_texts(merged))
 
 
 def _windows_tool_path_roots(
@@ -803,7 +803,7 @@ def _env_path(env: Mapping[str, str], key: str) -> Path | None:
 
 
 def _split_windows_path(value: str) -> list[str]:
-    return [part.strip() for part in value.split(os.pathsep) if part.strip()]
+    return [part.strip() for part in value.split(";") if part.strip()]
 
 
 def _directory_has_windows_tool(path: Path) -> bool:
@@ -816,7 +816,7 @@ def _windows_path_is_apps_alias_dir(path: Path) -> bool:
     return _WINDOWS_APPS_ALIAS_DIR_MARKER in str(path).replace("/", "\\").casefold()
 
 
-def _dedupe_paths(paths: object) -> tuple[Path, ...]:
+def _dedupe_paths(paths: Iterable[Path | str]) -> tuple[Path, ...]:
     seen: set[str] = set()
     result: list[Path] = []
     for raw in paths:
@@ -829,7 +829,7 @@ def _dedupe_paths(paths: object) -> tuple[Path, ...]:
     return tuple(result)
 
 
-def _dedupe_covering_paths(paths: object) -> tuple[Path, ...]:
+def _dedupe_covering_paths(paths: Iterable[Path | str]) -> tuple[Path, ...]:
     ordered = sorted(_dedupe_paths(paths), key=lambda item: len(str(item)))
     result: list[Path] = []
     for path in ordered:

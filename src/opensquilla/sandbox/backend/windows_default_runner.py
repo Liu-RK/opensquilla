@@ -555,7 +555,10 @@ def _current_token_user_sid_string() -> str:
         if not advapi32.ConvertSidToStringSidW(user.Sid, ctypes.byref(string_sid)):
             code = ctypes.get_last_error()
             raise OSError(code, f"ConvertSidToStringSidW failed: {ctypes.FormatError(code)}")
-        return string_sid.value
+        sid = string_sid.value
+        if sid is None:
+            raise OSError(0, "ConvertSidToStringSidW returned no SID")
+        return sid
     finally:
         if string_sid:
             kernel32.LocalFree(string_sid)
@@ -791,6 +794,10 @@ def _revoke_path_for_sid(path: Path, sid: str) -> None:
         return
     try:
         _revoke_path_for_sid_native(path, sid)
+    except AttributeError:
+        if os.name != "nt":
+            return
+        raise
     except OSError as exc:
         raise SystemExit(
             f"windows_default ACL revoke failed for {path}: {exc}"
@@ -940,11 +947,23 @@ def _revoke_path_for_sid_native(path: Path, sid: str) -> None:
                 kernel32.LocalFree(pointer)
 
 
-def _deny_write_path_to_sid(path: Path, sid: str) -> None:
+def _deny_write_path_to_sid(
+    path: Path,
+    sid: str,
+    *,
+    include_read_control: bool = True,
+) -> None:
     if not path.exists():
         raise SystemExit(f"windows_default ACL deny-write target does not exist: {path}")
     try:
-        _deny_write_path_to_sid_native(path, sid)
+        if include_read_control:
+            _deny_write_path_to_sid_native(path, sid)
+        else:
+            _deny_write_path_to_sid_native(path, sid, include_read_control=False)
+    except AttributeError:
+        if os.name != "nt":
+            return
+        raise
     except OSError as exc:
         raise SystemExit(
             f"windows_default ACL deny-write failed for {path}: {exc}"
@@ -954,12 +973,7 @@ def _deny_write_path_to_sid(path: Path, sid: str) -> None:
 def _deny_file_mutation_path_to_sid(path: Path, sid: str) -> None:
     if not path.exists():
         raise SystemExit(f"windows_default ACL deny-write target does not exist: {path}")
-    try:
-        _deny_write_path_to_sid_native(path, sid, include_read_control=False)
-    except OSError as exc:
-        raise SystemExit(
-            f"windows_default ACL deny-write failed for {path}: {exc}"
-        ) from exc
+    _deny_write_path_to_sid(path, sid, include_read_control=False)
 
 
 def _deny_write_path_to_sid_native(

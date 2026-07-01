@@ -3077,7 +3077,8 @@ async def exec_command(
         )
         if path_access is not None:
             return json.dumps(path_access, ensure_ascii=False)
-    if windows_process_sandbox:
+    host_execution = _host_execution_allowed()
+    if windows_process_sandbox and not host_execution:
         command = _windows_translate_posix_tmp_references(command)
         if workdir:
             workdir = _windows_translate_posix_tmp_path(workdir)
@@ -3136,7 +3137,6 @@ async def exec_command(
     effective_timeout = _resolve_exec_timeout(timeout)
     stdin_bytes = stdin.encode("utf-8") if stdin is not None else None
 
-    host_execution = _host_execution_allowed()
     effective_timeout = _resolve_background_timeout(timeout)
 
     if runtime is not None and runtime.effective.sandbox_enabled and not host_execution:
@@ -3256,7 +3256,8 @@ async def background_process(
         )
         if path_access is not None:
             return json.dumps(path_access, ensure_ascii=False)
-    if windows_process_sandbox:
+    host_execution = _host_execution_allowed()
+    if windows_process_sandbox and not host_execution:
         command = _windows_translate_posix_tmp_references(command)
         if workdir:
             workdir = _windows_translate_posix_tmp_path(workdir)
@@ -3298,7 +3299,6 @@ async def background_process(
     deny_block = _workspace_write_deny_shell_block("background_process", command, cwd)
     if deny_block is not None:
         return json.dumps(deny_block, ensure_ascii=False)
-    host_execution = _host_execution_allowed()
     effective_timeout = _resolve_background_timeout(timeout)
 
     if runtime is not None and runtime.effective.sandbox_enabled and not host_execution:
