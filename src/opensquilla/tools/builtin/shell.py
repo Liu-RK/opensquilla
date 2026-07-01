@@ -110,6 +110,10 @@ _APPROVAL_RETRY_WAIT_SECONDS = 180.0
 _EXEC_TOOL_TIMEOUT_PADDING = _APPROVAL_RETRY_WAIT_SECONDS + 5.0
 _DEFAULT_BACKGROUND_TIMEOUT = 1800.0
 _MAX_BACKGROUND_TIMEOUT = 3600.0
+_DEFAULT_PROCESS_WAIT_TIMEOUT = 600.0
+_CODING_PROCESS_WAIT_TIMEOUT = 5400.0
+_MAX_PROCESS_WAIT_TIMEOUT = 5400.0
+_PROCESS_WAIT_TIMEOUT_PADDING = 5.0
 _BACKGROUND_TERMINATE_TIMEOUT = 1.0
 _BACKGROUND_KILL_TIMEOUT = 1.0
 _EXEC_TERMINATE_TIMEOUT = 0.25
@@ -202,7 +206,7 @@ _WINDOWS_SHELL_CREATE_COMMANDS = frozenset({"md", "mkdir", "new-item", "ni"})
 _WINDOWS_SHELL_CONTENT_COMMANDS = frozenset({"add-content", "out-file", "set-content"})
 _WINDOWS_SHELL_REMOVE_COMMANDS = frozenset({"del", "erase", "remove-item", "rm"})
 PROCESS_ACTIONS: frozenset[str] = frozenset(
-    {"eof", "kill", "list", "log", "poll", "remove", "submit", "write"}
+    {"eof", "kill", "list", "log", "poll", "remove", "submit", "wait", "write"}
 )
 
 # Background process session store
@@ -2654,6 +2658,24 @@ def _resolve_background_timeout(timeout: float | int | None) -> float:
     return max(0.01, min(value, _MAX_BACKGROUND_TIMEOUT))
 
 
+def _process_wait_default() -> float:
+    ctx = current_tool_context.get()
+    if ctx is not None and getattr(ctx, "coding_mode", False):
+        return _CODING_PROCESS_WAIT_TIMEOUT
+    return _DEFAULT_PROCESS_WAIT_TIMEOUT
+
+
+def _resolve_process_wait_timeout(timeout: float | int | None) -> float:
+    default = _process_wait_default()
+    if timeout is None:
+        return default
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return default
+    return max(0.01, min(value, _MAX_PROCESS_WAIT_TIMEOUT))
+
+
 def _effective_workdir(workdir: str | None) -> str | None:
     ctx = current_tool_context.get()
     if workdir:
@@ -3177,8 +3199,6 @@ async def exec_command(
     effective_timeout = _resolve_exec_timeout(timeout)
     stdin_bytes = stdin.encode("utf-8") if stdin is not None else None
 
-    effective_timeout = _resolve_background_timeout(timeout)
-
     if runtime is not None and runtime.effective.sandbox_enabled and not host_execution:
         if windows_process_sandbox:
             _apply_windows_session_tmp_env(merged_env)
@@ -3671,11 +3691,15 @@ def get_bg_session(session_id: str) -> _BgSession | None:
 
 @tool(
     name="process",
-    description="Manage background_process sessions created by OpenSquilla.",
+    description=(
+        "Manage background_process sessions created by OpenSquilla. To await a "
+        "long-running background command, call action='wait' (blocks until it "
+        "exits or the timeout elapses) instead of polling in a loop."
+    ),
     params={
         "action": {
             "type": "string",
-            "description": "Action: list, poll, log, kill, remove, write, submit, eof.",
+            "description": "Action: list, poll, wait, log, kill, remove, write, submit, eof.",
         },
         "session_id": {
             "type": "string",
@@ -3697,8 +3721,19 @@ def get_bg_session(session_id: str) -> _BgSession | None:
             "type": "integer",
             "description": "For log, maximum characters to return.",
         },
+        "timeout": {
+            "type": "number",
+            "description": (
+                "For wait: max seconds to block for the process to exit (default "
+                "600, max 5400). On timeout, returns with the process still "
+                "running so you can wait again."
+            ),
+        },
     },
     required=["action"],
+    execution_timeout_seconds=_DEFAULT_PROCESS_WAIT_TIMEOUT + _PROCESS_WAIT_TIMEOUT_PADDING,
+    execution_timeout_argument="timeout",
+    execution_timeout_padding=_PROCESS_WAIT_TIMEOUT_PADDING,
     sandbox=SandboxToolDescriptor.custom(kind="process", enforce=False),
 )
 async def process(
@@ -3708,6 +3743,7 @@ async def process(
     data: str | None = None,
     offset: int | None = None,
     limit: int | None = None,
+    timeout: float | None = None,
 ) -> str:
     if action == "list":
         sessions = [_bg_session_payload(session) for session in _iter_visible_bg_sessions()]
@@ -3719,6 +3755,30 @@ async def process(
     if action == "poll":
         return json.dumps(
             {"status": "ok", "action": action, "session": _bg_session_payload(session)}
+        )
+
+    if action == "wait":
+        wait_timeout = _resolve_process_wait_timeout(timeout)
+        exited = session.done or session.process.returncode is not None
+        if not exited:
+            exited = await _wait_bg_process(session, wait_timeout)
+        exited = exited or session.done or session.process.returncode is not None
+        if exited:
+            if session.collector_task is not None and not session.collector_task.done():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.shield(session.collector_task),
+                        timeout=_BACKGROUND_KILL_TIMEOUT,
+                    )
+            if not session.done:
+                await _finalize_bg_session_async(session)
+        return json.dumps(
+            {
+                "status": "ok",
+                "action": action,
+                "exited": bool(session.done or session.process.returncode is not None),
+                "session": _bg_session_payload(session),
+            }
         )
 
     if action == "log":
@@ -3829,4 +3889,4 @@ async def process(
             }
         )
 
-    raise ToolError("Invalid action: list|poll|log|kill|remove|write|submit|eof")
+    raise ToolError("Invalid action: list|poll|wait|log|kill|remove|write|submit|eof")
