@@ -88,6 +88,7 @@ METHOD_SCOPES: dict[str, str] = {
     "config.schema.lookup": READ_SCOPE,
     "sessions.get": READ_SCOPE,
     "sessions.list": READ_SCOPE,
+    "sessions.search": READ_SCOPE,
     "sessions.preview": READ_SCOPE,
     "sessions.resolve": READ_SCOPE,
     "sessions.subscribe": READ_SCOPE,

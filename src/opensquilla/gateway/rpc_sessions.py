@@ -936,6 +936,160 @@ async def _handle_sessions_list(params: dict | None, ctx: RpcContext) -> dict:
     return {"sessions": result, "count": len(result), "ts": now_ms}
 
 
+async def _titles_for_keys(storage: Any, keys: list[str], now_ms: int) -> dict[str, str]:
+    """Resolve canonical session_key -> sidebar title for a small set of keys.
+
+    Labels transcript (content) hits without rebuilding the whole session list.
+    Bounded by the search limit, so this is a handful of point lookups.
+    """
+    unique = list(dict.fromkeys(canonicalize_session_key(k) for k in keys if k))
+    sessions: list[Any] = []
+    for key in unique:
+        try:
+            node = await storage.get_session(key)
+        except Exception:
+            node = None
+        if node is not None:
+            sessions.append(node)
+    if not sessions:
+        return {}
+    transcript_titles = await _list_transcript_titles(storage, sessions)
+    out: dict[str, str] = {}
+    for node in sessions:
+        view = build_session_view_item(
+            node,
+            entry_count=0,
+            task_rows=[],
+            now_ms=now_ms,
+            transcript_title=transcript_titles.get(getattr(node, "session_id", ""), ""),
+        )
+        out[canonicalize_session_key(node.session_key)] = str(view.get("title") or "")
+    return out
+
+
+@_d.method("sessions.search", scope="operator.read")
+async def _handle_sessions_search(params: dict | None, ctx: RpcContext) -> dict:
+    """Search sessions by title and by transcript content.
+
+    ``sessions`` holds title matches across ALL sessions (not just a recent
+    page); ``messages`` holds content matches. Content search uses the ranked
+    FTS index for ASCII queries and a substring (LIKE) scan for queries the FTS
+    tokenizer can't segment (CJK and other non-ASCII scripts), so Chinese
+    conversations are searchable too. Covers every surface (webchat, channels,
+    cron) because the transcript store is shared. Titles are derived the same
+    way ``sessions.list`` derives them so results read like the sidebar.
+    """
+    now_ms = int(time.time() * 1000)
+    query = ""
+    limit = 20
+    if isinstance(params, dict):
+        query = str(params.get("query") or "").strip()
+        try:
+            limit = int(params.get("limit", 20))
+        except (TypeError, ValueError):
+            limit = 20
+    limit = max(1, min(limit, 50))
+
+    empty = {"sessions": [], "messages": [], "query": query, "ts": now_ms}
+    if not query or ctx.session_manager is None:
+        return empty
+    storage = get_session_storage(ctx.session_manager)
+    if storage is None:
+        return empty
+
+    # Title hits.
+    # Prefer the dedicated global query (matches every session, builds view rows
+    # only for the matches). Fall back to a bounded recent scan for storage
+    # doubles that don't implement it.
+    title_search = getattr(storage, "search_sessions_by_title", None)
+    if callable(title_search):
+        title_sessions = await title_search(query, limit)
+    else:
+        needle = query.lower()
+        recent = await storage.list_sessions(limit=200)
+        title_sessions = [
+            s
+            for s in recent
+            if needle
+            in " ".join(
+                p
+                for p in (
+                    str(getattr(s, "display_name", "") or ""),
+                    str(getattr(s, "derived_title", "") or ""),
+                    str(getattr(s, "subject", "") or ""),
+                )
+                if p
+            ).lower()
+        ][:limit]
+
+    transcript_titles = await _list_transcript_titles(storage, title_sessions)
+    session_hits: list[dict[str, Any]] = []
+    title_keys: set[str] = set()
+    for s in title_sessions:
+        view = build_session_view_item(
+            s,
+            entry_count=0,
+            task_rows=[],
+            now_ms=now_ms,
+            transcript_title=transcript_titles.get(getattr(s, "session_id", ""), ""),
+        )
+        title_keys.add(canonicalize_session_key(s.session_key))
+        session_hits.append(
+            {
+                "key": s.session_key,
+                "title": str(view.get("title") or ""),
+                "effectiveAgentId": view.get("effectiveAgentId"),
+                "surface": view.get("surface"),
+                "updatedAt": view.get("updatedAt"),
+            }
+        )
+
+    # Content hits.
+    # ASCII queries use the ranked, indexed FTS path. Non-ASCII queries (CJK and
+    # other scripts the FTS tokenizer can't segment) use a substring LIKE scan,
+    # the only option for them. ASCII deliberately has NO LIKE fallback so a
+    # common keystroke can never trigger an unbounded full-table content scan.
+    has_like = hasattr(storage, "search_transcript_like")
+    non_ascii = any(ord(ch) > 127 for ch in query)
+    rows: list[dict[str, Any]] = []
+    try:
+        if non_ascii:
+            if has_like:
+                rows = await storage.search_transcript_like(query, limit=limit)
+        else:
+            rows = await storage.search_transcript(query, limit=limit)
+    except Exception:
+        log.warning("sessions.search.transcript_failed", exc_info=True)
+        rows = []
+
+    # One row per session, never repeating a session already shown as a title
+    # hit, enriched with the session title via a small bounded lookup.
+    pending: list[tuple[str, str, dict[str, Any]]] = []
+    content_keys: set[str] = set()
+    for row in rows:
+        raw_key = str(row.get("session_key") or "")
+        canon = canonicalize_session_key(raw_key)
+        if not canon or canon in title_keys or canon in content_keys:
+            continue
+        content_keys.add(canon)
+        pending.append((raw_key, canon, row))
+
+    title_map = await _titles_for_keys(storage, [canon for _, canon, _ in pending], now_ms)
+    message_hits: list[dict[str, Any]] = []
+    for raw_key, canon, row in pending:
+        message_hits.append(
+            {
+                "key": raw_key,
+                "title": title_map.get(canon, ""),
+                "role": row.get("role"),
+                "snippet": row.get("snippet") or "",
+                "createdAt": row.get("created_at"),
+            }
+        )
+
+    return {"sessions": session_hits, "messages": message_hits, "query": query, "ts": now_ms}
+
+
 @_d.method("sessions.create", scope="operator.write")
 async def _handle_sessions_create(params: dict | None, ctx: RpcContext) -> dict:
     if not isinstance(params, dict):
