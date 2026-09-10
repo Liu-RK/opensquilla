@@ -674,6 +674,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             context_window_tokens_global_override=user_context_window,
             auto_max_tokens=auto_max_tokens,
             auto_max_tokens_known=auto_max_tokens_source in {"catalog", "override"},
+            seed=getattr(llm_cfg, "seed", None),
             temperature=getattr(llm_cfg, "temperature", None),
             top_p=getattr(llm_cfg, "top_p", None),
             provider_request_proof_max_chars=user_proof_max_chars,
@@ -791,6 +792,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             vision_support=cast(Any, vision_support),
             auto_max_tokens=limits.max_output_tokens,
             auto_max_tokens_known=limits.max_output_tokens_known,
+            seed=getattr(llm_cfg, "seed", None),
             temperature=getattr(llm_cfg, "temperature", None),
             top_p=getattr(llm_cfg, "top_p", None),
             provider_request_proof_max_chars=_positive_int_or_zero(

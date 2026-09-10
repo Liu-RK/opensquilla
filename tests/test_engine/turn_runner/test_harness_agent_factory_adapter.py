@@ -98,6 +98,17 @@ def test_model_catalog_adapter_defaults_to_200k_without_override() -> None:
     assert resolved.max_tokens == 32768
 
 
+def test_model_catalog_adapter_threads_request_seed() -> None:
+    from opensquilla.engine.turn_runner.harness import _TurnRunnerModelCatalogAdapter
+
+    llm = SimpleNamespace(max_tokens=32768, seed=42, temperature=None, top_p=None)
+    adapter = _TurnRunnerModelCatalogAdapter(_catalog_runner(llm=llm))
+
+    resolved = adapter.lookup("deepseek/deepseek-v4-pro")
+
+    assert resolved.seed == 42
+
+
 def test_model_catalog_adapter_honors_context_window_tokens_override() -> None:
     from opensquilla.engine.turn_runner.harness import _TurnRunnerModelCatalogAdapter
 

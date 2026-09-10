@@ -25,6 +25,14 @@ class _CapturingSelector:
         self.synced = cfg
 
 
+def test_llm_seed_loads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENSQUILLA_LLM_SEED", "42")
+
+    cfg = GatewayConfig()
+
+    assert cfg.llm.seed == 42
+
+
 def test_boot_resolves_direct_provider_env_key_and_base_url(
     monkeypatch,
 ) -> None:

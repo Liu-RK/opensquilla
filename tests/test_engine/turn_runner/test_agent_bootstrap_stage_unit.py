@@ -882,6 +882,7 @@ async def test_catalog_sampling_controls_thread_to_agent_config() -> None:
             max_tokens=8192,
             context_window=200_000,
             capabilities=None,
+            seed=42,
             temperature=1.0,
             top_p=0.95,
         )
@@ -890,6 +891,7 @@ async def test_catalog_sampling_controls_thread_to_agent_config() -> None:
 
     out = await stage.run(_make_input())
 
+    assert out.output.agent_config.seed == 42
     assert out.output.agent_config.temperature == 1.0
     assert out.output.agent_config.top_p == 0.95
 

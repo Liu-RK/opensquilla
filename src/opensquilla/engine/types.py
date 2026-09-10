@@ -681,6 +681,7 @@ class AgentConfig:
     # gate works even on providers/paths that never report real dollars.
     max_turn_cost_usd: float = 0.0
     max_turn_tool_errors: int = 0
+    seed: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     thinking: bool | ThinkingLevel = False

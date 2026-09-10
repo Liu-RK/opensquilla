@@ -70,6 +70,17 @@ class _SuccessfulProvider:
         yield DoneEvent(model="cheap/fallback")
 
 
+def test_agent_threads_seed_to_primary_provider_chat_config() -> None:
+    agent = Agent(provider=_SuccessfulProvider(), config=AgentConfig(seed=42))
+
+    chat_config = agent._provider_admission_chat_config(
+        "active user",
+        context_window_tokens=agent.config.context_window_tokens,
+    )
+
+    assert chat_config.seed == 42
+
+
 def test_strict_router_chain_fails_closed_for_legacy_selector_hook() -> None:
     class _LegacySelector:
         def __init__(self) -> None:

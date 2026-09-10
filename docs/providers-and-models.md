@@ -73,6 +73,24 @@ default**:
 API keys follow the same explicit-config-first rule via `api_key` /
 `api_key_env`.
 
+### Sampling seed
+
+Set `llm.seed` in TOML or `OPENSQUILLA_LLM_SEED` in the environment to include
+an integer `seed` in OpenAI-compatible Chat Completions requests:
+
+```toml
+[llm]
+seed = 42
+```
+
+This control is best-effort, not a cross-provider reproducibility guarantee.
+[OpenRouter documents `seed`](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request?explorer=true)
+as optional, while [OpenAI Chat Completions documents it as a deprecated beta](https://platform.openai.com/docs/api-reference/chat/message-list?lang=ruby).
+Provider and model support varies, unsupported endpoints may reject the field,
+and identical parameters can still produce different results after an upstream
+model or serving configuration changes. Leaving the setting unset preserves the
+previous request shape.
+
 ## Onboarding-Verified Providers
 
 This build exposes onboarding support for:

@@ -552,6 +552,7 @@ class ChatConfig(BaseModel):
     """Runtime options for a single chat call."""
 
     max_tokens: int = 16384
+    seed: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     system: str | None = None

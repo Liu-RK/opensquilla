@@ -104,6 +104,8 @@ model = "deepseek-v4-pro-0813"
 # api_key = ""          # TokenRhythm API key; env TOKENRHYTHM_API_KEY also works
 base_url = "https://tokenrhythm.studio/v1"
 # proxy = ""            # e.g. http://127.0.0.1:7890
+# seed = 42              # optional best-effort deterministic sampling seed;
+#                        # support and repeatability depend on provider/model
 
 # Provider quick reference. Support levels marked compat_mock_verified are
 # verified by local mocked-contract tests, not by live vendor calls.

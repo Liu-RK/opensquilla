@@ -78,11 +78,13 @@ def _tokenrhythm_caps() -> ModelCapabilities:
 
 def _config(
     *,
+    seed: int | None = None,
     thinking: bool = True,
     thinking_level: ThinkingLevel | None = ThinkingLevel.HIGH,
     tool_choice: Any | None = None,
 ) -> ChatConfig:
     return ChatConfig(
+        seed=seed,
         thinking=thinking,
         thinking_level=thinking_level,
         tool_choice=tool_choice,
@@ -416,7 +418,7 @@ def test_tokenrhythm_v4_unspecified_thinking_keeps_provider_default() -> None:
 
 def test_tokenrhythm_v4_runtime_thinking_fallback_sends_explicit_disabled() -> None:
     fallback_config = _chat_config_with_thinking_disabled(
-        _config(thinking=True, thinking_level=ThinkingLevel.HIGH)
+        _config(seed=42, thinking=True, thinking_level=ThinkingLevel.HIGH)
     )
 
     payload = _payload(
@@ -426,6 +428,7 @@ def test_tokenrhythm_v4_runtime_thinking_fallback_sends_explicit_disabled() -> N
     )
 
     assert payload["thinking"] == {"type": "disabled"}
+    assert payload["seed"] == 42
     assert "reasoning_effort" not in payload
 
 

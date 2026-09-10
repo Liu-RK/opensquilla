@@ -3230,6 +3230,8 @@ class OpenAIProvider:
             payload["usage"] = {"include": True}
         if self._compat.sends_disable_fallbacks:
             payload["disable_fallbacks"] = True
+        if cfg.seed is not None:
+            payload["seed"] = cfg.seed
         if (
             self._compat.anthropic_top_level_cache
             and cfg.cache_mode in {"auto", "on"}

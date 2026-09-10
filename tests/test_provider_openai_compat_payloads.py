@@ -4622,6 +4622,36 @@ def test_openrouter_still_sends_temperature(monkeypatch: Any) -> None:
     assert captured["payload"]["temperature"] == 0
 
 
+def test_openrouter_sends_seed_when_configured(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    _patch_transport(monkeypatch, captured)
+    provider = OpenAIProvider(
+        api_key="test",
+        model="deepseek/deepseek-v4-pro",
+        base_url="https://openrouter.ai/api/v1",
+        provider_kind="openrouter",
+    )
+
+    _collect(provider, ChatConfig(seed=42))
+
+    assert captured["payload"]["seed"] == 42
+
+
+def test_openrouter_omits_seed_by_default(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    _patch_transport(monkeypatch, captured)
+    provider = OpenAIProvider(
+        api_key="test",
+        model="deepseek/deepseek-v4-pro",
+        base_url="https://openrouter.ai/api/v1",
+        provider_kind="openrouter",
+    )
+
+    _collect(provider, ChatConfig())
+
+    assert "seed" not in captured["payload"]
+
+
 def test_openai_payload_omits_top_p_by_default(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
     _patch_transport(monkeypatch, captured)

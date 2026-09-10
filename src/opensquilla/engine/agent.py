@@ -2265,6 +2265,7 @@ def _classify_provider_attempt(
 def _chat_config_with_thinking_disabled(chat_cfg: ChatConfig) -> ChatConfig:
     return ChatConfig(
         max_tokens=chat_cfg.max_tokens,
+        seed=chat_cfg.seed,
         temperature=chat_cfg.temperature,
         top_p=chat_cfg.top_p,
         system=chat_cfg.system,
@@ -2953,6 +2954,7 @@ class Agent:
             )
         return ChatConfig(
             max_tokens=output_tokens,
+            seed=self.config.seed,
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             system=self.config.system_prompt or "",

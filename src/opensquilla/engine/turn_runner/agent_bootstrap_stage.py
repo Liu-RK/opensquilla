@@ -240,6 +240,7 @@ class _ResolvedCatalog:
     # default.
     auto_max_tokens: int = 0
     auto_max_tokens_known: bool = False
+    seed: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     # Explicit provider-request proof budget (chars); 0 keeps the derived path.
@@ -914,6 +915,7 @@ class AgentBootstrapStage:
                 else AgentConfig().length_capped_continuations
             ),
             max_tokens=catalog.max_tokens,
+            seed=catalog.seed,
             temperature=catalog.temperature,
             top_p=catalog.top_p,
             context_window_tokens=catalog.context_window,

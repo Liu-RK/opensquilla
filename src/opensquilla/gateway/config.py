@@ -432,6 +432,7 @@ class LlmProviderConfig(BaseSettings):
     # reporting for models the catalog does not know (e.g. direct DashScope
     # model ids that never appear in the OpenRouter catalog fetch).
     context_window_tokens: int = 0
+    seed: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     # Optional global thinking level: off|minimal|low|medium|high|xhigh|adaptive.
