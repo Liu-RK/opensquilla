@@ -329,6 +329,8 @@ def test_openrouter_runtime_uses_default_provider_routing() -> None:
     runtime = resolve_llm_runtime_config(cfg)
 
     assert runtime.provider_routing["deepseek/deepseek-v4-flash"] == "deepseek"
+    assert "deepseek/deepseek-v4-flash-0731" not in runtime.provider_routing
+    assert "deepseek/deepseek-v4-pro-0813" not in runtime.provider_routing
     assert runtime.provider_routing["z-ai/glm-5.1"] == "z-ai"
     assert runtime.provider_routing["z-ai/glm-5.2"] == "z-ai"
     assert runtime.provider_routing["anthropic/claude-opus-4.8"] == "anthropic"

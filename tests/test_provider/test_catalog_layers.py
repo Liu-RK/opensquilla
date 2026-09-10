@@ -67,6 +67,31 @@ def test_cold_instance_synthesizes_unknown_model() -> None:
     assert entry.quality_prior is None
 
 
+@pytest.mark.parametrize(
+    ("model", "context_window", "max_output_tokens"),
+    (
+        ("deepseek/deepseek-v4-flash-0731", 1_310_720, 393_216),
+        ("deepseek/deepseek-v4-pro-0813", 1_048_576, 393_216),
+    ),
+)
+def test_cold_instance_resolves_dated_openrouter_deepseek_models(
+    model: str,
+    context_window: int,
+    max_output_tokens: int,
+) -> None:
+    entry = ModelCatalog().resolve_entry(model, provider="openrouter")
+
+    assert entry.source == "corrections"
+    assert entry.context_window == context_window
+    assert entry.max_output_tokens == max_output_tokens
+    assert entry.supports_reasoning is True
+    assert entry.supports_tools is True
+    assert entry.supports_vision is False
+    assert entry.reasoning_format == "openrouter"
+    assert entry.input_cost_per_mtok is None
+    assert entry.output_cost_per_mtok is None
+
+
 def test_artifact_tool_capability_requires_an_explicit_catalog_fact() -> None:
     catalog = ModelCatalog()
     assert not catalog.tool_capability_is_verified(
@@ -321,6 +346,8 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
     assert set(payload["openrouter"]) == {
         "anthropic/claude-opus-4.8",
         "anthropic/claude-sonnet-4.6",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-pro-0813",
         "x-ai/grok-4.3",
         "stepfun/step-3.5-flash",
     }

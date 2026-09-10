@@ -115,6 +115,25 @@ max_output_tokens = 16384
 context_window = 256000
 max_output_tokens = 16384
 
+# Conservative offline metadata for dated DeepSeek V4 model ids. Live
+# OpenRouter catalog data remains authoritative when available. Pricing is
+# intentionally omitted because routed provider prices change independently.
+[openrouter."deepseek/deepseek-v4-flash-0731"]
+context_window = 1310720
+max_output_tokens = 393216
+supports_reasoning = true
+supports_tools = true
+supports_vision = false
+reasoning_format = "openrouter"
+
+[openrouter."deepseek/deepseek-v4-pro-0813"]
+context_window = 1048576
+max_output_tokens = 393216
+supports_reasoning = true
+supports_tools = true
+supports_vision = false
+reasoning_format = "openrouter"
+
 # --- capability ladder migration (transcribed from get_capabilities) ---
 #
 # Rows below carry the per-provider capability ladder that used to live as

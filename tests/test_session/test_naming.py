@@ -865,8 +865,17 @@ async def test_call_naming_llm_redacts_install_id_from_failure_log(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    (
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-pro-0813",
+    ),
+)
 async def test_call_naming_llm_disables_openrouter_reasoning_for_reasoning_models(
     monkeypatch,
+    model: str,
 ):
     captured: dict = {}
     monkeypatch.setattr(
@@ -876,7 +885,7 @@ async def test_call_naming_llm_disables_openrouter_reasoning_for_reasoning_model
 
     title = await call_naming_llm(
         "Help me reset my password please",
-        model="deepseek/deepseek-v4-pro",
+        model=model,
         api_key="test-key",
         base_url="https://openrouter.ai/api/v1",
     )

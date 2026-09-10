@@ -10,6 +10,8 @@ import pytest
 import structlog.testing
 
 from opensquilla.engine.types import ThinkingLevel
+from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 from opensquilla.provider.compat_policy import compat_policy_for_kind
 from opensquilla.provider.model_catalog import ModelCatalog
 from opensquilla.provider.openai import (
@@ -6395,6 +6397,56 @@ def test_openrouter_routing_pin_default_keeps_order_with_fallbacks(
         "order": ["deepseek"],
         "allow_fallbacks": True,
     }
+    assert done.stop_reason == "stop"
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-pro-0813",
+    ),
+)
+@pytest.mark.parametrize("strict", (False, True))
+def test_openrouter_dated_deepseek_v4_keeps_provider_selection_unpinned(
+    monkeypatch: Any,
+    model: str,
+    strict: bool,
+) -> None:
+    captured: dict[str, Any] = {}
+    chunks = [
+        {
+            "model": model,
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": None}],
+        },
+        {
+            "model": model,
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        },
+    ]
+    body = b"".join(f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks)
+    body += b"data: [DONE]\n\n"
+    _patch_transport_body(monkeypatch, captured, body)
+    if strict:
+        monkeypatch.setenv("OPENSQUILLA_PROVIDER_ROUTING_STRICT", "on")
+    else:
+        monkeypatch.delenv("OPENSQUILLA_PROVIDER_ROUTING_STRICT", raising=False)
+    runtime = resolve_llm_runtime_config(
+        GatewayConfig(llm={"provider": "openrouter", "model": model})
+    )
+    provider = OpenAIProvider(
+        api_key="test",
+        model=model,
+        base_url="https://openrouter.ai/api/v1",
+        provider_kind="openrouter",
+        provider_routing=runtime.provider_routing,
+    )
+
+    done = _collect(provider, ChatConfig(max_tokens=393_216))
+
+    assert "provider" not in captured["payload"]
+    assert captured["payload"]["max_tokens"] == 393_216
     assert done.stop_reason == "stop"
 
 
