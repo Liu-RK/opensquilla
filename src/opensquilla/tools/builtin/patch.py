@@ -196,6 +196,7 @@ def _parse_patch(patch_text: str) -> list[PatchOp]:
                     ):
                         hunk.lines.append(body[i])
                         i += 1
+                    _validate_hunk_body_counts(hunk)
                     hunks.append(hunk)
                 else:
                     i += 1
@@ -247,6 +248,22 @@ def _parse_hunk_header(header: str) -> Hunk:
         old_count=int(m.group(2) or "1"),
         new_start=int(m.group(3)),
         new_count=int(m.group(4) or "1"),
+    )
+
+
+def _validate_hunk_body_counts(hunk: Hunk) -> None:
+    """Reject malformed hunks before declared ranges can remove omitted lines."""
+
+    old_body_count = sum(bool(line) and line[0] in {" ", "-"} for line in hunk.lines)
+    new_body_count = sum(bool(line) and line[0] in {" ", "+"} for line in hunk.lines)
+    if old_body_count == hunk.old_count and new_body_count == hunk.new_count:
+        return
+    raise RetryableToolInputError(
+        "apply_patch hunk header declares "
+        f"{hunk.old_count} old line(s) and {hunk.new_count} new line(s), but the "
+        f"hunk body contains {old_body_count} old line(s) and {new_body_count} new "
+        "line(s). Retry with header counts that exactly match the context, deletion, "
+        "and addition lines in the hunk body. Omitted lines are not patch context."
     )
 
 
@@ -1006,7 +1023,8 @@ def _apply_ops(
         "Apply a structured patch to files. Supports adding, modifying, and deleting files "
         "using Begin Patch / End Patch markers with unified @@ or @@@ hunk headers. "
         "Prefer this for multi-line or larger source edits where edit_file JSON would "
-        "be long or fragile."
+        "be long or fragile. Numbered hunk header counts must exactly match the context, "
+        "deletion, and addition lines in each hunk body."
     ),
     params={
         "patch": {

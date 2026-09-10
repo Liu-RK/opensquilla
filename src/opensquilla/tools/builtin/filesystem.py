@@ -26,6 +26,10 @@ import structlog
 from opensquilla.sandbox.backup_vault import BackupReceiptSummary, summarize_backup_receipts
 from opensquilla.sandbox.destructive_backup import DestructiveBackupGate
 from opensquilla.sandbox.directory_listing import format_directory_entry
+from opensquilla.sandbox.edit_diagnostics import (
+    ambiguous_edit_guidance,
+    find_match_start_lines,
+)
 from opensquilla.sandbox.elevation import (
     ApprovalDisplay,
     ElevationAction,
@@ -2569,13 +2573,9 @@ def _existing_file_edit_alternatives() -> list[str]:
     return [name for name in ("edit_file", "apply_patch") if _tool_visible_in_current_context(name)]
 
 
-def _edit_file_retry_guidance(*, duplicate_match: bool = False) -> str:
+def _edit_file_retry_guidance() -> str:
     if _tool_visible_in_current_context("apply_patch"):
-        if duplicate_match:
-            return "or use apply_patch with a line-specific hunk."
         return "or use apply_patch with a precise hunk."
-    if duplicate_match:
-        return "or retry with a longer unique exact old_text/new_text replacement."
     return "or retry with a smaller exact old_text/new_text replacement."
 
 
@@ -2588,7 +2588,9 @@ def _edit_file_retry_guidance(*, duplicate_match: bool = False) -> str:
         "the same file, pass edits[] with old_text/new_text or oldText/newText "
         "entries. old_text must match file contents exactly and must not include "
         "read_file line-number prefixes such as '12\\t'. For large or line-oriented "
-        "changes, prefer apply_patch with a small hunk."
+        "changes, prefer apply_patch with a small hunk. When edit_file reports multiple "
+        "candidate lines, call read_file with offset/limit around the relevant candidates, "
+        "then retry with a longer unique old_text. Do not retry the same ambiguous old_text."
     ),
     params={
         "path": {"type": "string", "description": "Absolute path to the file to edit."},
@@ -3209,7 +3211,10 @@ def _apply_edit_replacements(
 ) -> str:
     spans: list[tuple[int, int, str, _EditReplacement]] = []
     for replacement in replacements:
-        count = original.count(replacement.old_text)
+        count, candidate_lines = find_match_start_lines(
+            original,
+            replacement.old_text,
+        )
         if count == 0:
             recovered = _recover_edit_replacement(
                 original,
@@ -3239,9 +3244,8 @@ def _apply_edit_replacements(
             continue
         if count > 1:
             raise RetryableToolInputError(
-                f"edit_file {replacement.label} matches {count} locations in {path}. "
-                "Retry with a longer old_text that includes unique surrounding context, "
-                f"{_edit_file_retry_guidance(duplicate_match=True)}"
+                f"edit_file {replacement.label} matches {count} locations in {path}.\n"
+                f"{ambiguous_edit_guidance(count, candidate_lines)}"
             )
         start = original.index(replacement.old_text)
         spans.append((start, start + len(replacement.old_text), replacement.new_text, replacement))

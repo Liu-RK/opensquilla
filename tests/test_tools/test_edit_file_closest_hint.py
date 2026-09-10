@@ -77,7 +77,35 @@ def test_apply_edit_multi_match_keeps_count_message_without_hint() -> None:
         )
     message = str(exc.value)
     assert "matches 2 locations" in message
+    assert "Candidate lines: 2, 5." in message
     assert "Did you mean" not in message
+
+
+def test_apply_edit_multi_match_can_report_the_same_line_twice() -> None:
+    with pytest.raises(RetryableToolInputError) as exc:
+        _apply_edit_replacements(
+            "value = 1; value = 1\n",
+            [_edit("value = 1", "value = 2")],
+            path="src/a.py",
+        )
+
+    assert "Candidate lines: 1, 1." in str(exc.value)
+
+
+def test_apply_edit_multi_match_limits_candidate_lines_to_twenty() -> None:
+    original = "".join(f"row {index}: repeated\n" for index in range(1, 26))
+    with pytest.raises(RetryableToolInputError) as exc:
+        _apply_edit_replacements(
+            original,
+            [_edit("repeated", "changed")],
+            path="src/a.py",
+        )
+
+    message = str(exc.value)
+    expected_lines = ", ".join(str(index) for index in range(1, 21))
+    assert "matches 25 locations" in message
+    assert f"Candidate lines: {expected_lines}." in message
+    assert "Additional matches omitted: 5" in message
 
 
 def test_hint_is_length_bounded_and_truncates_long_lines() -> None:

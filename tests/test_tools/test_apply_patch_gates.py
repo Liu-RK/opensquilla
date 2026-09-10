@@ -274,6 +274,46 @@ async def test_apply_patch_accepts_standard_unified_hunk(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_rejects_hunk_count_mismatch_without_deleting_omitted_lines(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "config" / "database.yml"
+    target.parent.mkdir()
+    original = (
+        "development:\n"
+        "  adapter: postgresql\n"
+        "  host: localhost\n"
+        "  port: 5432\n"
+        "  database: myapp_dev\n"
+        "  username: devuser\n"
+        "  password: dev_password_123\n"
+    )
+    target.write_text(original, encoding="utf-8")
+    token = current_tool_context.set(ToolContext(workspace_dir=str(tmp_path)))
+    apply_patch = _original_async(patch_tool.apply_patch)
+    try:
+        with pytest.raises(RetryableToolInputError, match="hunk header declares"):
+            await apply_patch(
+                """*** Begin Patch
+*** Update File: config/database.yml
+@@ -1,7 +1,7 @@
+ development:
+   adapter: postgresql
+-  host: localhost
++  host: prod-db.example.com
+   port: 5432
+-  database: myapp_dev
++  database: myapp_prod
+   username: devuser
+*** End Patch"""
+            )
+    finally:
+        current_tool_context.reset(token)
+
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_accepts_patch_text_from_configured_scratch_file(
     tmp_path: Path,
 ) -> None:

@@ -387,7 +387,9 @@ async def test_edit_file_ambiguous_old_text_is_model_retriable(tmp_path) -> None
         current_tool_context.reset(token)
 
     assert "matches 2 locations" in exc_info.value.user_message
-    assert "unique surrounding context" in exc_info.value.user_message
+    assert "Candidate lines: 1, 2." in exc_info.value.user_message
+    assert "Use read_file around the intended line" in exc_info.value.user_message
+    assert target.read_text(encoding="utf-8") == "flag = True\nflag = True\n"
 
 
 @pytest.mark.asyncio
@@ -656,6 +658,9 @@ def test_edit_file_schema_guides_multi_edit_and_numbered_read_output() -> None:
     assert "read_file without offset or limit" in description
     assert "line-number" in description
     assert "prefer apply_patch" in description
+    assert "multiple candidate lines" in description
+    assert "call read_file with offset/limit" in description
+    assert "Do not retry the same ambiguous old_text" in description
     assert edits["type"] == "array"
     assert "old_text" in edits["items"]["properties"]
     assert "oldText" in edits["items"]["properties"]

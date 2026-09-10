@@ -647,6 +647,53 @@ def test_edit_text_preserves_existing_file_when_utf8_encoding_fails(
     assert target.read_text(encoding="utf-8") == "before"
 
 
+def test_edit_text_reports_candidate_lines_without_modifying_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "config.yml"
+    original = (
+        "development:\n"
+        "  timeout: 30\n"
+        "\n"
+        "production:\n"
+        "  timeout: 30\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        filesystem_worker._edit_text(
+            {
+                "path": str(target),
+                "oldText": "  timeout: 30",
+                "newText": "  timeout: 60",
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "old_text matches 2 locations" in message
+    assert "Candidate lines: 2, 5." in message
+    assert "Use read_file around the intended line" in message
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_edit_text_rejects_empty_old_text_without_modifying_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "config.yml"
+    target.write_text("timeout: 30\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="old_text must not be empty"):
+        filesystem_worker._edit_text(
+            {
+                "path": str(target),
+                "oldText": "",
+                "newText": "unexpected",
+            }
+        )
+
+    assert target.read_text(encoding="utf-8") == "timeout: 30\n"
+
+
 def test_write_text_writes_chinese_and_emoji_as_exact_utf8_bytes(tmp_path: Path) -> None:
     target = tmp_path / "赛车.html"
     content = "OpenSquilla 体素竞速 🏁"

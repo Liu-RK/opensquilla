@@ -16,6 +16,10 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from opensquilla.sandbox.directory_listing import format_directory_entry
+from opensquilla.sandbox.edit_diagnostics import (
+    ambiguous_edit_guidance,
+    find_match_start_lines,
+)
 from opensquilla.sandbox.path_aliases import resolve_workspace_alias
 from opensquilla.sandbox.permissions import (
     FileSystemAccess,
@@ -560,14 +564,19 @@ def _edit_text(payload: dict[str, Any]) -> dict[str, object]:
     path = _enforce_candidate_access(payload, path, write=True)
     old_text = _required_string(payload, "oldText")
     new_text = _required_string(payload, "newText")
+    if not old_text:
+        raise ValueError("old_text must not be empty")
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
     original = path.read_text(encoding="utf-8")
     if old_text not in original:
         raise ValueError(f"old_text not found in {path}")
-    count = original.count(old_text)
+    count, candidate_lines = find_match_start_lines(original, old_text)
     if count > 1:
-        raise ValueError(f"old_text matches {count} locations in {path}; be more specific")
+        raise ValueError(
+            f"edit_file old_text matches {count} locations in {path}.\n"
+            f"{ambiguous_edit_guidance(count, candidate_lines)}"
+        )
     _write_utf8_safely(path, original.replace(old_text, new_text, 1), create=False)
     return {
         "message": f"Edited {path}: replaced {len(old_text)} chars with {len(new_text)} chars",
