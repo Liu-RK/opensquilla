@@ -23,6 +23,13 @@ from xml.etree import ElementTree as ET
 
 import structlog
 
+from opensquilla.safety.secret_redaction import (
+    REDACTED_SECRET_VALUE,
+    RedactedSecretResolutionError,
+    find_redacted_secret_matches,
+    redact_secret_text,
+    restore_redacted_secret_placeholders,
+)
 from opensquilla.sandbox.backup_vault import BackupReceiptSummary, summarize_backup_receipts
 from opensquilla.sandbox.destructive_backup import DestructiveBackupGate
 from opensquilla.sandbox.directory_listing import format_directory_entry
@@ -561,7 +568,7 @@ def _stream_numbered_lines_from_file(
     try:
         with p.open("rb") as fh:
             for lineno, raw_line in enumerate(fh, start=1):
-                line = raw_line.decode("utf-8")
+                line = redact_secret_text(raw_line.decode("utf-8"))
                 if lineno < start_line:
                     continue
                 if limit is not None and emitted >= limit:
@@ -2055,7 +2062,10 @@ def _format_spreadsheet(
         "Write full file content, creating directories as needed. Best for new "
         "files and scratch files. For existing workspace source files, first use "
         "read_file without offset or limit, then prefer edit_file for exact "
-        "replacements or apply_patch for multi-line hunks."
+        "replacements or apply_patch for multi-line hunks. When rewriting an existing "
+        "file, keep [REDACTED] at an unchanged secret field to preserve its current "
+        "value, or provide an explicit new value to replace it. A new file cannot "
+        "inherit a [REDACTED] value."
     ),
     params={
         "path": {"type": "string", "description": "Absolute path to write to."},
@@ -2103,6 +2113,7 @@ async def write_file(
     p = _resolve_path(path)
     if full_host_access_active():
         created = not p.exists()
+        content = _resolve_redacted_write_content(p, content, created=created)
 
         def _write_full_host() -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -2134,6 +2145,7 @@ async def write_file(
         return json.dumps(approval)
 
     created = not p.exists()
+    content = _resolve_redacted_write_content(p, content, created=created)
     if not created:
         require_fresh_workspace_file_read(p, tool_name="write_file", original_path=path)
         _gate_write_file_destructive_overwrite(p, content, original_path=path)
@@ -2200,6 +2212,23 @@ async def write_file(
         f"Written {len(content)} bytes to {p}{_write_scope_suffix(p)}"
         f"{_backup_receipt_note(backup_summaries)}"
     )
+
+
+def _resolve_redacted_write_content(path: Path, content: str, *, created: bool) -> str:
+    if REDACTED_SECRET_VALUE not in content:
+        return content
+    if created:
+        raise RetryableToolInputError(
+            "write_file cannot place [REDACTED] in a new file because there is no "
+            "existing secret to preserve. Provide the intended explicit value instead."
+        )
+    try:
+        original = path.read_text(encoding="utf-8")
+        return restore_redacted_secret_placeholders(original, content)
+    except RedactedSecretResolutionError as exc:
+        raise RetryableToolInputError(
+            f"write_file could not preserve a redacted secret: {exc}"
+        ) from exc
 
 
 def _resolve_scratch_write_path(path: str) -> tuple[Path, str]:
@@ -2587,7 +2616,9 @@ def _edit_file_retry_guidance(*, duplicate_match: bool = False) -> str:
         "pass old_text and new_text. For multiple non-overlapping replacements in "
         "the same file, pass edits[] with old_text/new_text or oldText/newText "
         "entries. old_text must match file contents exactly and must not include "
-        "read_file line-number prefixes such as '12\\t'. For large or line-oriented "
+        "read_file line-number prefixes such as '12\\t'. A [REDACTED] value in old_text "
+        "matches the hidden current secret; keep it in new_text to preserve the secret, "
+        "or provide an explicit new value to replace it. For large or line-oriented "
         "changes, prefer apply_patch with a small hunk."
     ),
     params={
@@ -2680,6 +2711,11 @@ async def edit_file(
             raise FileNotFoundError(f"File not found: {path}")
         loop = asyncio.get_event_loop()
         original = await loop.run_in_executor(None, p.read_text, "utf-8")
+        replacements = _resolve_redacted_edit_replacements(
+            original,
+            replacements,
+            path=path,
+        )
         updated = _apply_edit_replacements(original, replacements, path=path)
         before_fingerprint = fingerprint_path(p)
 
@@ -2726,6 +2762,20 @@ async def edit_file(
     if approval is not None:
         return json.dumps(approval)
     require_fresh_workspace_file_read(p, tool_name="edit_file", original_path=path)
+    if any(
+        REDACTED_SECRET_VALUE in replacement.old_text
+        or REDACTED_SECRET_VALUE in replacement.new_text
+        for replacement in replacements
+    ):
+        if not p.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        loop = asyncio.get_event_loop()
+        redacted_original = await loop.run_in_executor(None, p.read_text, "utf-8")
+        replacements = _resolve_redacted_edit_replacements(
+            redacted_original,
+            replacements,
+            path=path,
+        )
     workspace = _filesystem_operation_workspace()
     if workspace is not None:
         if len(replacements) == 1:
@@ -2819,7 +2869,8 @@ async def edit_file(
         "Atomically edit an existing UTF-8 source file using line ranges from a prior "
         "read_source receipt. Requires expected_revision from read_source; if the file "
         "changed since that read, the edit is rejected and must be retried after a new "
-        "read_source call."
+        "read_source call. Keep [REDACTED] in an unchanged secret field to preserve its "
+        "current value, or provide an explicit new value to replace it."
     ),
     params={
         "path": {
@@ -2849,7 +2900,10 @@ async def edit_file(
                     },
                     "replacement": {
                         "type": "string",
-                        "description": "Replacement source text for the full line range.",
+                        "description": (
+                            "Replacement source text for the full line range. A [REDACTED] "
+                            "secret preserves its corresponding current value."
+                        ),
                     },
                 },
                 "required": ["start_line", "end_line", "replacement"],
@@ -3264,6 +3318,61 @@ def _apply_edit_replacements(
         cursor = end
     chunks.append(original[cursor:])
     return "".join(chunks)
+
+
+def _resolve_redacted_edit_replacements(
+    original: str,
+    replacements: list[_EditReplacement],
+    *,
+    path: str,
+) -> list[_EditReplacement]:
+    resolved: list[_EditReplacement] = []
+    for replacement in replacements:
+        if REDACTED_SECRET_VALUE not in replacement.old_text:
+            if REDACTED_SECRET_VALUE in replacement.new_text:
+                raise RetryableToolInputError(
+                    f"edit_file {replacement.label} has no redacted source value to preserve "
+                    f"in {path}. Keep [REDACTED] in both old_text and new_text, or provide "
+                    "an explicit new value."
+                )
+            resolved.append(replacement)
+            continue
+
+        matches = find_redacted_secret_matches(original, replacement.old_text)
+        if not matches:
+            raise RetryableToolInputError(
+                f"edit_file could not match the redacted secret in {replacement.label} "
+                f"against {path}. Read the current file and retry with its surrounding context."
+            )
+        if len(matches) > 1:
+            candidate_lines = [
+                original.count("\n", 0, start) + 1 for start, _end in matches[:20]
+            ]
+            lines = ", ".join(str(line) for line in candidate_lines)
+            raise RetryableToolInputError(
+                f"edit_file {replacement.label} matches {len(matches)} redacted locations "
+                f"in {path}. Candidate lines: {lines}. Read around the intended line and "
+                "retry with longer unique surrounding context."
+            )
+        start, end = matches[0]
+        actual_old_text = original[start:end]
+        try:
+            resolved_new_text = restore_redacted_secret_placeholders(
+                actual_old_text,
+                replacement.new_text,
+            )
+        except RedactedSecretResolutionError as exc:
+            raise RetryableToolInputError(
+                f"edit_file could not preserve a redacted secret in {replacement.label}: {exc}"
+            ) from exc
+        resolved.append(
+            _EditReplacement(
+                old_text=actual_old_text,
+                new_text=resolved_new_text,
+                label=replacement.label,
+            )
+        )
+    return resolved
 
 
 _READ_FILE_LINE_PREFIX_RE = re.compile(r"^\s*\d+\t")

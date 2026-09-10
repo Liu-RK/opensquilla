@@ -299,6 +299,7 @@
       "tests/test_tools/test_path_policy.py",
       "tests/test_tools/test_policy_config_boundary.py",
       "tests/test_tools/test_presentation_rules.py",
+      "tests/test_tools/test_redacted_secret_editing.py",
       "tests/test_tools/test_restored_tool_contracts.py",
       "tests/test_tools/test_shell_managed_toolchains.py",
       "tests/test_tools/test_shell_policy_windows.py",

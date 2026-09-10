@@ -1416,6 +1416,7 @@
     "tests/test_tools/test_projected_arguments.py": 0.03,
     "tests/test_tools/test_registry_visibility.py": 0.134,
     "tests/test_tools/test_registry_visibility_boundary.py": 0.03,
+    "tests/test_tools/test_redacted_secret_editing.py": 0.01,
     "tests/test_tools/test_repeated_call_notice.py": 0.774,
     "tests/test_tools/test_restored_tool_contracts.py": 0.01,
     "tests/test_tools/test_router_control_tool.py": 0.022,

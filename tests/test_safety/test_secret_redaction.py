@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from opensquilla.safety.secret_redaction import redact_secret_text, redact_secret_value
+import pytest
+
+from opensquilla.safety.secret_redaction import (
+    RedactedSecretResolutionError,
+    redact_secret_text,
+    redact_secret_value,
+    restore_redacted_secret_placeholders,
+)
 
 
 def test_redact_secret_text_masks_env_assignments_and_provider_keys() -> None:
@@ -60,10 +67,58 @@ def test_redact_secret_text_masks_quoted_assignment_values() -> None:
     assert "client_secret:[REDACTED]" in redacted
 
 
+def test_redact_secret_text_masks_values_for_quoted_json_keys() -> None:
+    text = (
+        '{"password": "json_password", "api_key": "json_key", '
+        '"name": "visible"}'
+    )
+
+    redacted = redact_secret_text(text)
+
+    assert "json_password" not in redacted
+    assert "json_key" not in redacted
+    assert '"password": "[REDACTED]"' in redacted
+    assert '"api_key": "[REDACTED]"' in redacted
+    assert '"name": "visible"' in redacted
+
+
 def test_redact_secret_text_keeps_quoted_values_for_non_secret_keys() -> None:
-    text = 'name: "alice" retry_count = \'3\''
+    text = 'name: "alice" retry_count = \'3\' {"grantToken": "functional-token"}'
 
     assert redact_secret_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password=plain-secret\n",
+        "token: plain-token\n",
+        '{"password": "json-secret"}\n',
+        "Authorization: Bearer header-secret\n",
+    ],
+)
+def test_redact_secret_text_is_idempotent(text: str) -> None:
+    once = redact_secret_text(text)
+
+    assert redact_secret_text(once) == once
+
+
+@pytest.mark.parametrize("suffix", ["super-secret-tail", "_suffix"])
+def test_redact_secret_text_consumes_content_after_marker_prefix(suffix: str) -> None:
+    redacted = redact_secret_text(f"password=[REDACTED]{suffix}")
+
+    assert suffix not in redacted
+    assert redacted == "password=[REDACTED]"
+
+
+def test_restore_redacted_secret_rejects_unanchored_duplicate_lines() -> None:
+    original = "password: first-secret\npassword: second-secret\n"
+
+    with pytest.raises(RedactedSecretResolutionError, match="no unambiguous"):
+        restore_redacted_secret_placeholders(
+            original,
+            "password:[REDACTED]\n",
+        )
 
 
 def test_redact_secret_text_does_not_mask_token_counters() -> None:

@@ -7,6 +7,13 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from opensquilla.safety.secret_redaction import (
+    REDACTED_SECRET_VALUE,
+    RedactedSecretResolutionError,
+    redact_secret_text,
+    restore_redacted_secret_placeholders,
+)
+
 
 class SourceEditContractError(ValueError):
     """Raised when a source edit contract input cannot be applied."""
@@ -57,7 +64,7 @@ def build_line_receipt(
     """Build a model-facing read receipt with plain source lines."""
 
     text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    lines = [redact_secret_text(line) for line in text.splitlines()]
     total_lines = len(lines)
     effective_end_line = (
         min(total_lines, start_line + DEFAULT_SOURCE_READ_LINES - 1)
@@ -98,6 +105,7 @@ def _normalized_edits(
         raise SourceEditContractError("edits must be a non-empty array")
 
     line_count = _line_count(original)
+    original_lines = original.splitlines(keepends=True)
     normalized: list[tuple[int, int, list[str]]] = []
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict):
@@ -107,11 +115,23 @@ def _normalized_edits(
             end_line=edit.get("end_line"),
             line_count=line_count,
         )
+        replacement = edit.get("replacement")
+        if isinstance(replacement, str) and REDACTED_SECRET_VALUE in replacement:
+            original_range = "".join(original_lines[start - 1 : end])
+            try:
+                replacement = restore_redacted_secret_placeholders(
+                    original_range,
+                    replacement,
+                )
+            except RedactedSecretResolutionError as exc:
+                raise SourceEditContractError(
+                    f"edits[{index}].replacement could not preserve a redacted secret: {exc}"
+                ) from exc
         normalized.append(
             (
                 start,
                 end,
-                _replacement_lines(edit.get("replacement"), index=index),
+                _replacement_lines(replacement, index=index),
             )
         )
 

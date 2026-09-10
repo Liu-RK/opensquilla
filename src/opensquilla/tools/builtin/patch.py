@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from opensquilla.identity.workspace import BOOTSTRAP_FILENAMES
+from opensquilla.safety.secret_redaction import (
+    REDACTED_SECRET_VALUE,
+    RedactedSecretResolutionError,
+    redact_secret_text,
+    restore_redacted_secret_placeholders,
+)
 from opensquilla.sandbox.backup_vault import BackupReceiptSummary, summarize_backup_receipts
 from opensquilla.sandbox.destructive_backup import DestructiveBackupGate
 from opensquilla.sandbox.elevation import (
@@ -178,6 +184,11 @@ def _parse_patch(patch_text: str) -> list[PatchOp]:
                 if raw.startswith("+"):
                     content_lines.append(raw[1:])
                 i += 1
+            if any(REDACTED_SECRET_VALUE in content_line for content_line in content_lines):
+                raise RetryableToolInputError(
+                    "apply_patch cannot place [REDACTED] in a new file because there "
+                    "is no existing secret to preserve. Provide an explicit value instead."
+                )
             ops.append(AddFile(path=path, content="\n".join(content_lines)))
 
         elif line.startswith("*** Update File: "):
@@ -635,7 +646,14 @@ def _match_line(actual: str, expected: str) -> bool:
     """
     if actual == expected:
         return True
-    return actual.rstrip("\r\n").rstrip(" \t") == expected.rstrip("\r\n").rstrip(" \t")
+    normalized_actual = actual.rstrip("\r\n").rstrip(" \t")
+    normalized_expected = expected.rstrip("\r\n").rstrip(" \t")
+    if normalized_actual == normalized_expected:
+        return True
+    return (
+        REDACTED_SECRET_VALUE in normalized_expected
+        and redact_secret_text(normalized_actual) == normalized_expected
+    )
 
 
 def _apply_hunk(file_lines: list[str], hunk: Hunk) -> list[str]:
@@ -662,17 +680,39 @@ def _apply_hunk(file_lines: list[str], hunk: Hunk) -> list[str]:
                     "with hunk line numbers and context that match the file."
                 )
             if not _match_line(result[check_pos], content):
+                expected_display = redact_secret_text(content.rstrip("\n"))
+                actual_display = redact_secret_text(result[check_pos].rstrip("\n"))
                 raise RetryableToolInputError(
                     f"apply_patch context mismatch at line {check_pos + 1}: "
-                    f"expected {content.rstrip('\n')!r}, "
-                    f"got {result[check_pos].rstrip('\n')!r}. Read the current file "
+                    f"expected {expected_display!r}, "
+                    f"got {actual_display!r}. Read the current file "
                     "content and retry with exact surrounding context."
                 )
             check_pos += 1
 
+    proposed_lines = [
+        content if content.endswith("\n") else content + "\n"
+        for raw in hunk.lines
+        if raw and raw[0] in {" ", "+"}
+        for content in (raw[1:],)
+    ]
+    if any(REDACTED_SECRET_VALUE in line for line in proposed_lines):
+        original_block = "".join(result[pos:check_pos])
+        try:
+            proposed_block = restore_redacted_secret_placeholders(
+                original_block,
+                "".join(proposed_lines),
+            )
+        except RedactedSecretResolutionError as exc:
+            raise RetryableToolInputError(
+                f"apply_patch could not preserve a redacted secret: {exc}"
+            ) from exc
+        proposed_lines = proposed_block.splitlines(keepends=True)
+
     # Now build new lines
     new_lines: list[str] = []
     src_pos = pos
+    proposed_pos = 0
     for raw in hunk.lines:
         if not raw:
             continue
@@ -681,14 +721,12 @@ def _apply_hunk(file_lines: list[str], hunk: Hunk) -> list[str]:
         if prefix == " ":
             new_lines.append(result[src_pos])
             src_pos += 1
+            proposed_pos += 1
         elif prefix == "-":
             src_pos += 1  # skip (delete)
         elif prefix == "+":
-            # Preserve newline style: add \n if original lines have it
-            if content.endswith("\n"):
-                new_lines.append(content)
-            else:
-                new_lines.append(content + "\n")
+            new_lines.append(proposed_lines[proposed_pos])
+            proposed_pos += 1
 
     # Splice: replace [pos : pos + old_count] with new_lines
     return result[:pos] + new_lines + result[pos + hunk.old_count :]
@@ -1006,7 +1044,9 @@ def _apply_ops(
         "Apply a structured patch to files. Supports adding, modifying, and deleting files "
         "using Begin Patch / End Patch markers with unified @@ or @@@ hunk headers. "
         "Prefer this for multi-line or larger source edits where edit_file JSON would "
-        "be long or fragile."
+        "be long or fragile. A [REDACTED] value can match an existing context or deletion "
+        "line: keep it in the corresponding new line to preserve the secret, or provide "
+        "an explicit new value. Never introduce [REDACTED] without an existing secret."
     ),
     params={
         "patch": {
