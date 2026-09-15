@@ -2834,6 +2834,10 @@ class _SelectorFallbackProvider:
     def active_context_window_tokens(self) -> int:
         return self._active_fallback_limits()[0]
 
+    def compaction_chat_config(self, config: ChatConfig) -> ChatConfig:
+        """Use the current physical leg's request settings for suffix summaries."""
+        return cast(ChatConfig, self._config_for_active_leg(config))
+
     async def prepare_image_continuation(
         self, messages: list[Message], config: ChatConfig,
     ) -> ChatConfig | None:
@@ -6844,6 +6848,7 @@ class TurnRunner:
                         global_override=getattr(llm_cfg, "context_window_tokens", 0) or 0,
                     )
                     compaction_context_window_tokens = window
+            from opensquilla.session.compaction import compaction_prompt_layout
             from opensquilla.session.compaction_deployment import (
                 CompactionDeploymentIdentity,
                 resolve_compaction_execution_plan,
@@ -6954,6 +6959,7 @@ class TurnRunner:
                 app_config=self._turn_config(),
                 active_provider=provider,
                 active_provider_config=selector_current_config,
+                active_only=compaction_prompt_layout() == "suffix",
                 previous_deployment_identities=previous_deployment_identities,
                 fallback_provider_configs=selector_remaining_chain[1:],
                 compaction_config=configured_compaction,
@@ -6990,6 +6996,7 @@ class TurnRunner:
                     app_config=self._turn_config(),
                     active_provider=provider,
                     active_provider_config=fresh_current,
+                    active_only=compaction_prompt_layout() == "suffix",
                     previous_deployment_identities=(previous_deployment_identities),
                     fallback_provider_configs=fresh_chain[1:],
                     compaction_config=configured_compaction,
@@ -7158,6 +7165,11 @@ class TurnRunner:
                     authorize_write=attachment_workspace_write_authorizer(tool_context),
                 )
                 attachment_path_resolver = compaction_materializer.materialize_image_path
+            build_compaction_context = getattr(agent, "build_compaction_request_context", None)
+            compaction_request_context = (
+                build_compaction_context(effective_runtime_message)
+                if callable(build_compaction_context) else None
+            )
             with bind_usage_accounting_scope(turn_usage_scope):
                 mark_current_turn_failure_stage(TurnFailureStage.CONTEXT_PREPARATION)
                 compaction_correlation = derive_provider_request_correlation(
@@ -7175,6 +7187,7 @@ class TurnRunner:
                         compaction_provider=provider,
                         compaction_model=compaction_model,
                         compaction_plan=compaction_plan,
+                        compaction_request_context=compaction_request_context,
                         history_capacity_tokens=history_capacity_tokens,
                         history_capacity_chars=history_capacity_chars,
                         turn=turn,
@@ -12122,6 +12135,7 @@ class TurnRunner:
         compaction_provider: Any | None = None,
         compaction_model: str | None = None,
         compaction_plan: Any | None = None,
+        compaction_request_context: Any | None = None,
         attachment_path_resolver: Callable[[dict[str, Any], str], str | None] | None = None,
         history_capacity_tokens: int | None = None,
         history_capacity_chars: int | None = None,
@@ -12360,6 +12374,7 @@ class TurnRunner:
             )
             return _T3_HANDLED
         compaction_config = compaction_config or CompactionConfig()
+        compaction_config.request_context = compaction_request_context
         compaction_config.attachment_path_resolver = attachment_path_resolver
         compaction_config.protected_recent_messages = max(
             effective_protected_recent_messages(compaction_config),
@@ -12820,6 +12835,7 @@ class TurnRunner:
         compaction_provider: Any | None = None,
         compaction_model: str | None = None,
         compaction_plan: Any | None = None,
+        compaction_request_context: Any | None = None,
         attachment_path_resolver: Callable[[dict[str, Any], str], str | None] | None = None,
         history_capacity_tokens: int | None = None,
         history_capacity_chars: int | None = None,
@@ -12894,6 +12910,7 @@ class TurnRunner:
             )
         else:
             compaction_config = CompactionConfig()
+        compaction_config.request_context = compaction_request_context
         compaction_config.attachment_path_resolver = attachment_path_resolver
         if self.has_attempted_compaction_this_turn(session_key):
             log.info(
