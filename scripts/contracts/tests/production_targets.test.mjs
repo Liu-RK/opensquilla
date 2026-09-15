@@ -24,7 +24,28 @@ test('production cannot import or re-export the verification compiler', () => {
 test('production references exactly match the reviewed target policy', () => {
   const result = evaluateProductionTargets()
   assert.deepEqual(result.failures, [])
-  assert.equal(result.targets.length, 209)
+  assert.equal(result.targets.length, 216)
+  assert.deepEqual(result.targets.filter(target => (
+    target.startsWith('method:telemetry.product_active.record:')
+  )), ['method:telemetry.product_active.record:result'])
+  assert.deepEqual(result.targets.filter(target => (
+    target.startsWith('method:sessions.executionLog.read:')
+  )), [
+    'method:sessions.executionLog.read:params',
+    'method:sessions.executionLog.read:result',
+  ])
+  assert.deepEqual(result.targets.filter(target => (
+    target.startsWith('method:models.routing.resetRecommended:')
+  )), [
+    'method:models.routing.resetRecommended:params',
+    'method:models.routing.resetRecommended:result',
+  ])
+  assert.deepEqual(result.targets.filter(target => (
+    target.startsWith('method:onboarding.llmProfile.upsertAndActivate:')
+  )), [
+    'method:onboarding.llmProfile.upsertAndActivate:params',
+    'method:onboarding.llmProfile.upsertAndActivate:result',
+  ])
   assert.deepEqual(result.targets.filter(target => (
     target.startsWith('method:meta.list:') || target.startsWith('method:meta.inspect:')
   )), ['method:meta.inspect:result', 'method:meta.list:result'])

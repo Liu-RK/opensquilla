@@ -27,7 +27,6 @@ from opensquilla.provider.selector import ProviderConfig, build_provider_from_co
 from opensquilla.provider.types import ChatConfig, Message
 from opensquilla.session.compaction_deployment import (
     DEFAULT_COMPACTION_OUTPUT_TOKENS,
-    MAX_COMPACTION_LLM_CALLS,
     CompactionExecutionPlan,
     CompactionExecutionTarget,
     build_compaction_execution_plan_from_provider,
@@ -458,9 +457,6 @@ def resolve_selected_compaction_provider(
 def resolve_gateway_compaction_target(
     ctx: object,
     session: object | None,
-    *,
-    active_only: bool = False,
-    replay_provider_state: bool = False,
 ) -> GatewayCompactionTarget:
     """Resolve manual/preflight compaction without mutating selector state.
 
@@ -476,10 +472,6 @@ def resolve_gateway_compaction_target(
     compaction_config = getattr(gateway_config, "compaction", None)
     configured_provider = _text(getattr(compaction_config, "provider", None)).lower()
     configured_model = _text(getattr(compaction_config, "model", None))
-    if active_only:
-        # Exact suffix compaction is tied to the recorded parent deployment.
-        configured_provider = ""
-        configured_model = ""
     auth_profile_override = _text(
         getattr(session, "auth_profile_override", None)
     )
@@ -607,25 +599,24 @@ def resolve_gateway_compaction_target(
             "selector_current",
         )
 
-    if not active_only:
-        # A failed explicit/session/model override must not suppress the current
-        # physical deployment. Use its native model for the recovery candidate.
-        add_candidate(inherited_provider, inherited_model, "selector_current")
-        remaining_chain = getattr(selector, "remaining_chain", None)
-        if callable(remaining_chain):
-            try:
-                remaining_configs = list(remaining_chain())
-            except Exception:  # noqa: BLE001 - optional read-only selector view
-                remaining_configs = []
-            for index, fallback_config in enumerate(remaining_configs):
-                if not isinstance(fallback_config, ProviderConfig):
-                    continue
-                add_candidate(
-                    _text(fallback_config.provider).lower(),
-                    _text(fallback_config.model),
-                    "selector_current" if index == 0 else "selector_fallback",
-                    provider_config=fallback_config,
-                )
+    # A failed explicit/session/model override must not suppress the current
+    # physical deployment. Use its native model for the recovery candidate.
+    add_candidate(inherited_provider, inherited_model, "selector_current")
+    remaining_chain = getattr(selector, "remaining_chain", None)
+    if callable(remaining_chain):
+        try:
+            remaining_configs = list(remaining_chain())
+        except Exception:  # noqa: BLE001 - optional read-only selector view
+            remaining_configs = []
+        for index, fallback_config in enumerate(remaining_configs):
+            if not isinstance(fallback_config, ProviderConfig):
+                continue
+            add_candidate(
+                _text(fallback_config.provider).lower(),
+                _text(fallback_config.model),
+                "selector_current" if index == 0 else "selector_fallback",
+                provider_config=fallback_config,
+            )
 
     if auth_profile_override and auth_profile_bound_provider:
         # A named profile's provider is a credential boundary, not routing
@@ -726,7 +717,6 @@ def resolve_gateway_compaction_target(
                 ctx,
                 named.provider_config,
                 source=named_source,
-                replay_provider_state=replay_provider_state,
             )
         except Exception as exc:  # noqa: BLE001 - a named target cannot fall back
             log.warning(
@@ -743,8 +733,6 @@ def resolve_gateway_compaction_target(
                 source="auth_profile_unresolved",
                 blocked_reason="named_auth_profile_provider_build_failed",
             )
-        if active_only:
-            plan = CompactionExecutionPlan(candidates=(plan.primary,), max_calls=1)
         return GatewayCompactionTarget(
             provider=plan.primary.provider,
             plan=plan,
@@ -767,7 +755,7 @@ def resolve_gateway_compaction_target(
                 candidate.model,
                 inherited_provider_config=inherited,
                 session_key=_text(getattr(session, "session_key", None)),
-                replay_provider_state=replay_provider_state,
+                replay_provider_state=False,
                 credential_pool_acquirer=acquire_profile_credential,
             )
             provider_config = resolution.provider_config
@@ -779,7 +767,6 @@ def resolve_gateway_compaction_target(
                     ctx,
                     provider_config,
                     source=candidate.source,
-                    replay_provider_state=replay_provider_state,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -810,8 +797,7 @@ def resolve_gateway_compaction_target(
 
     if resolved_targets:
         plan = CompactionExecutionPlan(
-            candidates=(resolved_targets[0],) if active_only else tuple(resolved_targets),
-            max_calls=1 if active_only else MAX_COMPACTION_LLM_CALLS,
+            candidates=tuple(resolved_targets),
         )
         return GatewayCompactionTarget(
             provider=plan.primary.provider,
@@ -819,14 +805,6 @@ def resolve_gateway_compaction_target(
             provider_id=plan.primary.provider_id,
             model=plan.primary.model,
             source=plan.primary.source,
-        )
-
-    if active_only and candidates:
-        return GatewayCompactionTarget(
-            provider_id=preferred_provider,
-            model=preferred_model,
-            source=preferred_source,
-            blocked_reason="active_compaction_deployment_unavailable",
         )
 
     # Selector-shaped compatibility doubles may not expose a complete current
@@ -1109,7 +1087,6 @@ def _build_plan(
     provider_config: ProviderConfig,
     *,
     source: str,
-    replay_provider_state: bool = False,
 ) -> CompactionExecutionPlan:
     provider_id = _text(provider_config.provider).lower()
     model = _text(provider_config.model)
@@ -1124,7 +1101,6 @@ def _build_plan(
         max_output_tokens=output_tokens,
         provider_request_max_chars=request_max_chars,
         source=source,
-        replay_provider_state=replay_provider_state,
     )
 
 

@@ -455,7 +455,7 @@ def test_only_the_exact_production_sessions_list_schema_is_grandfathered(
     ("lifecycle", "canonical_alias", "message"),
     [
         ("legacy", None, "canonicalAlias"),
-        ("stable", "sessions.contextCompact", "stable method"),
+        ("stable", "exec.approval.status", "stable method"),
         ("legacy", "bad alias", "canonicalAlias"),
     ],
 )
@@ -465,14 +465,14 @@ def test_legacy_method_lifecycle_requires_one_legal_canonical_alias(
     canonical_alias: str | None,
     message: str,
 ) -> None:
-    document = _method_schema("sessions.compact")
+    document = _method_schema("plugin.approval.status")
     method = document["x-opensquilla-method"]
     method["lifecycle"] = lifecycle
     if canonical_alias is not None:
         method["canonicalAlias"] = canonical_alias
     schema = _write_schema(
         tmp_path,
-        "sessions/sessions-compact.schema.json",
+        "approvals/plugin-approval-status.schema.json",
         document,
     )
 
@@ -488,27 +488,39 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     manifest = json.loads(first)
 
     assert first == second
+    assert runner.COMPATIBILITY_MANIFEST_OUTPUT.read_text(encoding="utf-8") == first
     assert manifest["format"] == 1
     assert manifest["protocol"] == runner.GATEWAY_PROTOCOL
     assert manifest["wireVersion"] == 4
     assert manifest["source"] == {
-        "schemaCount": 221,
-        "methodCount": 211,
+        "schemaCount": 224,
+        "methodCount": 214,
         "eventFamilyCount": 10,
         "schemaTreeSha256": runner._schema_tree_digest(specs),
         "generatorSha256": runner._generator_digest(),
     }
     assert Counter(entry["lifecycle"] for entry in manifest["methods"]) == {
-        "stable": 206,
-        "legacy": 5,
+        "stable": 211,
+        "legacy": 3,
     }
+    assert [
+        entry["lifecycle"]
+        for entry in manifest["methods"]
+        if entry["name"] == "telemetry.product_active.record"
+    ] == ["stable"]
+    profile_save_activate = next(
+        entry for entry in manifest["methods"]
+        if entry["name"] == "onboarding.llmProfile.upsertAndActivate"
+    )
+    assert profile_save_activate["lifecycle"] == "stable"
+    assert profile_save_activate["schema"] == (
+        "platform/onboarding-llm-profile-upsert-and-activate.schema.json"
+    )
     assert {
         entry["name"]: entry["canonicalName"]
         for entry in manifest["methods"]
         if entry["lifecycle"] == "legacy"
     } == {
-        "sessions.compact": "sessions.contextCompact",
-        "sessions.steer": "sessions.steer.v2",
         "plugin.approval.status": "exec.approval.status",
         "plugin.approval.resolve": "exec.approval.resolve",
         "plugin.approval.extend": "exec.approval.extend",
@@ -812,6 +824,7 @@ def test_registration_descriptor_exposes_uniform_validation_models() -> None:
     specs = runner.discover_contracts()
 
     rendered = runner.render_registration_descriptor(specs)
+    assert runner.REGISTRATION_OUTPUT.read_text(encoding="utf-8") == rendered
 
     assert "class GatewayMethodContract:" in rendered
     assert "GATEWAY_METHOD_CONTRACTS: Final[dict[str, GatewayMethodContract]]" in rendered

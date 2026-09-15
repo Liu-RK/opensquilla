@@ -33,6 +33,9 @@
     </template>
 
     <template #actions="{ item }">
+      <ResourceActionsMenu v-if="item && resourceActionArtifact(item)" :key="item.id"
+        :artifact="resourceActionArtifact(item)!" :session-key="sessionKeyFromWorkbenchItem(item)"
+        :previewable="false" trigger />
       <select
         v-if="artifactNavigationItems(item).length > 1"
         class="app-workbench__switcher"
@@ -181,6 +184,7 @@ import { useToasts } from '@/composables/useToasts'
 import { usePlatform } from '@/platform'
 import type { NativeWorkbenchSurfaceEvent } from '@/platform/types'
 import { useArtifactDocumentsStore } from '@/stores/artifactDocuments'
+import ResourceActionsMenu from '@/components/ResourceActionsMenu.vue'
 import { useArtifactPromptAnnotationsStore } from '@/stores/artifactPromptAnnotations'
 import { useWorkbenchResourcesStore } from '@/stores/workbenchResources'
 import type { ArtifactPayload } from '@/types/artifacts'
@@ -197,6 +201,7 @@ import { workbenchPanelRegistry } from '@/workbench/registry'
 import {
   artifactWorkbenchItemId,
   artifactFromWorkbenchItem,
+  fileActionArtifactFromWorkbenchItem,
   createArtifactPreviewWorkbenchItem,
   navigationArtifactsFromWorkbenchItem,
   previewableNavigationArtifactsFromWorkbenchItem,
@@ -409,10 +414,6 @@ for (const definition of createArtifactWorkbenchDefinitions({
   previewLeasesEnabled: true,
   pushToast: (message, options) => pushToast(message, options),
   savePreviewPreferences: preferences => savePreviewPreferences(platform, preferences),
-  showFullPreviewNotice: () => pushToast(
-    t('workbench.artifactPreview.fullModeNotice'),
-    { tone: 'info', duration: 9000 },
-  ),
   t: (key, params) => String(t(key, params || {})),
 })) {
   workbenchPanelRegistry.register(definition, { replace: true })
@@ -791,6 +792,10 @@ function panelToolbarItems(
   ) || []
 }
 
+function resourceActionArtifact(item: WorkbenchItem): ArtifactPayload | undefined {
+  return fileActionArtifactFromWorkbenchItem(item, runtimeManager.getRenderState(item.id))
+}
+
 function isActiveAnnotationToolbarItem(toolbarItem: WorkbenchToolbarItem): boolean {
   return toolbarItem.kind === 'action'
     && toolbarItem.id === 'toggle-annotation-mode'
@@ -948,6 +953,7 @@ async function onPromptAnnotationFocus(event: Event) {
   try {
     const result = await nativeApi.focusWorkbenchAnnotation({
       surfaceId: item.id, targetRef: draft.targetRef, locatorHint: draft.locatorHint,
+      ...(draft.pagePath ? { pagePath: draft.pagePath } : {}),
     })
     detail.complete?.(result.ok)
   } catch {

@@ -12,7 +12,7 @@ import sys
 from collections import Counter
 from collections.abc import AsyncIterator, Iterator, Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -51,7 +51,8 @@ from .error_redaction import (
     redact_upstream_error_text,
     redacted_httpx_error,
 )
-from .failures import retry_after_from_headers
+from .extra_body import merge_extra_body, normalize_extra_body
+from .failures import CONNECTION_FAILED_CODE, is_connection_failure, retry_after_from_headers
 from .fx import TOKENRHYTHM_CNY_PER_USD, TOKENRHYTHM_CNY_PER_USD_NANOS
 from .model_catalog import shared_catalog
 from .model_identity import (
@@ -251,7 +252,7 @@ def _is_inert_post_terminal_stream_frame(
         return False
 
     if not raw_choices:
-        return has_usage
+        return has_usage or policy.allow_post_terminal_empty_choices
     if not policy.allow_post_terminal_noop_choice or len(raw_choices) != 1:
         return False
 
@@ -376,6 +377,17 @@ def _model_listing_max_output(row: Mapping[str, Any]) -> int:
     raw_top_provider = row.get("top_provider")
     top_provider = raw_top_provider if isinstance(raw_top_provider, Mapping) else {}
     return _positive_model_listing_int(top_provider.get("max_completion_tokens"))
+
+
+def _model_listing_supports_vision(row: Mapping[str, Any]) -> bool:
+    """Read the standard OpenRouter modality declaration when present."""
+    architecture = row.get("architecture")
+    if not isinstance(architecture, Mapping):
+        return False
+    modalities = architecture.get("input_modalities")
+    if not isinstance(modalities, list):
+        return False
+    return any(str(modality).strip().lower() == "image" for modality in modalities)
 
 
 def _dashscope_endpoint_family(base_url: str) -> str:
@@ -3112,6 +3124,7 @@ class OpenAIProvider:
         compat: OpenAICompatPolicy | None = None,
         replay_provider_state: bool = True,
         provider_id: str | None = None,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         self._api_key = clean_header_secret(api_key, label="LLM API key")
         self._model = model
@@ -3137,7 +3150,16 @@ class OpenAIProvider:
         # DashScope or OpenRouter instance to OpenAI, which is exactly what
         # this field exists to prevent.
         self.provider_id = (provider_id or self._provider_kind).strip()
-        self._compat = compat or compat_policy_for_kind(self._provider_kind)
+        if extra_body and self.provider_id.lower() != "custom":
+            raise ValueError("extra_body is supported only for provider 'custom'")
+        self._extra_body = normalize_extra_body(extra_body)
+        compat_policy = compat or compat_policy_for_kind(self._provider_kind)
+        if self.provider_id.lower() == "custom":
+            compat_policy = replace(
+                compat_policy,
+                allow_post_terminal_empty_choices=True,
+            )
+        self._compat = compat_policy
         self._replay_provider_state = replay_provider_state
         self._replay_source = _openai_replay_source(self._provider_kind, self._base_url)
         self._replay_captured_reasoning_content = (
@@ -3547,6 +3569,7 @@ class OpenAIProvider:
             cfg=cfg,
             has_tools=bool(tools),
         )
+        merge_extra_body(payload, self._extra_body)
         fallback_reason = (
             "native_is_error_unavailable"
             if any(message.get("role") == "tool" for message in openai_messages)
@@ -5278,17 +5301,22 @@ class OpenAIProvider:
             )
             raise
         except httpx.TimeoutException as exc:
+            code = CONNECTION_FAILED_CODE if is_connection_failure(exc) else "timeout"
             safe_error = redact_upstream_error_text(
                 f"Request timed out: {str(exc) or repr(exc)}",
                 api_key=self._api_key,
                 max_len=2000,
             )
             trace.record_error(
-                code="timeout",
+                code=code,
                 message=safe_error,
                 metadata={"phase": "stream", "cache_shape": cache_shape},
             )
-            if stream_timeout_fallback and not emitted_stream_event:
+            if (
+                stream_timeout_fallback
+                and not emitted_stream_event
+                and code != CONNECTION_FAILED_CODE
+            ):
                 event_name = (
                     "openrouter.stream_timeout_fallback_started"
                     if self._provider_kind == "openrouter"
@@ -5378,15 +5406,16 @@ class OpenAIProvider:
                     visible_assistant_text_parts.append(deferred_event.text)
                 yield deferred_event
             deferred_post_native_events.clear()
-            yield ErrorEvent(message=safe_error, code="timeout")
+            yield ErrorEvent(message=safe_error, code=code)
         except httpx.RequestError as exc:
+            code = CONNECTION_FAILED_CODE if is_connection_failure(exc) else "request_error"
             safe_error = redact_upstream_error_text(
                 f"Request error: {str(exc) or repr(exc)}",
                 api_key=self._api_key,
                 max_len=2000,
             )
             trace.record_error(
-                code="request_error",
+                code=code,
                 message=safe_error,
                 metadata={"phase": "stream", "cache_shape": cache_shape},
             )
@@ -5405,7 +5434,7 @@ class OpenAIProvider:
                     visible_assistant_text_parts.append(deferred_event.text)
                 yield deferred_event
             deferred_post_native_events.clear()
-            yield ErrorEvent(message=safe_error, code="request_error")
+            yield ErrorEvent(message=safe_error, code=code)
         except CandidateArtifactLimitError as exc:
             message = "Candidate artifact exceeded bounded assembly limits"
             log.warning(
@@ -5572,6 +5601,8 @@ class OpenAIProvider:
                     json=fallback_payload,
                 )
         except httpx.TimeoutException:
+            # The earlier stream may have been accepted; keep compatibility retries finite.
+            code = "timeout"
             safe_error = redact_upstream_error_text(
                 f"Request timed out: {str(timeout_exc) or repr(timeout_exc)}",
                 api_key=self._api_key,
@@ -5584,24 +5615,25 @@ class OpenAIProvider:
                 timeout_phase=type(timeout_exc).__name__,
             )
             trace.record_error(
-                code="timeout",
+                code=code,
                 message=safe_error,
                 metadata={"phase": "non_stream_fallback", "cache_shape": cache_shape},
             )
-            yield ErrorEvent(message=safe_error, code="timeout")
+            yield ErrorEvent(message=safe_error, code=code)
             return
         except httpx.RequestError as exc:
+            code = "request_error"
             safe_error = redact_upstream_error_text(
                 f"Request error: {str(exc) or repr(exc)}",
                 api_key=self._api_key,
                 max_len=2000,
             )
             trace.record_error(
-                code="request_error",
+                code=code,
                 message=safe_error,
                 metadata={"phase": "non_stream_fallback", "cache_shape": cache_shape},
             )
-            yield ErrorEvent(message=safe_error, code="request_error")
+            yield ErrorEvent(message=safe_error, code=code)
             return
 
         response_ids: set[str] = set()
@@ -6449,6 +6481,7 @@ class OpenAIProvider:
                             display_name=m.get("name", m.get("id", "")),
                             context_window=m.get("context_length", 0),
                             max_output_tokens=_model_listing_max_output(m),
+                            supports_vision=_model_listing_supports_vision(m),
                         )
                         for m in rows
                         if m.get("id")

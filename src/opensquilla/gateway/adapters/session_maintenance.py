@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 import structlog
 
 from opensquilla.agent_ids import normalize_agent_id
+from opensquilla.agents.scope import resolve_agent_workspace_dir
 from opensquilla.application.session_maintenance import (
     CompactSession,
     SessionCompactionDeadlineError,
@@ -40,6 +41,10 @@ from opensquilla.application.session_maintenance import (
     SessionCompactionUsagePort,
     SessionMaintenance,
 )
+from opensquilla.attachment_workspace import (
+    AttachmentWorkspaceMaterializer,
+    workspace_attachment_budget_from_config,
+)
 from opensquilla.engine.cache_break_monitor import (
     compaction_terminal_status,
     notify_compaction,
@@ -54,6 +59,7 @@ from opensquilla.gateway.compaction_target import (
     resolve_gateway_compaction_target,
     resolve_gateway_consumer_budget,
 )
+from opensquilla.gateway.project_workspace_runtime import resolve_session_project_workspace
 from opensquilla.gateway.rpc.registry import RpcContext, RpcHandlerError
 from opensquilla.gateway.session_event_publisher import (
     buffer_session_event,
@@ -68,13 +74,14 @@ from opensquilla.gateway.usage_ledger_runtime import build_session_usage_scope
 from opensquilla.observability.network_policy import (
     provider_request_correlation_disabled,
 )
+from opensquilla.paths import media_root_from_config
+from opensquilla.project_workspaces import ProjectWorkspaceStateError
 from opensquilla.provider.types import (
     ProviderRequestCorrelation,
     derive_provider_request_correlation,
 )
 from opensquilla.session.compaction import (
     CompactionConfig,
-    CompactionParentRequest,
     arm_compaction_deadline,
     await_compaction_phase,
     build_compaction_config_from_provider,
@@ -97,6 +104,7 @@ from opensquilla.session.compaction_lifecycle import (
     pre_compaction_flush_requires_safe_receipt,
 )
 from opensquilla.session.keys import canonicalize_session_key
+from opensquilla.session.models import SessionNode
 
 log = structlog.get_logger(__name__)
 
@@ -123,7 +131,6 @@ class _GatewayCompactionPlan:
     config: CompactionConfig
     compaction_correlation: ProviderRequestCorrelation | None
     flush_correlation: ProviderRequestCorrelation | None
-    parent_request: CompactionParentRequest | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +175,7 @@ class GatewaySessionMaintenancePorts(
         self._context = context
         self._manager = context.session_manager
         self._storage = get_session_storage(self._manager)
+        self._attachment_workspace_dirs: dict[str, Path] = {}
 
     def timing(self) -> SessionCompactionTiming:
         settings = getattr(getattr(self._context, "config", None), "compaction", None)
@@ -213,6 +221,30 @@ class GatewaySessionMaintenancePorts(
         if session is None:
             return None
         session_id = getattr(session, "session_id", None)
+        gateway_config = self._context.config
+        if isinstance(session_id, str) and session_id:
+            self._attachment_workspace_dirs.pop(session_id, None)
+        if (
+            isinstance(session_id, str) and session_id and gateway_config is not None
+            and getattr(
+                getattr(gateway_config, "attachments", None), "persist_transcripts", True
+            ) is not False
+        ):
+            if getattr(session, "workspace_id", None):
+                if self._storage is not None:
+                    try:
+                        project = await resolve_session_project_workspace(
+                            self._storage, cast(SessionNode, session)
+                        )
+                    except ProjectWorkspaceStateError:
+                        project = None
+                    if project is not None:
+                        self._attachment_workspace_dirs[session_id] = Path(project.canonical_path)
+            else:
+                self._attachment_workspace_dirs[session_id] = resolve_agent_workspace_dir(
+                    normalize_agent_id(getattr(session, "agent_id", None) or "main"),
+                    gateway_config,
+                )
         return SessionCompactionSession(
             session_id=(session_id if isinstance(session_id, str) and session_id else None),
             agent_id=normalize_agent_id(getattr(session, "agent_id", None) or "main"),
@@ -256,39 +288,7 @@ class GatewaySessionMaintenancePorts(
     ) -> SessionCompactionPlan:
         raw_session = session.runtime_value if session is not None else None
         budget = self._consumer_budget(session, requested_tokens)
-        parent_request: CompactionParentRequest | None = None
-        suffix_enabled = (
-            os.environ.get("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", "prefix")
-            .strip()
-            .lower()
-            == "suffix"
-        )
-        if suffix_enabled and session is not None:
-            parent_request_getter = getattr(
-                self._context.turn_runner,
-                "compaction_parent_request",
-                None,
-            )
-            if callable(parent_request_getter):
-                try:
-                    parent_request = parent_request_getter(self._session_key(session))
-                except Exception:  # noqa: BLE001 - manual compaction fails closed
-                    log.warning(
-                        "compaction.parent_request_lookup_failed",
-                        session_key=self._session_key(session),
-                        exc_info=True,
-                    )
-        target_kwargs: dict[str, bool] = {}
-        if parent_request is not None:
-            target_kwargs = {
-                "active_only": True,
-                "replay_provider_state": True,
-            }
-        target = resolve_gateway_compaction_target(
-            self._context,
-            raw_session,
-            **target_kwargs,
-        )
+        target = resolve_gateway_compaction_target(self._context, raw_session)
         config = build_compaction_config_from_provider(
             target.provider,
             model_override=target.model or effective_session_model(raw_session),
@@ -302,6 +302,23 @@ class GatewaySessionMaintenancePorts(
         config.deadline_at_monotonic = operation_deadline
         arm_compaction_deadline(config, operation_id=compaction_id)
         session_id = session.session_id if session is not None else None
+        workspace_dir = self._attachment_workspace_dirs.get(session_id or "")
+        if (
+            workspace_dir is not None and session_id
+            and getattr(
+                getattr(self._context.config, "attachments", None), "persist_transcripts", True
+            ) is not False
+        ):
+            materializer = AttachmentWorkspaceMaterializer(
+                media_root=media_root_from_config(self._context.config),
+                workspace_dir=workspace_dir,
+                disk_budget_bytes=workspace_attachment_budget_from_config(self._context.config),
+            )
+            config.attachment_path_resolver = (
+                lambda attachment, _session_id: materializer.materialize_image_path(
+                    attachment, session_id
+                )
+            )
         compaction_correlation = (
             ProviderRequestCorrelation(
                 session_id=session_id,
@@ -323,7 +340,6 @@ class GatewaySessionMaintenancePorts(
             config=config,
             compaction_correlation=compaction_correlation,
             flush_correlation=flush_correlation,
-            parent_request=parent_request,
         )
         return SessionCompactionPlan(
             context_window_tokens=budget.context_window_tokens,
@@ -474,7 +490,6 @@ class GatewaySessionMaintenancePorts(
                 "flush_receipt_status": memory.receipt_status,
                 "provider_request_correlation": runtime.compaction_correlation,
                 "context_window_chars": runtime.budget.provider_request_max_chars,
-                "parent_request": runtime.parent_request,
             }
             for name, value in optional.items():
                 if value is not None and _accepts_keyword_arg(compact_with_result, name):
@@ -506,7 +521,7 @@ class GatewaySessionMaintenancePorts(
                 raise SessionCompactionPhaseTimeoutError(exc.phase) from exc
             summary = str(getattr(result, "summary", "") or "")
             removed_count = int(getattr(result, "removed_count", 0) or 0)
-            execution_result = SessionCompactionExecutionResult(
+            return SessionCompactionExecutionResult(
                 applied=bool(
                     summary
                     and (
@@ -539,15 +554,6 @@ class GatewaySessionMaintenancePorts(
                 skip_reason=str(getattr(result, "skip_reason", "") or ""),
                 quality_report=dict(getattr(result, "quality_report", None) or {}),
             )
-            if execution_result.applied and runtime.parent_request is not None:
-                clear_parent_request = getattr(
-                    self._context.turn_runner,
-                    "clear_compaction_parent_request",
-                    None,
-                )
-                if callable(clear_parent_request):
-                    clear_parent_request(command.session_key)
-            return execution_result
 
         try:
             summary = await await_compaction_phase(

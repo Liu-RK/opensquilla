@@ -22,8 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   final-diff `log` remains accepted but no longer observes. Actual recovery,
   warnings, salvage, observer events and independent turn-call logs remain.
   An unused failure-summary cache is removed; public settings/defaults are unchanged.
-  See [the event retirement notice](docs/experimental-diagnostic-retirement.md)
-  before using new main runs with historical experiment delivery checks.
+  Historical experiment-delivery details are preserved in Git history.
 - Retired the opt-in patch evidence ledger collector and JSON export. Legacy
   path configuration remains accepted and excludes old diagnostic files from
   final-diff checks, but no longer creates or overwrites a ledger. Recovery
@@ -63,6 +62,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   remain unchanged; experimental diagnostic counters and events are removed.
 
 ### Fixed
+
+- Default Gateway, CLI, decision, trace and safety logs no longer retain
+  prompt/conversation previews, tool output or exception payloads. Gateway
+  operational logs keep their level prefix and use JSON metadata with event
+  identifiers, counts, status codes and exception types; decision logs no longer
+  store prompt-derived intent text.
+  Support bundles re-filter current and rotated legacy logs, omitting legacy
+  free text that cannot be safely parsed. Existing local logs are not deleted
+  and may still contain pre-upgrade private content: review them before sharing
+  outside the bundle flow. Explicit raw turn-call capture remains opt-in (#1208).
 
 - Skill and Meta catalog reads remain compatible when the Web UI and Gateway
   are upgraded separately. Meta details fall back on older gateways; new

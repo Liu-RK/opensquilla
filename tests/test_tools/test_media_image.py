@@ -6,6 +6,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from reportlab.pdfgen import canvas
@@ -13,6 +14,303 @@ from reportlab.pdfgen import canvas
 from opensquilla.tools.builtin import media
 from opensquilla.tools.ssrf import environment_proxy_url
 from opensquilla.tools.types import SafeToolError, ToolContext, ToolError, current_tool_context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["url", "file"])
+@pytest.mark.parametrize("format", ["PNG", "JPEG", "GIF", "WEBP"])
+async def test_model_image_tool_returns_binary_without_an_auxiliary_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, format: str,
+) -> None:
+    import base64
+
+    from tests.helpers.image_bytes import image_bytes
+
+    payload = image_bytes(format)
+    mime = f"image/{format.lower()}"
+    path = tmp_path / f"sample.{format.lower()}"
+    path.write_bytes(payload)
+    requested = []
+
+    async def fetch(url):
+        requested.append(url)
+        return payload, mime
+
+    async def forbidden_analysis(*args):
+        pytest.fail("Model image tools must return images to the main loop")
+
+    monkeypatch.setattr(media, "_fetch_image_url", fetch)
+    monkeypatch.setattr(media, "_call_vision_provider", forbidden_analysis)
+    context = ToolContext(workspace_dir=str(tmp_path))
+    token = current_tool_context.set(context)
+    target = "https://images.example.test/sample" if source == "url" else str(path)
+    try:
+        result = json.loads(await media.image(target, _tool_use_id="load-image"))
+    finally:
+        current_tool_context.reset(token)
+
+    assert result["status"] == "loaded"
+    assert result["path"] == target
+    assert "not yet been analyzed" in result["note"]
+    assert "description" not in result and "data" not in result
+    expected_image = {"mime": mime, "data": base64.b64encode(payload).decode()}
+    if source == "url":
+        expected_image["source_url"] = target
+    assert context.tool_result_media == {"load-image": [expected_image]}
+    assert requested == ([target] if source == "url" else [])
+
+
+def _download_context(tmp_path: Path, *, persist: bool = True, budget: int = 1024) -> ToolContext:
+    return ToolContext(
+        workspace_dir=str(tmp_path / "workspace"),
+        artifact_media_root=str(tmp_path / "media"),
+        artifact_session_id="download-session",
+        sandbox_gateway_config=SimpleNamespace(attachments=SimpleNamespace(
+            persist_transcripts=persist, workspace_attachment_disk_budget_bytes=budget,
+        )),
+    )
+
+
+@pytest.mark.asyncio
+async def test_url_image_retains_a_readable_session_copy_after_source_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    from opensquilla.tools.builtin import filesystem
+    from opensquilla.tools.types import WorkspaceAccessError
+    from tests.helpers.image_bytes import image_bytes
+
+    payload = image_bytes("JPEG")
+    url = "https://images.example.test/temporary-image"
+
+    async def fetch(target):
+        assert target == url
+        return payload, "image/jpeg"
+
+    async def expired(target):
+        pytest.fail("Reopening a retained image must not fetch its expired source")
+
+    async def no_sandbox(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(media, "_fetch_image_url", fetch)
+    monkeypatch.setattr(filesystem, "_run_sandbox_operation_if_required", no_sandbox)
+    context = _download_context(tmp_path, budget=len(payload))
+    context.workspace_strict = True
+    token = current_tool_context.set(context)
+    try:
+        first = json.loads(await media.image(url, _tool_use_id="first-download"))
+        again = json.loads(await media.image(url, _tool_use_id="second-download"))
+        assert first["local_path"] == again["local_path"]
+        monkeypatch.setattr(media, "_fetch_image_url", expired)
+        await filesystem.read_file(first["local_path"], _tool_use_id="reread")
+        context.artifact_session_id = "another-session"
+        with pytest.raises(WorkspaceAccessError, match="another session"):
+            await filesystem.read_file(first["local_path"], _tool_use_id="foreign-reread")
+    finally:
+        current_tool_context.reset(token)
+
+    assert first["path"] == first["source_url"] == url
+    assert first["name"] == "image.jpeg"
+    assert first["local_path"].startswith(".opensquilla/attachments/download-session/")
+    saved = Path(context.workspace_dir) / first["local_path"]
+    assert saved.read_bytes() == payload
+    assert context.tool_result_media["reread"][0]["data"] == base64.b64encode(payload).decode()
+    assert context.tool_result_media["first-download"][0]["local_path"] == first["local_path"]
+    assert context.tool_result_media["first-download"][0]["name"] == first["name"]
+    assert not Path(context.artifact_media_root).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable", ["disabled", "budget", "write_policy", "sandbox"])
+async def test_url_image_without_retention_still_loads_without_a_local_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unavailable: str,
+) -> None:
+    from opensquilla.tools.builtin import filesystem
+    from tests.helpers.image_bytes import image_bytes
+
+    payload = image_bytes()
+
+    async def fetch(url):
+        return payload, "image/png"
+
+    monkeypatch.setattr(media, "_fetch_image_url", fetch)
+    context = _download_context(
+        tmp_path, persist=unavailable != "disabled", budget=1 if unavailable == "budget" else 1024,
+    )
+    if unavailable == "write_policy":
+        context.workspace_write_deny_globs = [".opensquilla/attachments/**"]
+    elif unavailable == "sandbox":
+        monkeypatch.setattr(filesystem, "_sandbox_path_access_envelope", lambda *args, **kwargs: {
+            "status": "blocked", "message": "Workspace is read-only",
+        })
+    token = current_tool_context.set(context)
+    try:
+        result = json.loads(await media.image(
+            "https://images.example.test/sample", _tool_use_id="download",
+        ))
+    finally:
+        current_tool_context.reset(token)
+
+    assert result["status"] == "loaded"
+    assert "local_path" not in result
+    assert "No local copy retained" in result["retention_note"]
+    assert "local_path" not in context.tool_result_media["download"][0]
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["write_deny", "read_only"])
+async def test_compaction_does_not_restore_deleted_url_image_after_write_access_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str,
+) -> None:
+    from opensquilla.engine import Agent, AgentConfig
+    from opensquilla.session.compaction import CompactionRequest, compact_context
+    from opensquilla.tools.builtin import filesystem
+    from tests.helpers.image_bytes import image_bytes
+
+    payload = image_bytes()
+
+    async def fetch(url):
+        return payload, "image/png"
+
+    monkeypatch.setattr(media, "_fetch_image_url", fetch)
+    context = _download_context(tmp_path)
+    token = current_tool_context.set(context)
+    try:
+        receipt = json.loads(await media.image(
+            "https://images.example.test/sample", _tool_use_id="download",
+        ))
+    finally:
+        current_tool_context.reset(token)
+    saved = Path(context.workspace_dir) / receipt["local_path"]
+    assert saved.is_file()
+    saved.unlink()
+    if policy == "write_deny":
+        context.workspace_write_deny_globs = [".opensquilla/attachments/**"]
+    else:
+        def read_only(*args, **kwargs):
+            assert current_tool_context.get() is context
+            return {"status": "blocked", "message": "Workspace is read-only"}
+
+        monkeypatch.setattr(filesystem, "_sandbox_path_access_envelope", read_only)
+
+    agent = Agent(
+        provider=SimpleNamespace(provider_name="test"), config=AgentConfig(), tool_context=context,
+    )
+    config = agent._build_compaction_config()
+    config.protected_recent_messages = 2
+    assert config.attachment_path_resolver is not None
+    image = context.tool_result_media["download"][0]
+    entries = [
+        {"role": "user", "content": "Inspect the image.", "token_count": 5},
+        {
+            "role": "assistant", "content": "Image inspected.", "token_count": 5,
+            "assistant_replay": {"version": 1, "messages": [
+                {"role": "assistant", "content": "Loading image."},
+                {"role": "user", "content": [{
+                    **image, "type": "image", "media_type": image["mime"],
+                }]},
+            ]},
+        },
+        {"role": "user", "content": "Continue.", "token_count": 5},
+        {"role": "assistant", "content": "Continuing.", "token_count": 5},
+    ]
+    unrelated_context = ToolContext(workspace_dir=str(tmp_path / "unrelated"))
+    token = current_tool_context.set(unrelated_context)
+    try:
+        result = await compact_context(CompactionRequest(
+            session_id=context.artifact_session_id, entries=entries, context_window_tokens=4_000,
+            config=config, forced_prefix_cut=2, trigger="message_count",
+        ))
+        assert current_tool_context.get() is unrelated_context
+    finally:
+        current_tool_context.reset(token)
+    assert result.removed_count == 2
+    assert not saved.exists()
+    assert result.summary_payload is not None
+    assert result.summary_payload["files_and_artifacts"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["corrupt", "oversized"])
+async def test_model_image_tool_rejects_invalid_download_without_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str,
+) -> None:
+    from opensquilla.contracts.attachments import IMAGE_ATTACHMENT_BYTES
+
+    payload = b"invalid" if invalid == "corrupt" else b"x" * (IMAGE_ATTACHMENT_BYTES + 1)
+
+    async def fetch(url):
+        return payload, "image/png"
+
+    monkeypatch.setattr(media, "_fetch_image_url", fetch)
+    context = _download_context(tmp_path)
+    token = current_tool_context.set(context)
+    try:
+        with pytest.raises(SafeToolError):
+            await media.image("https://images.example.test/sample", _tool_use_id="load-image")
+    finally:
+        current_tool_context.reset(token)
+    assert context.tool_result_media == {}
+    assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_answer", ["The image contains blue pixels.", ""])
+async def test_image_analysis_retries_reasoning_only_once_without_changing_model_or_thinking(
+    tmp_path: Path, final_answer: str,
+) -> None:
+    from opensquilla.provider.correlation_context import bind_provider_request_correlation
+    from opensquilla.provider.types import (
+        ChatConfig,
+        DoneEvent,
+        ProviderRequestCorrelation,
+        ReasoningDeltaEvent,
+        TextDeltaEvent,
+    )
+    from tests.helpers.image_bytes import image_bytes
+
+    (tmp_path / "sample.png").write_bytes(image_bytes())
+    calls = []
+
+    class Provider:
+        provider_name = "openai"
+        model = "configured-vision"
+
+        async def chat(self, messages, config):
+            calls.append((messages, config))
+            yield ReasoningDeltaEvent(text="internal reasoning")
+            if len(calls) == 2 and final_answer:
+                yield TextDeltaEvent(text=final_answer)
+            yield DoneEvent(reasoning_content="internal reasoning")
+
+    provider = Provider()
+    config = ChatConfig(model_vision_support="supported", thinking=True)
+    token = current_tool_context.set(ToolContext(
+        workspace_dir=str(tmp_path), image_analysis_target=lambda: (provider, config),
+    ))
+    try:
+        with bind_provider_request_correlation(ProviderRequestCorrelation(
+            session_id="test-session", turn_id="test-turn", execution_id="test-call",
+            call_kind="primary",
+        )):
+            result = json.loads(await media.image("sample.png"))
+    finally:
+        current_tool_context.reset(token)
+
+    assert len(calls) == 2
+    assert calls[0][0] == calls[1][0]
+    assert all(call_config.thinking is True for _, call_config in calls)
+    correlations = [call_config.provider_request_correlation for _, call_config in calls]
+    assert correlations[0].execution_id != correlations[1].execution_id
+    assert "internal reasoning" not in json.dumps(result)
+    if final_answer:
+        assert result["description"] == final_answer
+    else:
+        assert result["status"] == "analysis_failed"
+        assert "description" not in result
 
 
 @pytest.mark.asyncio
@@ -116,6 +414,7 @@ async def test_agent_binds_image_tool_to_actual_selected_deployment(
     expected_auxiliary_calls: int | None = None, tool_count: int = 1,
     with_tracker: bool = False, duplicate_done: bool = False,
     reject_initial_image: bool = False,
+    reasoning_only_first_analysis: bool = False,
 ) -> None:
     from types import SimpleNamespace
 
@@ -134,6 +433,7 @@ async def test_agent_binds_image_tool_to_actual_selected_deployment(
         Message,
         ModelCapabilities,
         ProviderRequestCorrelation,
+        ReasoningDeltaEvent,
         TextDeltaEvent,
         ToolDefinition,
         ToolInputSchema,
@@ -153,7 +453,10 @@ async def test_agent_binds_image_tool_to_actual_selected_deployment(
         async def chat(self, messages, tools=None, config=None):
             if config.provider_request_correlation.call_kind == "auxiliary.media":
                 auxiliary_calls.append((messages, tools, config))
-                yield TextDeltaEvent(text="Image description")
+                if reasoning_only_first_analysis and len(auxiliary_calls) == 1:
+                    yield ReasoningDeltaEvent(text="internal reasoning")
+                else:
+                    yield TextDeltaEvent(text="Image description")
                 receipt = DoneEvent(
                     model=self.model, input_tokens=77, output_tokens=8,
                     billed_cost=1.0, cost_source="provider_billed",
@@ -254,7 +557,9 @@ async def test_agent_binds_image_tool_to_actual_selected_deployment(
     allowed = support == "supported" and not ensemble
     call_count = int(allowed) if expected_auxiliary_calls is None else expected_auxiliary_calls
     assert len(auxiliary_calls) == call_count
-    assert len([result for result in tool_results if "description" in result]) == call_count
+    assert len([result for result in tool_results if "description" in result]) == (
+        max(0, call_count - 1) if reasoning_only_first_analysis else call_count
+    )
     if auxiliary_calls:
         assert auxiliary_calls[0][1] is None
         assert auxiliary_calls[0][2].physical_attempt_limit == 1
@@ -309,6 +614,20 @@ async def test_image_tool_shares_the_turn_hard_budget(
     await test_agent_binds_image_tool_to_actual_selected_deployment(
         tmp_path, "supported", False, False, budget=budget,
         expected_error=error, expected_auxiliary_calls=calls, tool_count=tool_count,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_limit", [0, 2])
+async def test_image_analysis_empty_retry_obeys_turn_call_limit_and_accounts_each_attempt(
+    tmp_path: Path, call_limit: int,
+) -> None:
+    await test_agent_binds_image_tool_to_actual_selected_deployment(
+        tmp_path, "supported", False, False,
+        budget={"max_turn_llm_calls": call_limit},
+        expected_error="turn_llm_call_budget_exceeded" if call_limit else None,
+        expected_auxiliary_calls=1 if call_limit else 2,
+        reasoning_only_first_analysis=True,
     )
 
 
@@ -545,6 +864,44 @@ async def test_fetch_image_url_resolves_relative_redirect_against_logical_url(
     ]
     assert image_bytes == b"png-bytes"
     assert media_type == "image/png"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "status_text"),
+    [(403, "Forbidden"), (404, "Not Found"), (410, "Gone")],
+)
+async def test_fetch_image_url_reports_http_status_for_expired_or_missing_url(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    status_text: str,
+) -> None:
+    import httpx
+
+    class MissingClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> MissingClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                status_code,
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(media, "validate_http_url_for_fetch", lambda url: ["93.184.216.34"])
+    monkeypatch.setattr(httpx, "AsyncClient", MissingClient)
+    monkeypatch.setattr(
+        "opensquilla.tools.ssrf.pinned_transport", lambda *args, **kwargs: object()
+    )
+
+    with pytest.raises(ToolError, match=rf"HTTP {status_code} \({status_text}\)"):
+        await media._fetch_image_url("https://images.example.test/expired.png")
 
 
 @pytest.mark.asyncio

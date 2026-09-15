@@ -22,6 +22,7 @@
     "verify:package": "npm run verify:icons && node scripts/verify-package.mjs",
     "verify:gateway-smoke": "node scripts/smoke-gateway.mjs",
     "test:installer-progress": "node scripts/test-installer-progress-contract.mjs",
+    "test:nsis-upgrade": "node scripts/test-nsis-template-patch.cjs && node scripts/test-nsis-upgrade.mjs",
     "test:bundled-runtimes": "node scripts/test-bundled-runtimes.mjs",
     "test:packaged-session-recovery": "node scripts/test-packaged-session-recovery.mjs",
     "test:packaged-first-send-renderer": "node scripts/test-packaged-first-send-renderer.mjs",
@@ -57,6 +58,13 @@
     "test:mock-update-flow": "npm run build && node scripts/test-mock-update-flow.mjs",
     "test:onboarding-coordinator": "npm run build && node scripts/test-onboarding-flow-coordinator.mjs",
     "test:onboarding-telemetry": "npm run build && node scripts/test-onboarding-save-telemetry.mjs",
+    "test:telemetry-consent": "npm run build && node scripts/test-telemetry-consent.mjs",
+    "test:telemetry-early-spool": "npm run build && node scripts/test-telemetry-early-spool.mjs",
+    "test:telemetry-protocol": "npm run build && node scripts/test-telemetry-protocol.mjs",
+    "test:telemetry-build-identity": "npm run build && node scripts/test-telemetry-build-identity.mjs",
+    "test:telemetry-reliability": "npm run build && node scripts/test-telemetry-reliability.mjs",
+    "test:telemetry-growth": "npm run build && node scripts/test-telemetry-growth.mjs && node scripts/test-telemetry-growth-lifecycle.mjs",
+    "test:desktop-router-config": "npm run build && node scripts/test-desktop-router-config.mjs",
     "test:router-tier-normalization": "npm run build && node scripts/test-router-tier-normalization.mjs",
     "test:onboarding-flow": "npm run build && node scripts/test-onboarding-flow.mjs",
     "start": "electron .",
@@ -69,7 +77,8 @@
     "test:live-html-browser": "node --test scripts/test-live-html-business.mjs"
   },
   "dependencies": {
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.6.2",
+    "smol-toml": "1.8.0"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
@@ -84,6 +93,7 @@
   "build": {
     "appId": "ai.opensquilla.desktop",
     "productName": "OpenSquilla",
+    "beforePack": "scripts/nsis/prepare-upgrade-template.cjs",
     "artifactName": "OpenSquilla-${version}-${os}-${arch}.${ext}",
     "protocols": [
       {

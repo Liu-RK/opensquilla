@@ -26,6 +26,7 @@ from opensquilla.provider import TextDeltaEvent as ProviderText
 from opensquilla.provider import ToolUseDeltaEvent as ProviderToolUseDelta
 from opensquilla.provider import ToolUseEndEvent as ProviderToolUseEnd
 from opensquilla.provider import ToolUseStartEvent as ProviderToolUseStart
+from opensquilla.provider.types import ContentBlockImage
 from opensquilla.session.manager import SessionManager
 from opensquilla.session.storage import SessionStorage
 from opensquilla.tools.dispatch import build_tool_handler
@@ -229,6 +230,58 @@ async def test_reasoning_only_first_turn_retries_without_disabling_thinking() ->
     assert len(assistant_messages) == 1
     assert assistant_messages[0].content[0].text == "ok"
     assert assistant_messages[0].reasoning_content is None
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_image_turn_preserves_thinking_on_retry() -> None:
+    provider = _SequenceProvider(
+        [
+            [
+                ProviderDone(
+                    stop_reason="stop",
+                    input_tokens=10,
+                    output_tokens=5,
+                    reasoning_tokens=5,
+                    reasoning_content="internal reasoning",
+                )
+            ],
+            [
+                ProviderText(text="image analyzed"),
+                ProviderDone(stop_reason="stop", input_tokens=11, output_tokens=2),
+            ],
+        ]
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            thinking=ThinkingLevel.MEDIUM,
+            retry_base_backoff_ms=0,
+            retry_max_backoff_ms=0,
+        ),
+    )
+
+    events = [
+        event
+        async for event in agent.run_turn(
+            "describe the image",
+            extra_messages=[
+                Message(
+                    role="user",
+                    content=[ContentBlockImage(media_type="image/png", data="c3ludGhldGlj")],
+                )
+            ],
+        )
+    ]
+
+    assert any(event.kind == "done" and event.text == "image analyzed" for event in events)
+    warning = next(
+        event
+        for event in events
+        if event.kind == "warning" and event.code == "provider_reasoning_only_retry"
+    )
+    assert "thinking disabled" not in warning.message
+    assert provider.calls[0]["config"].thinking is True
+    assert provider.calls[1]["config"].thinking is True
 
 
 @pytest.mark.asyncio
@@ -515,7 +568,7 @@ def test_tool_loop_observer_diff_paths_preserve_status_path_prefix(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_final_diff_contract_warn_model_reaches_next_provider_request(
+async def test_retired_final_diff_contract_cannot_interrupt_ready_final(
     tmp_path,
 ) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -523,16 +576,7 @@ async def test_final_diff_contract_warn_model_reaches_next_provider_request(
     scratch.write_text("<?php echo 'scratch';\n", encoding="utf-8")
 
     provider = _SequenceProvider(
-        [
-            [
-                ProviderText(text="ready"),
-                ProviderDone(stop_reason="stop", input_tokens=3, output_tokens=1),
-            ],
-            [
-                ProviderText(text="final"),
-                ProviderDone(stop_reason="stop", input_tokens=4, output_tokens=1),
-            ],
-        ]
+        [[ProviderText(text="ready"), ProviderDone(stop_reason="stop")]]
     )
     runtime_events_path = tmp_path / "runtime_events.jsonl"
     agent = Agent(
@@ -550,24 +594,24 @@ async def test_final_diff_contract_warn_model_reaches_next_provider_request(
 
     events = [event async for event in agent.run_turn("finish")]
 
-    assert any(event.kind == "done" and event.text == "final" for event in events)
-    assert any(
+    assert [event.text for event in events if event.kind == "done"] == ["ready"]
+    assert not any(event.kind == "error" for event in events)
+    assert not any(
         event.kind == "warning" and event.code == "final_diff_contract_recovery"
         for event in events
     )
-    assert len(provider.calls) == 2
-    warning_messages = [
-        msg
-        for msg in provider.calls[1]["messages"]
-        if msg.role == "user"
-        and isinstance(msg.content, str)
-        and msg.content.startswith("[Runtime final-diff check]")
-    ]
-    assert len(warning_messages) == 1
-    assert "debug_case.php" in warning_messages[0].content
-    assert "repository diff looks suspicious" in warning_messages[0].content
+    assert len(provider.calls) == 1
+    assert not any(
+        isinstance(msg.content, str) and "[Runtime final-diff check]" in msg.content
+        for msg in provider.calls[0]["messages"]
+    )
+    assert scratch.read_text(encoding="utf-8") == "<?php echo 'scratch';\n"
 
-    logged = [json.loads(line) for line in runtime_events_path.read_text().splitlines()]
+    logged = (
+        [json.loads(line) for line in runtime_events_path.read_text().splitlines()]
+        if runtime_events_path.exists()
+        else []
+    )
     assert not any(event.get("name") == "final_diff_contract.observed" for event in logged)
 
 

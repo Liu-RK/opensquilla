@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -20,7 +21,10 @@ from opensquilla.artifacts import artifact_history_context
 from opensquilla.env import trust_env as _trust_env
 from opensquilla.provider.app_attribution import provider_app_headers
 from opensquilla.provider.failures import classify_provider_error
-from opensquilla.provider.protocol import provider_connection_config
+from opensquilla.provider.protocol import (
+    project_provider_final_request,
+    provider_connection_config,
+)
 from opensquilla.provider.replay_budget import project_message_replay_budget
 from opensquilla.provider.tokenrhythm_correlation import (
     redact_tokenrhythm_install_ids,
@@ -54,6 +58,7 @@ from opensquilla.session.compaction_deployment import (
 )
 from opensquilla.session.compaction_lifecycle import CompactionTimeoutError
 from opensquilla.session.compaction_state import (
+    CompactionObligation,
     build_structured_summary_from_text,
     extract_compaction_obligations,
     render_structured_summary,
@@ -70,6 +75,22 @@ _COMPACTION_STREAM_CANCEL_GRACE_SECONDS = 0.05
 _MAX_CUSTOM_INSTRUCTIONS_CHARS = 2000
 CompactionProfile = Literal["conversation", "coding", "research", "support"]
 CompactionTrigger = Literal["token_budget", "message_count"]
+
+
+def compaction_prompt_layout() -> Literal["prefix", "suffix"]:
+    """Keep the suffix rollout opt-in without changing public configuration."""
+
+    if os.environ.get("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", "").strip().lower() == "suffix":
+        return "suffix"
+    return "prefix"
+
+
+@dataclass(frozen=True)
+class CompactionRequestContext:
+    """Current request settings, detached from any historical message snapshot."""
+
+    chat_config: ChatConfig = field(repr=False)
+    tools: tuple[ToolDefinition, ...] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -129,32 +150,14 @@ class CompactionConfig:
     # may disable only this redundant semantic-tail check for their isolated
     # completed prefix. Durable/session compaction always leaves it enabled.
     protect_semantic_tail: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class CompactionParentRequest:
-    """Runtime-only snapshot of one successful physical provider request."""
-
-    messages: tuple[Message, ...] = field(repr=False)
-    tools: tuple[ToolDefinition, ...] | None = field(repr=False)
-    chat_config: ChatConfig = field(repr=False, compare=False)
-
-    @classmethod
-    def from_call(
-        cls,
-        messages: Sequence[Message],
-        tools: Sequence[ToolDefinition] | None,
-        chat_config: ChatConfig,
-    ) -> CompactionParentRequest:
-        return cls(
-            messages=tuple(message.model_copy(deep=True) for message in messages),
-            tools=(
-                tuple(tool.model_copy(deep=True) for tool in tools)
-                if tools is not None
-                else None
-            ),
-            chat_config=chat_config.model_copy(deep=True),
-        )
+    # Runtime-owned materializer. It returns only verified workspace paths,
+    # and is absent when image retention is disabled or no workspace exists.
+    attachment_path_resolver: Callable[[dict[str, Any], str], str | None] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    request_context: CompactionRequestContext | None = field(
+        default=None, repr=False, compare=False,
+    )
 
 
 @dataclass
@@ -196,12 +199,6 @@ class CompactionRequest:
     # Additive runtime provenance. Kept at the end so legacy positional
     # construction retains the original public field ordering.
     context_window_source: str = "consumer_capacity"
-    # Exact provider-call snapshot; never persisted or included in repr.
-    parent_request: CompactionParentRequest | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
 
 
 @dataclass
@@ -560,6 +557,19 @@ def estimate_entry_replay_tokens(entry: Any) -> int:
 def estimate_entry_model_replay_tokens(entry: Any) -> int:
     """Estimate the full transcript payload size replayed to the model."""
 
+    media_budget = _entry_model_replay_media_budget(entry)
+    if media_budget is not None:
+        estimated = int(media_budget["estimated_tokens"])
+        if _entry_get(entry, "assistant_replay") is None:
+            try:
+                persisted = max(0, int(_entry_get(entry, "token_count") or 0))
+            except (TypeError, ValueError):
+                persisted = 0
+            # Preserve any legacy usage surplus after removing encoded pixels.
+            original = _estimate_tokens(str(_entry_get(entry, "content") or ""))
+            estimated = max(estimated, estimated + persisted - original)
+        return estimated
+
     assistant_replay = _entry_get(entry, "assistant_replay")
     if assistant_replay is not None:
         # The accepted messages already contain their text, tool results and
@@ -630,11 +640,88 @@ def _entry_model_replay_payload(entry: Any) -> dict[str, Any]:
 
 
 def estimate_entries_model_replay_chars(entries: Sequence[Any]) -> int:
-    """Conservatively count serialized characters for provider-visible history."""
+    """Count serialized text and the shared media equivalent for replay."""
 
     if not entries:
         return 0
-    return len(_json_text([_entry_model_replay_payload(entry) for entry in entries]))
+    payloads = [_entry_model_replay_payload(entry) for entry in entries]
+    chars = len(_json_text(payloads))
+    for entry, payload in zip(entries, payloads, strict=True):
+        media_budget = _entry_model_replay_media_budget(entry)
+        if media_budget is not None:
+            chars += int(media_budget["estimated_chars"]) - len(_json_text(payload))
+    return chars
+
+
+def _entry_model_replay_media_budget(entry: Any) -> dict[str, Any] | None:
+    """Project accepted media positions without discounting arbitrary tool JSON."""
+
+    from opensquilla.contracts.attachments import IMAGE_ATTACHMENT_MIMES
+    from opensquilla.provider.request_proof import project_provider_payload
+
+    replay = _entry_get(entry, "assistant_replay")
+    if isinstance(replay, Mapping) and isinstance(replay.get("messages"), list):
+        has_media = any(
+            isinstance(block, Mapping) and block.get("type") in {"image", "document"}
+            for message in replay["messages"]
+            if isinstance(message, Mapping) and isinstance(message.get("content"), list)
+            for block in message["content"]
+        )
+        if not has_media:
+            return None
+        payload = _entry_model_replay_payload(entry)
+        projected_replay = payload.pop("assistant_replay")
+        payload["messages"] = projected_replay["messages"]
+        payload["assistant_replay"] = {
+            key: value for key, value in projected_replay.items() if key != "messages"
+        }
+    else:
+        content = _entry_get(entry, "content")
+        if (
+            _entry_get(entry, "role") != "user"
+            or not isinstance(content, str)
+            or not content.lstrip().startswith("{")
+        ):
+            return None
+        try:
+            envelope = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        if (
+            not isinstance(envelope, dict)
+            or not isinstance(envelope.get("text"), str)
+            or not isinstance(envelope.get("attachments"), list)
+        ):
+            return None
+        blocks = []
+        for attachment in envelope["attachments"]:
+            if not isinstance(attachment, dict):
+                continue
+            mime = normalize_attachment_mime(
+                attachment.get("type") or attachment.get("mime") or attachment.get("media_type")
+            )
+            if mime not in IMAGE_ATTACHMENT_MIMES:
+                continue
+            data = attachment.get("data")
+            if isinstance(data, str) and data:
+                source_type = "base64"
+                attachment["data"] = "[image supplied separately]"
+            elif valid_sha256(attachment.get("sha256_ref")):
+                source_type = "url"
+                data = "[retained image reference]"
+            else:
+                continue
+            blocks.append({
+                "type": "image", "source_type": source_type, "media_type": mime, "data": data,
+            })
+        if not blocks:
+            return None
+        message = _entry_model_replay_payload(entry)
+        message["content"] = [{"type": "text", "text": _json_text(envelope)}, *blocks]
+        payload = {"messages": [message]}
+
+    proof = project_provider_payload(payload, projection_adapter="history_replay", proof_budget=0)
+    return proof if proof.get("media_blocks_reserved") else None
 
 
 def estimate_entry_model_replay_chars(entry: Any) -> int:
@@ -1044,6 +1131,27 @@ def _compaction_target_input_budget(
         or 0
     )
     output_reserve = int(getattr(target, "max_output_tokens", 0) or 1024)
+    context = request.config.request_context
+    if compaction_prompt_layout() == "suffix" and context is not None:
+        output_reserve = context.chat_config.max_tokens
+        if target is not None:
+            messages, tools, config = _build_suffix_compaction_call(
+                context, [], "", "", None,
+                provider=target.provider,
+                summary_output_tokens=target.max_output_tokens,
+                timeout=request.config.timeout_seconds,
+                provider_request_correlation=None,
+            )
+            projection = project_provider_final_request(target.provider, messages, tools, config)
+            if projection is not None:
+                output_reserve = _projected_generation_budget(projection.payload, config)
+                output_reserve += int(projection.proof.get("estimated_tokens") or 0)
+            else:
+                output_reserve += _estimate_tokens(_json_text({
+                    "system": config.system,
+                    "messages": [message.model_dump(mode="json") for message in messages],
+                    "tools": [tool.model_dump(mode="json") for tool in tools] if tools else None,
+                }))
     framing_reserve = max(128, context_window // 20)
     token_budget = max(1, context_window - output_reserve - framing_reserve)
     char_cap = int(getattr(target, "provider_request_max_chars", 0) or 0)
@@ -1244,6 +1352,7 @@ def _summarize_if_envelope(
     *,
     session_id: str = "",
     message_id: str = "",
+    image_paths: Mapping[int, str] | None = None,
 ) -> str:
     """Replace attachment-envelope JSON with a concise placeholder.
 
@@ -1304,10 +1413,68 @@ def _summarize_if_envelope(
             ordinal=ordinal,
             derived_id=derived_ids.get(ordinal),
         )
-        descs.append(f"{name} ({media}; attachment_id={attachment_id})")
+        path = image_paths.get(ordinal) if image_paths is not None else None
+        path_descriptor = f"; workspace_file={path}" if path else ""
+        descs.append(f"{name} ({media}; attachment_id={attachment_id}{path_descriptor})")
     if descs:
         return f"{text}\n[user attached: {', '.join(descs)}]"
     return text
+
+
+def _prepare_compaction_image_paths(
+    entries: list[dict[str, Any]],
+    *,
+    session_id: str,
+    resolver: Callable[[dict[str, Any], str], str | None],
+) -> list[dict[str, Any]]:
+    """Resolve retained images once, without changing canonical transcript rows."""
+    prepared: list[dict[str, Any]] = []
+    for entry in entries:
+        image_paths: dict[int, str] = {}
+        envelope = None
+        if entry.get("role") == "user":
+            try:
+                envelope = json.loads(str(entry.get("content") or ""))
+            except (TypeError, ValueError):
+                pass
+        attachments = envelope.get("attachments") if isinstance(envelope, dict) else None
+        replay = entry.get("assistant_replay")
+        if entry.get("role") == "assistant" and isinstance(replay, Mapping):
+            # Only accepted typed tool images are eligible. Re-resolve their
+            # bytes in this session; never adopt a path from tool result prose.
+            attachments = []
+            messages = replay.get("messages") if replay.get("version") == 1 else None
+            for message in messages if isinstance(messages, list) else []:
+                if not isinstance(message, Mapping) or message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                for block in content if isinstance(content, list) else []:
+                    if (
+                        isinstance(block, Mapping)
+                        and block.get("type") == "image"
+                        and block.get("source_type", "base64") == "base64"
+                        and block.get("local_path")
+                    ):
+                        attachments.append({
+                            "mime": block.get("media_type"),
+                            "data": block.get("data"),
+                            "name": block.get("name"),
+                        })
+        if isinstance(attachments, list):
+            for ordinal, attachment in enumerate(attachments):
+                if not isinstance(attachment, dict):
+                    continue
+                try:
+                    path = resolver(attachment, session_id)
+                except (OSError, ValueError):
+                    path = None
+                if isinstance(path, str) and path:
+                    image_paths[ordinal] = path
+        prepared.append(
+            {**entry, "_compaction_image_paths": image_paths}
+            if isinstance(attachments, list) else entry
+        )
+    return prepared
 
 
 _COMPACTION_IMAGE_MARKER = (
@@ -1524,6 +1691,7 @@ def _format_chunk_for_llm(chunk: list[dict[str, Any]]) -> str:
             str(entry.get("content") or ""),
             session_id=str(entry.get("session_id") or ""),
             message_id=str(entry.get("message_id") or entry.get("id") or ""),
+            image_paths=entry.get("_compaction_image_paths"),
         )
         rendered_parts = [f"[{role}]: {content}"]
         tool_summary = _summarize_tool_calls_for_llm(entry.get("tool_calls"))
@@ -1554,6 +1722,7 @@ def _summarize_chunk_fallback(chunk: list[dict[str, Any]], policy: str) -> str:
             str(entry.get("content") or ""),
             session_id=str(entry.get("session_id") or ""),
             message_id=str(entry.get("message_id") or entry.get("id") or ""),
+            image_paths=entry.get("_compaction_image_paths"),
         )
         # Attachment descriptors are durable lookup handles, not expendable
         # prose.  Preview the user text while retaining the complete descriptor
@@ -1585,16 +1754,6 @@ def _normalize_custom_instructions(custom_instructions: str | None) -> str:
     return normalized
 
 
-def _compaction_prompt_layout() -> str:
-    layout = os.environ.get("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", "prefix")
-    normalized = layout.strip().lower()
-    if normalized not in {"prefix", "suffix"}:
-        raise ValueError(
-            "OPENSQUILLA_COMPACTION_PROMPT_LAYOUT must be either 'prefix' or 'suffix'"
-        )
-    return normalized
-
-
 def _build_compaction_prompt(
     chunk_text: str,
     identifier_instruction: str,
@@ -1621,52 +1780,144 @@ def _build_compaction_prompt(
     return system, user_content
 
 
-def _build_suffix_compaction_instruction(
+def _build_suffix_compaction_call(
+    context: CompactionRequestContext,
+    source_entries: list[dict[str, Any]],
+    previous_summary: str,
     identifier_instruction: str,
     custom_instructions: str | None,
-    previous_summary: str = "",
-) -> str:
+    *,
+    provider: Any,
+    summary_output_tokens: int,
+    timeout: float,
+    provider_request_correlation: ProviderRequestCorrelation | None,
+) -> tuple[list[Message], list[ToolDefinition] | None, ChatConfig]:
+    # Use the same durable-history reconstruction as ordinary requests. The
+    # caller has already selected the exact source range; a previous outbound
+    # request is neither its coverage proof nor its source of messages.
+    from opensquilla.engine.history import reconstruct_messages_from_entry, repair_tool_pairing
+    from opensquilla.engine.session_sanitize import (
+        project_historical_tool_payloads,
+        sanitize_session_messages,
+    )
+
+    messages: list[Message] = []
+    for entry in source_entries:
+        provider_message = entry.get("_provider_message")
+        if isinstance(provider_message, Message):
+            messages.append(provider_message.model_copy(deep=True))
+        else:
+            if str(entry.get("role") or "") not in {"user", "assistant"}:
+                raise _CompactionProviderError("suffix source has an unsupported history role")
+            messages.extend(
+                reconstruct_messages_from_entry(
+                    str(entry.get("role") or ""),
+                    entry.get("content") or "",
+                    entry.get("tool_calls"),
+                    entry.get("reasoning_content"),
+                    assistant_replay=entry.get("assistant_replay"),
+                    turn_context=entry.get("turn_context"),
+                )
+            )
+    messages, _ = sanitize_session_messages(messages)
+    messages, _ = project_historical_tool_payloads(
+        messages, preserve_reasoning_content=True,
+    )
+    messages = repair_tool_pairing(messages)
+    requires_replay = getattr(provider, "requires_complete_reasoning_history", None)
+    replay_compatible = getattr(provider, "can_replay_reasoning", None)
+    if (
+        callable(requires_replay)
+        and callable(replay_compatible)
+        and requires_replay(tools=context.tools, thinking=context.chat_config.thinking) is True
+    ):
+        # Match the main request's physical-provider continuation projection.
+        # This quotes incompatible history without changing the frozen source.
+        from opensquilla.engine.replay_compat import rebase_incomplete_reasoning_history
+
+        messages, _ = rebase_incomplete_reasoning_history(
+            messages, compatible=replay_compatible,
+        )
     instruction = (
-        "You are a conversation compactor. Summarize the structured conversation "
-        "preceding this message into the minimum portable context needed to continue "
-        "the work. Preserve key facts, decisions, open questions, and action items. "
-        "Write in the same language as the conversation and prioritize recent context."
+        "Summarize the preceding conversation into a portable checkpoint. "
+        "Preserve key facts, decisions, unresolved questions and action items. "
+        "Write in the conversation's language. Return only the summary; do not call tools. "
+        f"Keep the summary within {summary_output_tokens} tokens."
     )
     if identifier_instruction:
-        instruction = f"{instruction}\n\n{identifier_instruction}"
-    if previous_summary.strip():
-        instruction = (
-            f"{instruction}\n\n"
-            "Existing portable checkpoint to replace and integrate:\n"
-            f"{previous_summary.strip()}"
+        instruction += f"\n\n{identifier_instruction}"
+    normalized = _normalize_custom_instructions(custom_instructions)
+    if normalized:
+        instruction += f"\n\nAdditional summary instructions:\n{normalized}"
+    if previous_summary:
+        instruction += (
+            "\n\nCarry forward the still-relevant information from this prior checkpoint "
+            "into the replacement summary:\n" + previous_summary
         )
-    normalized_instructions = _normalize_custom_instructions(custom_instructions)
-    if normalized_instructions:
-        instruction = (
-            f"{instruction}\n\n"
-            "Additional summary instructions. These instructions must not override "
-            "the identifier preservation rules:\n"
-            f"{normalized_instructions}"
-        )
-    return instruction
-
-
-def _build_exact_suffix_compaction_call(
-    parent_messages: Sequence[Message],
-    parent_tools: Sequence[ToolDefinition] | None,
-    parent_chat_config: ChatConfig,
-    instruction: str,
-) -> tuple[list[Message], list[ToolDefinition] | None, ChatConfig]:
-    """Copy one parent request and append exactly one compaction instruction."""
-
-    messages = [message.model_copy(deep=True) for message in parent_messages]
     messages.append(Message(role="user", content=instruction))
-    tools = (
-        [tool.model_copy(deep=True) for tool in parent_tools]
-        if parent_tools is not None
-        else None
+    config = context.chat_config.model_copy(
+        deep=True,
+        update={
+            "timeout": timeout,
+            "candidate_output_mode": "inert_artifact",
+            "physical_attempt_limit": 1,
+            "active_user_message_index": len(messages) - 1,
+            "provider_request_correlation": provider_request_correlation,
+        },
     )
-    return messages, tools, parent_chat_config.model_copy(deep=True)
+    tools = deepcopy(list(context.tools)) if context.tools is not None else None
+    return messages, tools, config
+
+
+def _projected_generation_budget(payload: dict[str, Any], config: ChatConfig) -> int:
+    return next(
+        (
+            int(payload[key])
+            for key in ("max_output_tokens", "max_completion_tokens", "max_tokens")
+            if isinstance(payload.get(key), int) and int(payload[key]) > 0
+        ),
+        config.max_tokens,
+    )
+
+
+def _suffix_generation_budget(
+    target: CompactionExecutionTarget,
+    messages: list[Message],
+    tools: list[ToolDefinition] | None,
+    config: ChatConfig,
+) -> int:
+    """Check the final input and reserve the adapter's effective generation cap."""
+
+    projection = project_provider_final_request(target.provider, messages, tools, config)
+    if projection is None and callable(getattr(target.provider, "project_final_request", None)):
+        raise _CompactionProviderError("could not project suffix compaction request")
+    if projection is not None:
+        if not projection.fits:
+            raise _CompactionProviderError("suffix compaction request exceeds provider limits")
+        payload = projection.payload
+        generation_budget = _projected_generation_budget(payload, config)
+        input_tokens = int(projection.proof.get("estimated_tokens") or 0)
+        if input_tokens <= 0:
+            input_tokens = _estimate_tokens(_json_text(payload))
+    else:
+        # Extension providers may not implement final-request projection. Keep
+        # compatibility while accounting for all known input, including tools.
+        payload = {
+            "system": config.system,
+            "messages": [message.model_dump(mode="json") for message in messages],
+            "tools": [tool.model_dump(mode="json") for tool in tools] if tools else None,
+        }
+        generation_budget = config.max_tokens
+        input_tokens = _estimate_tokens(_json_text(payload))
+        char_cap = config.provider_request_max_chars or target.provider_request_max_chars
+        if char_cap > 0 and len(_json_text(payload)) > char_cap:
+            raise _CompactionProviderError("suffix compaction request exceeds character limit")
+    if generation_budget <= 0 or (
+        target.context_window_tokens > 0
+        and input_tokens + generation_budget > target.context_window_tokens
+    ):
+        raise _CompactionProviderError("suffix compaction input leaves insufficient output budget")
+    return generation_budget
 
 
 def _consume_compaction_close_result(task: asyncio.Future[Any]) -> None:
@@ -1777,12 +2028,11 @@ async def call_compaction_provider(
     compaction_id: str | None = None,
     chunk_index: int | None = None,
     candidate_index: int = 0,
-    parent_messages: Sequence[Message] | None = None,
-    parent_tools: Sequence[ToolDefinition] | None = None,
-    parent_chat_config: ChatConfig | None = None,
+    request_context: CompactionRequestContext | None = None,
+    source_entries: list[dict[str, Any]] | None = None,
     previous_summary: str = "",
 ) -> str | None:
-    """Summarize through the prefix path or an exact parent-request suffix."""
+    """Summarize a selected source range through the provider protocol."""
 
     if timeout <= 0:
         return None
@@ -1790,50 +2040,28 @@ async def call_compaction_provider(
     if candidate_index < 0 or candidate_index >= len(plan.candidates):
         return None
     deployment = plan.candidates[candidate_index]
-    prompt_layout = _compaction_prompt_layout()
-    if prompt_layout == "suffix":
-        if parent_messages is None or parent_chat_config is None:
-            log.warning(
-                "compaction.exact_parent_request_unavailable",
-                compaction_id=compaction_id,
-                chunk_index=chunk_index,
-            )
-            return None
-        messages, tools, chat_config = _build_exact_suffix_compaction_call(
-            parent_messages,
-            parent_tools,
-            parent_chat_config,
-            _build_suffix_compaction_instruction(
-                identifier_instruction,
-                custom_instructions,
-                previous_summary,
-            ),
-        )
-        if provider_request_correlation is not None:
-            chat_config = chat_config.model_copy(
-                update={"provider_request_correlation": provider_request_correlation}
-            )
-    else:
-        system, user_content = _build_compaction_prompt(
-            chunk_text,
-            identifier_instruction,
-            custom_instructions,
-        )
-        messages = [Message(role="user", content=user_content)]
-        tools = None
-        chat_config = ChatConfig(
-            max_tokens=deployment.max_output_tokens,
-            temperature=0,
-            system=system,
-            thinking=False,
-            thinking_budget_explicit=False,
-            timeout=timeout,
-            provider_request_max_chars=deployment.provider_request_max_chars,
-            tool_choice=None,
-            candidate_output_mode="inert_artifact",
-            physical_attempt_limit=1,
-            provider_request_correlation=provider_request_correlation,
-        )
+    suffix = request_context is not None and compaction_prompt_layout() == "suffix"
+    system, user_content = _build_compaction_prompt(
+        chunk_text,
+        identifier_instruction,
+        custom_instructions,
+    )
+    messages = [Message(role="user", content=user_content)]
+    chat_config = ChatConfig(
+        max_tokens=deployment.max_output_tokens,
+        temperature=0,
+        system=system,
+        thinking=False,
+        thinking_budget_explicit=False,
+        timeout=timeout,
+        provider_request_max_chars=deployment.provider_request_max_chars,
+        tool_choice=None,
+        candidate_output_mode="inert_artifact",
+        physical_attempt_limit=1,
+        provider_request_correlation=provider_request_correlation,
+    )
+    tools: list[ToolDefinition] | None = None
+    generation_budget = deployment.max_output_tokens
 
     # Keep this import local: engine types import session lifecycle helpers
     # while the session package initializes this module.
@@ -1854,6 +2082,24 @@ async def call_compaction_provider(
         timeout_seconds=timeout,
     )
     try:
+        if suffix:
+            assert request_context is not None
+            if source_entries is None:
+                raise _CompactionProviderError("suffix compaction requires its selected source")
+            messages, tools, chat_config = _build_suffix_compaction_call(
+                request_context,
+                source_entries,
+                previous_summary,
+                identifier_instruction,
+                custom_instructions,
+                provider=deployment.provider,
+                summary_output_tokens=deployment.max_output_tokens,
+                timeout=timeout,
+                provider_request_correlation=provider_request_correlation,
+            )
+            generation_budget = _suffix_generation_budget(
+                deployment, messages, tools, chat_config,
+            )
         if provider_accounts_physical_usage(deployment.provider):
             provider_stream = deployment.provider.chat(
                 messages,
@@ -1881,6 +2127,7 @@ async def call_compaction_provider(
         reasoning_chunks: list[str] = []
         saw_done = False
         reported_output_tokens = 0
+        reported_reasoning_tokens = 0
         terminal_reasoning_content = ""
 
         def _enforce_output_budget() -> None:
@@ -1890,9 +2137,16 @@ async def call_compaction_provider(
             reasoning_text = streamed_reasoning or terminal_reasoning_content
             reasoning_tokens = _estimate_tokens(reasoning_text) if reasoning_text else 0
             estimated_output_tokens = visible_tokens + reasoning_tokens
-            if max(reported_output_tokens, estimated_output_tokens) > (
-                deployment.max_output_tokens
-            ):
+            if suffix and visible_tokens > deployment.max_output_tokens:
+                raise _CompactionProviderError("summary body exceeded compaction token budget")
+            # output_tokens commonly includes reasoning_tokens. Compare totals
+            # without adding the same reported reasoning twice; some adapters
+            # expose reasoning only in the terminal usage event.
+            if max(
+                reported_output_tokens,
+                estimated_output_tokens,
+                reported_reasoning_tokens + visible_tokens,
+            ) > generation_budget:
                 raise _CompactionProviderError(
                     "provider output exceeded compaction token budget"
                 )
@@ -1904,6 +2158,10 @@ async def call_compaction_provider(
                     if isinstance(event, ErrorEvent):
                         _report_compaction_credential_failure(deployment, event)
                     raise _CompactionProviderError(message)
+                if str(getattr(event, "kind", "")).startswith("tool_use"):
+                    raise _CompactionProviderError(
+                        "provider returned a tool call instead of summary"
+                    )
                 if isinstance(event, TextDeltaEvent) or getattr(event, "kind", "") == "text_delta":
                     text = str(getattr(event, "text", "") or "")
                     if text:
@@ -1920,9 +2178,16 @@ async def call_compaction_provider(
                 elif isinstance(event, DoneEvent) or getattr(event, "kind", "") == "done":
                     # Usage accounting finalizes on the same terminal event.
                     saw_done = True
+                    if str(getattr(event, "stop_reason", "") or "").lower() not in {
+                        "end_turn", "stop", "stop_sequence", "completed",
+                    }:
+                        raise _CompactionProviderError("provider returned an incomplete summary")
                     reported_output_tokens = max(
                         0,
                         int(getattr(event, "output_tokens", 0) or 0),
+                    )
+                    reported_reasoning_tokens = max(
+                        0, int(getattr(event, "reasoning_tokens", 0) or 0),
                     )
                     terminal_reasoning_content = str(
                         getattr(event, "reasoning_content", "") or ""
@@ -2377,25 +2642,35 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
                 skip_reason=skip_reason,
             )
 
+    if cfg.attachment_path_resolver is not None:
+        to_compact = _prepare_compaction_image_paths(
+            to_compact,
+            session_id=request.session_id,
+            resolver=cfg.attachment_path_resolver,
+        )
+
     provider_native = cfg.llm_plan is not None
+    suffix = bool(
+        cfg.request_context is not None
+        and compaction_prompt_layout() == "suffix"
+    )
+    if suffix and not provider_native:
+        return CompactionResult(
+            summary="",
+            kept_entries=entries,
+            removed_count=0,
+            chunks_processed=0,
+            summary_source="skipped",
+            tokens_before=total_tokens,
+            tokens_after=total_tokens,
+            remaining_budget_tokens=max(window - total_tokens, 0),
+            skip_reason="suffix_target_unavailable",
+        )
     legacy_raw = bool(cfg.api_key and cfg.model)
     network_enabled = provider_native or legacy_raw
-    suffix_layout = _compaction_prompt_layout() == "suffix"
-    exact_suffix = bool(
-        suffix_layout
-        and request.parent_request is not None
-        and provider_native
-    )
-    if suffix_layout and not exact_suffix:
-        # Never substitute a flattened prompt for the exact-parent contract.
-        network_enabled = False
     chunks: list[list[dict[str, Any]]]
     if replace_previous_only:
         chunks = [[]]
-    elif exact_suffix:
-        # The parent request already contains the complete provider input. One
-        # appended instruction summarizes it without chunk rewrites.
-        chunks = [to_compact]
     elif provider_native:
         input_budget = _compaction_target_input_budget(request)
         first_chunk_budget = max(
@@ -2423,6 +2698,18 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
     fallback_chunks = 0
     max_calls = _compaction_llm_call_limit(cfg)
     prepruned_chunk_count = 0
+    if suffix and len(chunks) > max_calls:
+        return CompactionResult(
+            summary="",
+            kept_entries=entries,
+            removed_count=0,
+            chunks_processed=0,
+            summary_source="skipped",
+            tokens_before=total_tokens,
+            tokens_after=total_tokens,
+            remaining_budget_tokens=max(window - total_tokens, 0),
+            skip_reason="suffix_call_budget_exceeded",
+        )
     if network_enabled and len(chunks) > max_calls:
         deterministic_prefix: list[dict[str, Any]] = []
         prepruned_chunk_count = len(chunks) - max_calls
@@ -2443,13 +2730,11 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
     for chunk_index, chunk in enumerate(chunks, start=1):
         llm_result: str | None = None
         chunk_text = _rolling_chunk_text(rolling_summary, chunk)
-        if network_enabled and cfg.llm_plan is not None:
+        if cfg.llm_plan is not None:
             while candidate_index < len(cfg.llm_plan.candidates):
                 deployment = cfg.llm_plan.candidates[candidate_index]
                 candidate_chunk_text = (
-                    chunk_text
-                    if exact_suffix
-                    else _fit_compaction_input_to_target(
+                    chunk_text if suffix else _fit_compaction_input_to_target(
                         request=request,
                         target=deployment,
                         previous_summary=rolling_summary,
@@ -2471,15 +2756,11 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
                     break
                 cfg.last_attempted_target = deployment
                 llm_kwargs: dict[str, Any] = {}
-                if exact_suffix:
-                    assert request.parent_request is not None
+                if suffix:
                     llm_kwargs.update(
-                        {
-                            "parent_messages": request.parent_request.messages,
-                            "parent_tools": request.parent_request.tools,
-                            "parent_chat_config": request.parent_request.chat_config,
-                            "previous_summary": rolling_summary,
-                        }
+                        request_context=cfg.request_context,
+                        source_entries=chunk,
+                        previous_summary=rolling_summary,
                     )
                 if request.provider_request_correlation is not None:
                     llm_kwargs["provider_request_correlation"] = (
@@ -2513,12 +2794,8 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
                 if llm_result:
                     cfg.successful_target = deployment
                     break
-                if exact_suffix:
-                    # A suffix request is bound to its parent's deployment.
-                    candidate_index = len(cfg.llm_plan.candidates)
-                else:
-                    candidate_index += 1
-        elif network_enabled and legacy_raw and _reserve_compaction_llm_call(cfg):
+                candidate_index += 1
+        elif legacy_raw and _reserve_compaction_llm_call(cfg):
             legacy_llm_kwargs: dict[str, Any] = {}
             if request.provider_request_correlation is not None:
                 legacy_llm_kwargs["provider_request_correlation"] = (
@@ -2551,6 +2828,20 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
         if llm_result:
             rolling_summary = llm_result.strip()
             llm_chunks += 1
+        elif suffix:
+            # A source-driven suffix must not replace unread or failed chunks
+            # with deterministic previews and then publish that as coverage.
+            return CompactionResult(
+                summary="",
+                kept_entries=entries,
+                removed_count=0,
+                chunks_processed=chunk_index,
+                summary_source="skipped",
+                tokens_before=total_tokens,
+                tokens_after=total_tokens,
+                remaining_budget_tokens=max(window - total_tokens, 0),
+                skip_reason="suffix_summary_failed",
+            )
         else:
             rolling_summary = _merge_rolling_fallback(
                 rolling_summary,
@@ -2574,6 +2865,20 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
             {"role": "assistant", "content": prev_summary},
         )
     obligations = extract_compaction_obligations(obligation_entries)
+    # These paths come from verified materialization, not prose extraction or
+    # envelope fields. Preserve each full path even if the model summary omits it.
+    retained_paths = {
+        path
+        for entry in to_compact
+        for path in entry.get("_compaction_image_paths", {}).values()
+    } if cfg.attachment_path_resolver is not None else set()
+    existing_paths = {
+        item.value for item in obligations if item.kind == "file_path"
+    }
+    obligations.extend(
+        CompactionObligation(kind="file_path", value=path, critical=True)
+        for path in sorted(retained_paths - existing_paths)
+    )
     structured_summary, coverage = build_structured_summary_from_text(
         merged,
         obligations,

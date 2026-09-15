@@ -20,9 +20,11 @@ import pytest
 from opensquilla.engine import Agent, AgentConfig
 from opensquilla.engine.runtime import _SelectorFallbackProvider
 from opensquilla.engine.usage import UsageTracker
-from opensquilla.provider import ChatConfig, Message
+from opensquilla.provider import ChatConfig, Message, ModelCapabilities
 from opensquilla.provider import DoneEvent as ProviderDoneEvent
 from opensquilla.provider import TextDeltaEvent as ProviderTextDeltaEvent
+from opensquilla.provider.selector import ProviderConfig, build_provider_from_config
+from opensquilla.session.compaction import CompactionRequestContext
 
 
 class _LocalCompatProvider:
@@ -101,43 +103,6 @@ def test_fallback_branch_records_configured_provider_id() -> None:
     assert mu.cost == 0.0
 
 
-def test_agent_captures_last_successful_physical_request_for_compaction() -> None:
-    class _RecordingProvider(_LocalCompatProvider):
-        def __init__(self) -> None:
-            self.calls: list[tuple[list[Message], list[Any] | None, ChatConfig | None]] = []
-
-        def chat(
-            self,
-            messages: list[Message],
-            tools: list[Any] | None = None,
-            config: ChatConfig | None = None,
-        ) -> AsyncIterator[Any]:
-            self.calls.append((messages, tools, config))
-            return self._stream()
-
-    provider = _RecordingProvider()
-
-    async def run() -> Any:
-        agent = Agent(
-            provider=provider,
-            config=AgentConfig(max_iterations=2, provider_id="openrouter"),
-            tool_definitions=[],
-            tool_handler=None,
-            session_key="agent:test:webchat:compaction-parent",
-        )
-        agent.set_compaction_parent_request_capture_enabled(True)
-        async for _ in agent.run_turn("hi"):
-            pass
-        return agent.compaction_parent_request()
-
-    parent_request = asyncio.run(run())
-
-    assert parent_request is not None
-    assert tuple(provider.calls[-1][0]) == parent_request.messages
-    assert parent_request.tools is None
-    assert provider.calls[-1][2] == parent_request.chat_config
-
-
 def test_fallback_branch_without_provider_id_uses_adapter_name() -> None:
     """Backward-compatible default: with no configured provider id the
     adapter class name still flows through (and prices as cloud), so the
@@ -207,3 +172,50 @@ def test_routed_turn_cost_budget_prices_the_actual_provider(
 
     assert ("qwen3-coder:30b", "deepseek") in calls
     assert ("qwen3-coder:30b", "openrouter") not in calls
+
+
+def test_suffix_context_rebinds_after_internal_selector_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", "suffix")
+    config_a = ProviderConfig(provider="openrouter", model="synthetic/model-a", api_key="test")
+    config_b = ProviderConfig(provider="openrouter", model="synthetic/model-b", api_key="test")
+    provider_a = build_provider_from_config(config_a)
+    provider_b = build_provider_from_config(config_b)
+
+    class _Selector:
+        current_config = config_a
+
+        def next_fallback_after_failure(self, _failure):
+            self.current_config = config_b
+            return provider_b
+
+    selector = _Selector()
+    wrapper = _SelectorFallbackProvider(provider_a, selector)
+    capabilities_b = ModelCapabilities(supports_reasoning=False, supports_tools=True)
+    wrapper.configure_fallback_deployment_limits([
+        (config_b, 16_000, 2048, capabilities_b),
+    ])
+    wrapper.configure_fallback_deployment_vision_support([(config_b, "unsupported")])
+    agent = Agent(wrapper, AgentConfig(model_id=config_a.model, max_tokens=8192))
+    original_config = ChatConfig(
+        system="Shared request instructions.",
+        max_tokens=8192,
+        provider_request_max_chars=200_000,
+        model_capabilities=ModelCapabilities(supports_reasoning=True, supports_tools=True),
+    )
+    agent._compaction_request_context = CompactionRequestContext(chat_config=original_config)
+    assert wrapper.fallback_after_invalid_response("synthetic rejected response")
+    assert selector.current_config is config_b
+
+    context = agent.build_compaction_request_context()
+
+    assert context is not None
+    assert context.chat_config.max_tokens == 2048
+    assert context.chat_config.model_capabilities == capabilities_b
+    assert (
+        context.chat_config.provider_request_max_chars < original_config.provider_request_max_chars
+    )
+    assert context.chat_config.system == original_config.system
+    assert original_config.max_tokens == 8192
+    assert original_config.model_capabilities.supports_reasoning is True

@@ -93,6 +93,28 @@ _LEGACY_CONTROL_UI_FRONTEND_WARNING = (
 )
 
 
+class _SettingsSourceWithoutFields(PydanticBaseSettingsSource):
+    """Filter local-TOML-only fields from any external settings source."""
+
+    def __init__(
+        self,
+        inner: PydanticBaseSettingsSource,
+        fields: frozenset[str],
+    ) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+        self._fields = fields
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        for field_name in self._fields:
+            values.pop(field_name, None)
+        return values
+
+
 class ContextOverflowPolicy(StrEnum):
     """What to do when a turn's effective input size exceeds the budget.
 
@@ -259,10 +281,87 @@ class ControlUiConfig(BaseSettings):
         return v
 
 
+_SCOPED_TELEMETRY_CONSENT_FIELDS = frozenset(
+    {
+        "reliability_diagnostics_enabled",
+        "reliability_notice_version",
+        "reliability_consented_at_utc",
+        "product_analytics_enabled",
+        "product_analytics_notice_version",
+        "product_analytics_consented_at_utc",
+    }
+)
+
+
+class _EnvWithoutScopedTelemetryConsent(PydanticBaseSettingsSource):
+    """Remove user-consent records from environment-backed settings sources.
+
+    Environment and dotenv inputs may impose telemetry vetoes, but they are
+    not an authenticated user-interaction surface and therefore cannot grant,
+    decline, timestamp, or version either scoped consent.  The wrapper handles
+    both direct ``PrivacyConfig`` keys and nested ``GatewayConfig.privacy``
+    payloads produced by pydantic-settings.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        for field_name in _SCOPED_TELEMETRY_CONSENT_FIELDS:
+            values.pop(field_name, None)
+        privacy = values.get("privacy")
+        if isinstance(privacy, dict):
+            filtered_privacy = dict(privacy)
+            for field_name in _SCOPED_TELEMETRY_CONSENT_FIELDS:
+                filtered_privacy.pop(field_name, None)
+            values["privacy"] = filtered_privacy
+        return values
+
+
 class PrivacyConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_PRIVACY_")
 
+    # Retained for loading older clients' configs. The global privacy switch
+    # is the only persisted upload preference; legacy declines migrate to it.
+    reliability_diagnostics_enabled: bool | None = None
+    reliability_notice_version: str | None = None
+    reliability_consented_at_utc: str | None = None
+    product_analytics_enabled: bool | None = None
+    product_analytics_notice_version: str | None = None
+    product_analytics_consented_at_utc: str | None = None
     disable_network_observability: bool = False
+
+    @model_validator(mode="after")
+    def _migrate_scoped_telemetry_preferences(self) -> PrivacyConfig:
+        if (
+            self.reliability_diagnostics_enabled is False
+            or self.product_analytics_enabled is False
+        ):
+            self.disable_network_observability = True
+        for field_name in _SCOPED_TELEMETRY_CONSENT_FIELDS:
+            setattr(self, field_name, None)
+        return self
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            _EnvWithoutScopedTelemetryConsent(env_settings),
+            _EnvWithoutScopedTelemetryConsent(dotenv_settings),
+            _EnvWithoutScopedTelemetryConsent(file_secret_settings),
+        )
 
 
 class SkillsConfig(BaseSettings):
@@ -458,6 +557,37 @@ class LlmProviderConfig(BaseSettings):
     # send provider.order=[name] so the provider is preferred without disabling
     # OpenRouter fallback.
     provider_routing: dict[str, str] = Field(default_factory=dict)
+    # Advanced local-only extensions for a custom OpenAI-compatible endpoint.
+    # Public configuration surfaces deliberately omit this field.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        local_only = frozenset({"extra_body"})
+        return (
+            init_settings,
+            _SettingsSourceWithoutFields(env_settings, local_only),
+            _SettingsSourceWithoutFields(dotenv_settings, local_only),
+            _SettingsSourceWithoutFields(file_secret_settings, local_only),
+        )
+
+    @field_validator("extra_body", mode="before")
+    @classmethod
+    def _validate_extra_body(cls, value: Any) -> dict[str, Any]:
+        from opensquilla.provider.extra_body import normalize_extra_body
+
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("extra_body must be a TOML table / JSON object")
+        return normalize_extra_body(value)
 
     @model_validator(mode="after")
     def _normalize_direct_deepseek_model(self) -> LlmProviderConfig:
@@ -470,6 +600,12 @@ class LlmProviderConfig(BaseSettings):
         model = str(self.model or "").strip()
         if model in aliases:
             self.model = aliases[model]
+        return self
+
+    @model_validator(mode="after")
+    def _validate_custom_extra_body(self) -> LlmProviderConfig:
+        if self.extra_body and str(self.provider or "").strip().lower() != "custom":
+            raise ValueError("llm.extra_body is supported only when provider='custom'")
         return self
 
 
@@ -933,10 +1069,7 @@ class PromptConfig(BaseModel):
     platform_hint_enabled: bool = True
     # Deprecated, unused compatibility slot; preserve construction and saved configs.
     patch_evidence_protocol: bool = False
-    # Opt-in additive "Reproduction Evidence" system-prompt section plus the
-    # loop-side finalize-time red-evidence gate (engine.finalize_evidence_gate).
-    # Overridable per run via the OPENSQUILLA_FINALIZE_EVIDENCE_GATE env var
-    # ("on"/"off").
+    # Deprecated, unused compatibility slot; preserve saved configurations.
     finalize_evidence_gate: bool = False
     # Deprecated, unused. Accepted so existing configuration still loads.
     legacy_prompt_style: bool = False
@@ -1309,9 +1442,12 @@ class SquillaRouterConfig(BaseSettings):
     estimated_output_savings_pct: float = 0.03
     upgrade_to_c3_compaction_enabled: bool = True
     self_learning: RouterSelfLearningConfig = Field(default_factory=RouterSelfLearningConfig)
+    # Deprecated compatibility fields: active history is retained until compaction;
+    # image routing no longer imposes a separate turn window.
     vision_history_lookback_turns: int = Field(default=8, ge=0)
     vision_history_candidate_turns: int = Field(default=8, ge=0)
     vision_sticky_followup_turns: int = Field(default=3, ge=0)
+    # Deprecated compatibility fields: image context no longer runs a separate gate.
     vision_followup_gate_enabled: bool = True
     vision_followup_gate_tier: str = "c0"
     vision_followup_gate_model: str | None = None
@@ -2295,7 +2431,8 @@ class _EnvWithoutConfigVersion(PydanticBaseSettingsSource):
     ``OPENSQUILLA_GATEWAY_CONFIG_VERSION`` can never gate or skip migrations.
     The transport-flow kill switch is also applied explicitly below so invalid
     values can fall back to the validated default with a warning instead of
-    failing Gateway construction during Pydantic coercion.
+    failing Gateway construction during Pydantic coercion. ``llm.extra_body``
+    is filtered here because its only supported source is local TOML.
     """
 
     def __init__(self, inner: PydanticBaseSettingsSource) -> None:
@@ -2309,6 +2446,9 @@ class _EnvWithoutConfigVersion(PydanticBaseSettingsSource):
         values = dict(self._inner())
         values.pop("config_version", None)
         values.pop("ws_transport_flow_enabled", None)
+        llm = values.get("llm")
+        if isinstance(llm, dict):
+            llm.pop("extra_body", None)
         return values
 
 
@@ -2624,6 +2764,10 @@ class GatewayConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _default_squilla_router_profile_for_direct_provider(self) -> GatewayConfig:
+        return self.initialize_router_profile_defaults()
+
+    def initialize_router_profile_defaults(self) -> GatewayConfig:
+        """Resolve implicit Router defaults after loading or enabling routing."""
         router = self.squilla_router
         if not router or not getattr(router, "enabled", False):
             return self
@@ -2711,10 +2855,9 @@ class GatewayConfig(BaseSettings):
     # meta turns retain the regular agent runtime budget. Disabled by default;
     # an explicit TurnRunner timeout still has priority when the cap is enabled.
     web_chat_runtime_timeout_seconds: float = Field(default=0.0, ge=0.0)
-    # Per-iteration timeout: one LLM call + its tool executions. ``None``
-    # means use the AgentConfig default.
+    # Deprecated, unused: provider inactivity and tool deadlines are separate.
     agent_iteration_timeout_seconds: float | None = None
-    # Per-tool execution timeout. ``None`` means use the AgentConfig default.
+    # Deprecated, unused: tools declare their own execution deadlines.
     agent_tool_timeout_seconds: float | None = None
     # Per-turn override for the single LLM HTTP/streaming request timeout.
     # ``None`` defers to ``llm_request_timeout_seconds`` so existing
@@ -2725,11 +2868,9 @@ class GatewayConfig(BaseSettings):
     agent_max_provider_retries: int | None = None
     # Agent model/tool loop budget for a single turn. 0 disables this cap.
     agent_max_iterations: int = Field(default=0, ge=0)
-    # Source diff preservation protects already-mutated source files from
-    # high-confidence destructive git restore/checkout/reset/clean commands.
+    # Deprecated, unused compatibility slot; preserve saved configurations.
     source_diff_preservation_mode: Literal["off", "log", "block"] = "log"
-    # Source diff candidate ledger records recoverable source edit patches and
-    # can surface lost candidate ids in final-diff recovery diagnostics.
+    # Deprecated, unused compatibility slot; preserve saved configurations.
     source_diff_candidate_mode: Literal["off", "log", "warn_model"] = "log"
     # Deprecated, unused compatibility slot; preserve construction and saved configs.
     runtime_state_capsule_mode: Literal["off", "log", "inject"] = "off"
@@ -2804,17 +2945,19 @@ class GatewayConfig(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # Default source order, with env-backed sources filtered so
-        # OPENSQUILLA_GATEWAY_CONFIG_VERSION can never populate the migration
-        # stamp — see _EnvWithoutConfigVersion for the full rationale.
+        # External sources cannot populate the migration stamp or scoped
+        # user-consent records; both belong to authenticated persistence paths.
         return (
             init_settings,
-            _EnvWithoutConfigVersion(env_settings),
-            _EnvWithoutConfigVersion(dotenv_settings),
-            file_secret_settings,
+            _EnvWithoutConfigVersion(_EnvWithoutScopedTelemetryConsent(env_settings)),
+            _EnvWithoutConfigVersion(_EnvWithoutScopedTelemetryConsent(dotenv_settings)),
+            _EnvWithoutConfigVersion(_EnvWithoutScopedTelemetryConsent(file_secret_settings)),
         )
 
     def model_post_init(self, __context: Any) -> None:
+        # Capture input provenance before profile-path normalization assigns
+        # workspace_dir and adds it to Pydantic's mutable model_fields_set.
+        self._workspace_dir_explicit = "workspace_dir" in self.model_fields_set
         handle_deprecated_skill_filter_env()
         self._apply_concurrency_env_overrides()
 
@@ -2974,6 +3117,17 @@ class GatewayConfig(BaseSettings):
     _runtime_field_overrides: dict[str, tuple[Any, Any]] = PrivateAttr(default_factory=dict)
     _force_persist_paths: set[tuple[str, ...]] = PrivateAttr(default_factory=set)
     _provider_resolution: dict[str, Any] = PrivateAttr(default_factory=dict)
+    # ``workspace_dir`` has a non-empty historical default, so its value alone
+    # cannot tell the workspace allocator whether the operator explicitly
+    # selected a shared root. Keep that provenance out of persisted config.
+    _workspace_dir_explicit: bool = PrivateAttr(default=False)
+
+    @property
+    def workspace_dir_source(self) -> str:
+        explicit = self._workspace_dir_explicit or (
+            self._persist_raw_base is not None and "workspace_dir" in self._persist_raw_base
+        )
+        return "configured" if explicit else "default"
 
     def to_toml_dict(self) -> dict[str, Any]:
         """Convert config to a TOML-writable dict."""
@@ -2986,6 +3140,8 @@ class GatewayConfig(BaseSettings):
                 llm.pop("api_key_env", None)
             if not llm.get("api_key"):
                 llm.pop("api_key", None)
+            if not llm.get("extra_body"):
+                llm.pop("extra_body", None)
         llm_profiles = data.get("llm_profiles")
         if isinstance(llm_profiles, dict):
             # Empty credential fields are absence, not a stored credential.
@@ -3050,6 +3206,9 @@ class GatewayConfig(BaseSettings):
     def to_public_dict(self) -> dict[str, Any]:
         """Return a redacted config view safe for public control surfaces."""
         data = cast(dict[str, Any], redact_public_config(self.model_dump()))
+        llm = data.get("llm")
+        if isinstance(llm, dict):
+            llm.pop("extra_body", None)
         ensemble = data.get("llm_ensemble")
         if isinstance(ensemble, dict):
             from opensquilla.gateway.model_routing import (
@@ -3063,10 +3222,20 @@ class GatewayConfig(BaseSettings):
         if isinstance(privacy, dict):
             from opensquilla.observability.network_policy import (
                 provider_request_correlation_disabled,
+                telemetry_scope_forced_off_reasons,
             )
 
             privacy["network_observability_disabled_effective"] = (
                 provider_request_correlation_disabled(config=self)
+            )
+            # These are effective, read-only UI hints.  Persisted consent stays
+            # untouched when an environment/global veto is active so lifting a
+            # temporary veto cannot manufacture or erase a user decision.
+            privacy["reliability_diagnostics_forced_off"] = bool(
+                telemetry_scope_forced_off_reasons("reliability", config=self)
+            )
+            privacy["product_analytics_forced_off"] = bool(
+                telemetry_scope_forced_off_reasons("growth", config=self)
             )
         return data
 
@@ -3117,6 +3286,8 @@ class GatewayConfig(BaseSettings):
 
     def clear_runtime_override(self, path: str) -> None:
         self._runtime_field_overrides.pop(path, None)
+        if path == "workspace_dir":
+            self._workspace_dir_explicit = True
 
     def runtime_field_overrides(self) -> dict[str, tuple[Any, Any]]:
         return dict(self._runtime_field_overrides)
@@ -3137,6 +3308,7 @@ class GatewayConfig(BaseSettings):
         self._runtime_field_overrides = dict(other._runtime_field_overrides)
         self._force_persist_paths = set(other._force_persist_paths)
         self._provider_resolution = dict(other._provider_resolution)
+        self._workspace_dir_explicit = other._workspace_dir_explicit
 
     def provider_resolution(self) -> dict[str, Any]:
         """Return non-secret provider identity provenance for diagnostics."""
@@ -3229,6 +3401,7 @@ class GatewayConfig(BaseSettings):
         self._persist_raw_base = copy.deepcopy(other._persist_raw_base)
         self._force_persist_paths = set(other._force_persist_paths)
         self._provider_resolution = dict(other._provider_resolution)
+        self._workspace_dir_explicit = other._workspace_dir_explicit
 
     def mark_force_persist(self, path: str) -> None:
         """Always write ``path`` on the next persist, even if it equals the
@@ -3241,6 +3414,8 @@ class GatewayConfig(BaseSettings):
         """Mark an exact config path while preserving dotted mapping keys."""
         if path:
             self._force_persist_paths.add(tuple(path))
+            if path == ("workspace_dir",):
+                self._workspace_dir_explicit = True
 
     def force_persist_path_segments(self) -> set[tuple[str, ...]]:
         """Return exact one-shot force paths for the persistence layer."""
@@ -3287,6 +3462,8 @@ class GatewayConfig(BaseSettings):
             applied = cls._resolve_profile_path(override, config_path)
             setattr(cfg, field_name, applied)
             cfg.record_runtime_override(field_name, stored, applied)
+            if field_name == "workspace_dir":
+                cfg._workspace_dir_explicit = True
 
     @classmethod
     def load_from_toml(cls, path: str | Path) -> GatewayConfig:

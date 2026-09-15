@@ -844,6 +844,18 @@ jobs:
         working-directory: desktop/electron
         run: npm run build
 
+      - name: Test installer tooling preparation policy
+        working-directory: desktop/electron
+        run: node --test scripts/test-prepare-installer-tooling.mjs
+
+      - name: Prepare installer contract tooling
+        working-directory: desktop/electron
+        env:
+          OPENSQUILLA_INSTALLER_TOOLING_FILE: ${{ runner.temp }}/installer-tooling.json
+        run: |
+          node scripts/prepare-installer-tooling.mjs "$OPENSQUILLA_INSTALLER_TOOLING_FILE"
+          echo "OPENSQUILLA_INSTALLER_TOOLING_FILE=$OPENSQUILLA_INSTALLER_TOOLING_FILE" >> "$GITHUB_ENV"
+
       - name: Run desktop unit tests
         working-directory: desktop/electron
         run: |
@@ -873,10 +885,21 @@ jobs:
           node scripts/test-desktop-renderer-log.mjs
           node scripts/test-artifact-preview-lease-broker.mjs
           node scripts/test-native-workbench-surface.mjs
+          node scripts/test-resource-file-actions.mjs
+          node --test scripts/fixtures/workspace-inline-preview/provider.test.mjs
           npm run test:live-html-harness
           node scripts/test-onboarding-flow-coordinator.mjs
           node scripts/test-onboarding-save-telemetry.mjs
+          node scripts/test-router-tier-normalization.mjs
+          node scripts/test-desktop-router-config.mjs
           node scripts/test-ci-case-telemetry.mjs
+          node scripts/test-telemetry-consent.mjs
+          node scripts/test-telemetry-early-spool.mjs
+          node scripts/test-telemetry-build-identity.mjs
+          node scripts/test-telemetry-reliability.mjs
+          node scripts/test-telemetry-growth.mjs
+          node scripts/test-telemetry-growth-lifecycle.mjs
+          node scripts/test-telemetry-protocol.mjs
           node ../../.github/scripts/verify-sandbox-package.mjs --source
 
   ubuntu-quality:
@@ -1124,6 +1147,47 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Resolve native Git Bash
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Get-Command bash.exe -CommandType Application -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty Source -First 1),
+            "$env:ProgramFiles\Git\bin\bash.exe",
+            "$env:ProgramFiles\Git\usr\bin\bash.exe",
+            "${env:ProgramFiles(x86)}\Git\bin\bash.exe",
+            "${env:ProgramFiles(x86)}\Git\usr\bin\bash.exe",
+            "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe",
+            "$env:LOCALAPPDATA\Programs\Git\usr\bin\bash.exe"
+          ) | Where-Object {
+            $_ -and (Test-Path -LiteralPath $_)
+          } | Select-Object -Unique
+
+          $probe = 'test -n "$BASH_VERSION" && case "$(uname -s 2>/dev/null)" in Linux*) exit 42;; esac && echo OPENSQUILLA_BASH_OK'
+          $diagnostics = [System.Collections.Generic.List[string]]::new()
+          foreach ($bash in $candidates) {
+            $output = (& $bash -lc $probe 2>&1 | Out-String).Trim()
+            $exitCode = $LASTEXITCODE
+            $diagnostics.Add("$bash => exit=$exitCode output=$output")
+            if ($exitCode -eq 0 -and $output -match 'OPENSQUILLA_BASH_OK') {
+              "OPENSQUILLA_BASH=$bash" |
+                Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              if ($env:CI_REPORT_DIR) {
+                "bash=$bash" |
+                  Out-File -FilePath (Join-Path $env:CI_REPORT_DIR 'environment.txt') -Encoding utf8 -Append
+              }
+              exit 0
+            }
+          }
+
+          if ($env:CI_REPORT_DIR) {
+            "bash_candidates=$($candidates -join ';')" |
+              Out-File -FilePath (Join-Path $env:CI_REPORT_DIR 'environment.txt') -Encoding utf8 -Append
+            $diagnostics |
+              Out-File -FilePath (Join-Path $env:CI_REPORT_DIR 'bash-probe.txt') -Encoding utf8
+          }
+          throw "No verified native Git Bash found. Candidates: $($candidates -join '; ')"
+
       - name: Set up Bun
         if: ${{ matrix.shard == 'core' }}
         uses: oven-sh/setup-bun@v2
@@ -1211,7 +1275,12 @@ jobs:
             # processes, or gateways from several tests.  Leave runner
             # headroom for those process-start handshakes instead of changing
             # their bounded readiness/timing assertions.
-            worker_args+=(--workers=2)
+            if [[ "${{ matrix.shard }}" == "recovery-migration" ||
+                  "${{ matrix.shard }}" == "gateway-sqlite" ]]; then
+              worker_args+=(--workers=3)
+            else
+              worker_args+=(--workers=2)
+            fi
           fi
 
           uv run python .github/scripts/windows_test_shards.py run \
@@ -1524,6 +1593,11 @@ jobs:
         working-directory: desktop/electron
         shell: bash
         run: npm run build
+
+      - name: Verify compiled Desktop Router against Gateway provider mutations
+        env:
+          OPENSQUILLA_REQUIRE_DESKTOP_ROUTER_BRIDGE: '1'
+        run: uv run --no-sync pytest -q tests/test_desktop/test_router_provider_bridge.py
 
       - name: Run compiled Desktop recovery flows
         working-directory: desktop/electron

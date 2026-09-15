@@ -68,6 +68,34 @@ OFFLINE_MARKER_EXCLUSIONS = {
     "tests/test_skills/test_meta_skill_creator_smoke_live.py",
 }
 RECENTLY_ADDED_ACTIVE_TESTS = {
+    # Primary-provider and validator coverage use the declared provisional
+    # floor until a comparable three-run Windows refresh supplies measured timings.
+    "tests/contracts/test_gateway_validator_profiles.py",
+    "tests/test_desktop/test_router_provider_bridge.py",
+    "tests/test_gateway/test_router_recommended_reset.py",
+    "tests/test_scripts/test_gateway_ux.py",
+    "tests/test_engine/test_agent_autonomous_tool_recovery.py",
+    "tests/test_engine/test_agent_connection_recovery.py",
+    "tests/test_engine/test_selector_provider_recovery.py",
+    "tests/test_provider_connection_failure.py",
+    "tests/test_tools/test_bounded_output_capture.py",
+    # Execution-log suites use the declared provisional floor until a Windows refresh.
+    "tests/test_gateway/test_rpc_execution_logs.py",
+    "tests/test_tools/test_execution_log_queries.py",
+
+    # Local-first workspace files use the 0.01s provisional floor until a
+    # comparable three-run Windows refresh supplies measured timings.
+    "tests/test_gateway/test_execution_workspace_preparation.py",
+    "tests/test_gateway/test_local_first_workspaces.py",
+    "tests/test_gateway/test_working_file_actions.py",
+    "tests/test_gateway/test_workspace_config_provenance.py",
+    "tests/test_gateway/test_workspace_preview_registration.py",
+    "tests/test_live_deliverable_acceptance.py",
+    "tests/test_tools/test_memory_workspace_ownership.py",
+    # Image budget suites use the provisional floor until a Windows duration refresh.
+    "tests/test_engine/test_agent_image_compaction_budget.py",
+    "tests/test_provider_request_proof_images.py",
+    "tests/test_session/test_compaction_media_budget.py",
     # Artifact source/version regressions use the declared provisional floor.
     "tests/test_engine/test_artifact_delivery_sources.py",
     "tests/test_engine/test_runtime_artifact_context.py",
@@ -79,6 +107,9 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_gateway/test_transport_diagnostics.py",
     "tests/test_gateway/test_transport_flow.py",
     "tests/test_gateway/test_websocket_connection_stability.py",
+    # Custom-provider request extensions use the provisional floor until the
+    # next comparable three-run Windows duration refresh.
+    "tests/test_gateway/test_custom_extra_body.py",
     "tests/test_ci/test_windows_signed_update_audit.py",
     # New replay files use the documented provisional floor until a Windows refresh.
     "tests/functional/test_reasoning_replay_persistence_e2e.py",
@@ -99,6 +130,7 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/contracts/test_conversation_events_contract.py",
     "tests/contracts/test_gateway_contract_runner.py",
     "tests/contracts/test_gateway_contract_toolchain_integration.py",
+    "tests/test_gateway/test_rpc_retired_surface.py",
     "tests/contracts/test_goals_contract.py",
     "tests/contracts/test_sandbox_runtime_contract.py",
     "tests/contracts/test_sessions_changed_contract.py",
@@ -135,6 +167,7 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/unit/cli/tui/test_opentui_prefs.py",
     "tests/test_cli/test_gateway_client_steer.py",
     "tests/test_cli/test_gateway_client_sessions_contract.py",
+    "tests/test_cli/test_sessions_cmd.py",
     "tests/test_cli/test_skills_search_cmd.py",
     "tests/test_channels/test_admission_reason_persistence.py",
     "tests/test_channels/test_channel_admission.py",
@@ -287,7 +320,8 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_tools/test_edit_file_closest_hint.py",
     "tests/test_tools/test_patch_classification.py",
     "tests/test_tools/test_plan_access.py",
-    "tests/test_tools/test_repeated_call_notice.py",
+    # Agent transcript search uses the provisional floor until a Windows refresh.
+    "tests/test_tools/test_session_search.py",
     "tests/test_tools/test_admin_audio_config.py",
     "tests/test_tools/test_admin_gateway_contract.py",
     "tests/test_tools/test_shell_self_kill_policy.py",
@@ -302,6 +336,12 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_contracts/test_ensemble_fallback_event_wire.py",
     "tests/test_contracts/test_turn_execution.py",
     "tests/test_engine/test_turn_control_terminal.py",
+    # New runtime-notice and telemetry pipeline suites use the provisional floor
+    # until a comparable three-run Windows duration refresh supplies timings.
+    "tests/test_engine/turn_runner/test_runtime_notices.py",
+    "tests/test_telemetry_server/test_product_active_pipeline.py",
+    "tests/test_telemetry_server/test_product_activity_pipeline.py",
+    "tests/test_telemetry_server/test_protocol_upgrade_pipeline.py",
 }
 
 

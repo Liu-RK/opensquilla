@@ -22,19 +22,25 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 192
+    assert len(targets) == 196
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 182,
-        "params": 17,
+        "result": 186,
+        "params": 20,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 854
+    assert sum(len(spec.targets) for spec in specs) == 866
+    assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
     assert targets[("method", "meta.list")] == ("result",)
     assert targets[("method", "meta.inspect")] == ("result",)
+    assert targets[("method", "telemetry.product_active.record")] == ("result",)
     assert targets[("method", "sessions.messages.snapshot.read")] == ("params", "result")
     assert targets[("method", "transport.flow.update")] == ("params", "result")
+    assert targets[("method", "onboarding.llmProfile.upsertAndActivate")] == (
+        "params", "result",
+    )
+    assert targets[("method", "models.routing.resetRecommended")] == ("params", "result")
     assert targets[("event", "transport.flow.dirty")] == ("payload",)
 
     retired_writes = {

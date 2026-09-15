@@ -142,7 +142,6 @@
           v-if="!forkTransition && recoveryNoticeVisible && recoveryNoticeState"
           :state="recoveryNoticeState"
           :transport-state="gatewayConnectionState"
-          automatic
           @retry="recoveryNoticeState.startsWith('live-') ? retryLive() : retryHistory()"
         />
         <div
@@ -210,6 +209,7 @@
           :goal="currentGoalRun"
           :goal-elapsed="goalLastElapsed"
           :resolve-session-availability="resolveCreatedSessionAvailability"
+          :resolve-workspace-preview-resource="resolveWorkspacePreviewResource"
           @fork-conversation="forkConversation"
           @edit-message="editMessage"
           @edit-attachment="editAttachmentResource"
@@ -711,6 +711,7 @@
       :title="toolResultModal.title"
       :content="toolResultModal.content"
       :context="toolResultModal.context"
+      :session-key="sessionKey"
       @close="toolResultModal.open = false"
     />
 
@@ -872,6 +873,7 @@ import {
 import { useChatRouterDecisionRuntime } from '@/composables/chat/useChatRouterDecisionRuntime'
 import { useChatAnswerReveal } from '@/composables/chat/useChatAnswerReveal'
 import { useChatRpcEventHandlers } from '@/composables/chat/useChatRpcEventHandlers'
+import { useWorkspacePreviewOpening } from '@/composables/chat/useWorkspacePreviewOpening'
 import { useChatRpcSubscriptions } from '@/composables/chat/useChatRpcSubscriptions'
 import { useChatSend, type ChatSendOutcome } from '@/composables/chat/useChatSend'
 import { useChatSteerDelivery } from '@/composables/chat/useChatSteerDelivery'
@@ -891,6 +893,7 @@ import { META_RUN_CENTER_KEY, type MetaRunCenter } from '@/modules/metaRunCenter
 import { runStatusLabelText as sessionRunStatusLabelText } from '@/composables/useSessions'
 import {
   shouldCanonicalizeInitialDraftRoute,
+  type ScopedDraftHistoryState,
   useChatSessionRoute,
 } from '@/composables/chat/useChatSessionRoute'
 import {
@@ -1809,6 +1812,7 @@ const {
   onFileInputChange,
   addAttachments,
   removeAttachment,
+  retireAttachments,
   retryAttachment,
   hasPendingAttachmentWork,
   prepareAttachmentsForSend,
@@ -2938,10 +2942,10 @@ const chatSessionRuntime = useChatSessionRuntime({
   resetSavingsPopupCooldown,
   restoreWidgetState,
   resetStreamLiveTurnState,
+  retireAttachments,
   resetDraftComposer: () => {
     artifactImageLightbox.close()
     inputText.value = ''
-    pendingAttachments.value = []
     resetComposerInputHistory()
     autoResizeTextarea()
   },
@@ -3851,6 +3855,7 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   usageAccum,
   usageModel,
   stream: chatStream,
+  onLiveToolResult: payload => workspacePreviewOpening.acceptLiveResult(payload),
   normalizeRunStatus,
   sessionRunStatus,
   applySessionRunState,
@@ -5065,8 +5070,18 @@ const sessionWorkbenchArtifacts = computed(() =>
   sessionArtifacts.value.filter(artifactUsesDocumentWorkbench),
 )
 
-const headerDeliverableCount = computed(() => sessionArtifacts.value.length)
 const workbenchResourceSnapshot = computed(() => workbenchResourcesStore.snapshot(sessionKey.value))
+const headerDeliverableCount = computed(() => {
+  if (!workbenchEnabled.value || !workbenchResourcesEnabled.value) {
+    return sessionArtifacts.value.length
+  }
+  // Local previews are Documents, not public artifacts. Keep their existing
+  // resource-list entry reachable without creating a delivery just for the UI.
+  return Math.max(
+    sessionArtifacts.value.length,
+    workbenchResourcesStore.navigationResources(sessionKey.value).length,
+  )
+})
 const attachmentWorkbenchResources = computed<ReadonlyMap<string, WorkbenchResource>>(() => (
   new Map(
     workbenchResourceSnapshot.value.resources
@@ -5083,7 +5098,7 @@ function focusHeaderAction(
 }
 
 async function openDeliverables() {
-  if (sessionArtifacts.value.length === 0) return
+  if (headerDeliverableCount.value === 0) return
   acknowledgeDeliverableUpdate()
   if (
     workbenchEnabled.value
@@ -5334,7 +5349,51 @@ async function openDeliverableWorkbenchResource(artifact: ArtifactPayload) {
   }
 }
 
+async function resolveWorkspacePreviewResource(key: string, documentId: string) {
+  if (!attachmentWorkbenchPreviewEnabled.value) return null
+  const ref = createWorkbenchResourceRef('document', documentId)
+  return workbenchResourcesStore.resolve(key, ref)
+}
+
+const workspacePreviewOpening = useWorkspacePreviewOpening({
+  sessionKey,
+  currentEpoch,
+  enabled: attachmentWorkbenchPreviewEnabled,
+  resolve: (key, resource) => workbenchResourcesStore.resolve(key, resource),
+  openCurrent: (key, resource) => workbenchResourcesStore.openCurrent(key, resource),
+  show: (current, key, previewPagePath) => {
+    const artifact = artifactPayloadFromRevision(current.revision)
+    artifact.documentId = current.document.documentId
+    artifact.revisionId = current.revision.revisionId
+    if (previewPagePath) artifact.previewPagePath = previewPagePath
+    const opened = workbenchStore.openItem(artifactPreviewItemForExplicitOpen({
+      artifact,
+      initialSection: 'preview',
+      navigationArtifacts: sessionArtifacts.value,
+      nativeHtml: Boolean(platform.capabilities.hasNativeWorkbenchSurfaces && platform.workbench.native),
+      previewLeaseEligible: true,
+      resourceIdentity: workbenchResourceKey(current.resource.resource),
+      sessionKey: key,
+    }))
+    if (!opened) pushToast(t('workbench.itemLimitReached'), { tone: 'warn', duration: 6000 })
+  },
+  onError: error => {
+    const classified = classifyArtifactProductError(error)
+    const translated = t(classified.messageKey)
+    pushToast(translated === classified.messageKey ? classified.fallbackMessage : translated,
+      { tone: 'danger', duration: 9000 })
+  },
+})
+
 function openArtifact(artifact: ArtifactPayload): boolean {
+  if (artifact.source === 'workspace-preview') {
+    void workspacePreviewOpening.open(
+      typeof artifact.documentId === 'string' ? artifact.documentId : '',
+      artifact.session_key || '',
+      typeof artifact.previewPagePath === 'string' ? artifact.previewPagePath : undefined,
+    )
+    return true
+  }
   // Generated images are also inline media. Route every visual artifact to
   // the authenticated lightbox before the inline-focus fallback so clicking
   // either the thumbnail or its open affordance actually previews it.
@@ -6354,6 +6413,41 @@ function consumeDraftPrefill() {
   } catch { /* ignore */ }
 }
 
+function scopedDraftFromHistoryState(
+  state: Record<string, unknown> | null,
+): ScopedDraftHistoryState | null {
+  if (
+    typeof state?.draftSessionKey !== 'string'
+    || typeof state.draftAgentId !== 'string'
+    || typeof state.draftProjectId !== 'string'
+  ) return null
+  return {
+    sessionKey: state.draftSessionKey,
+    agentId: state.draftAgentId,
+    projectId: state.draftProjectId,
+  }
+}
+
+function persistDraftHistoryState() {
+  if (!isDraftRoute() || !sessionKey.value) return
+  try {
+    const state = window.history.state as Record<string, unknown> | null
+    const agentId = draftAgentId()
+    const projectId = readProjectFromUrl()
+    if (
+      state?.draftSessionKey === sessionKey.value
+      && state.draftAgentId === agentId
+      && state.draftProjectId === projectId
+    ) return
+    window.history.replaceState({
+      ...state,
+      draftSessionKey: sessionKey.value,
+      draftAgentId: agentId,
+      draftProjectId: projectId,
+    }, '')
+  } catch { /* ignore */ }
+}
+
 async function chooseProjectPath(path: string) {
   projectPickerOpen.value = false
   if (!gatewayAccess.canChooseProject) return
@@ -6572,17 +6666,25 @@ onMounted(async () => {
   const initialHistoryState = window.history.state as Record<string, unknown> | null
   const hasExplicitDraftPrefill = typeof initialHistoryState?.prefill === 'string'
     && initialHistoryState.prefill.length > 0
+  const scopedDraft = scopedDraftFromHistoryState(initialHistoryState)
+  const canRecoverDraft = !hasLegacyNewChatQuery() && !hasExplicitDraftPrefill
+  const initialSession = resolveInitialSession({
+    recoverDraft: canRecoverDraft,
+    scopedDraft,
+  })
   const explicitFreshTask = isDraftRoute() && Boolean(
-    readAgentFromUrl()
-    || readProjectFromUrl()
-    || hasLegacyNewChatQuery()
-    || hasExplicitDraftPrefill,
+    hasLegacyNewChatQuery()
+    || hasExplicitDraftPrefill
+    || (
+      (readAgentFromUrl() || readProjectFromUrl())
+      && !scopedDraft
+      && !initialSession.recoveredDraft
+    ),
   )
   if (explicitFreshTask) draftPersistence.discardRecentDraft()
   // Initialize session key. Without an explicit ?session= the view opens as a
   // draft, except for the one most-recent non-empty draft recovered on a cold
   // /chat/new entry. Explicit new-task handoffs always remain clean.
-  const initialSession = resolveInitialSession({ recoverDraft: !explicitFreshTask })
   sessionKey.value = initialSession.sessionKey
   bindTailLayoutObservers()
   let initialDraftProjectGeneration: number | null = null
@@ -6925,7 +7027,10 @@ watch(() => [route.path, route.query.agent, route.query.project], async () => {
 })
 
 watch(inputText, (value) => {
-  if (value.length > 0) markProvisionalDraftUsed()
+  if (value.length > 0) {
+    markProvisionalDraftUsed()
+    persistDraftHistoryState()
+  }
 }, { flush: 'sync' })
 
 watch(() => pendingAttachments.value.length, (count) => {
