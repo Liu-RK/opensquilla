@@ -14,6 +14,7 @@ the result is normalised through the budget tracker.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from opensquilla.result_budget import (
     resolve_budget_class,
 )
 from opensquilla.router_control import router_control_payload_terminates_turn
-from opensquilla.safety.secret_redaction import redact_secret_value
+from opensquilla.safety.secret_redaction import redact_secret_text, redact_secret_value
 from opensquilla.tool_boundary import ToolCall, ToolResult
 from opensquilla.tools.envelope import build_tool_failure_envelope, is_denial_payload
 from opensquilla.tools.types import CallerKind, InteractionMode, ToolContext
@@ -46,20 +47,7 @@ _PENDING_APPROVAL_STATUSES: frozenset[str] = frozenset(
 )
 _MAX_TERMINAL_RESPONSE_CHARS = 2_000
 
-_SOURCE_RESULT_TOOLS = frozenset(
-    {"grep_search", "read_file", "read_source", "source_symbols"}
-)
-_ENV_FILE_BASENAMES = frozenset(
-    {
-        ".env",
-        ".env.development",
-        ".env.local",
-        ".env.production",
-        ".env.staging",
-        ".env.test",
-        ".envrc",
-    }
-)
+_DIRECT_FILE_RESULT_TOOLS = frozenset({"read_file", "read_source"})
 _SHELL_RC_BASENAMES = frozenset(
     {
         ".bash_login",
@@ -80,6 +68,7 @@ _FILE_READ_COMMANDS = frozenset(
         "batcat",
         "cat",
         "grep",
+        "get-content",
         "head",
         "less",
         "more",
@@ -100,6 +89,10 @@ _OPENSQUILLA_HOME_PREFIXES = (
     "${OPENSQUILLA_STATE_DIR}/",
 )
 _HOME_PREFIXES = ("$HOME/", "${HOME}/")
+_GREP_MATCH_RE = re.compile(
+    r"^(?P<prefix>(?P<path>.+?)(?::\d+)?: )"
+    r"(?P<content>[^\r\n]*)(?P<ending>\r?\n)?$"
+)
 
 
 _DISPATCH_TRUNCATION_RETRIEVE_HINT = (
@@ -123,7 +116,7 @@ def _command_segments(command: str) -> list[str]:
             quote = character
             buffer.append(character)
             continue
-        if character in "|;&":
+        if character in "|;&\r\n":
             segment = "".join(buffer).strip()
             if segment:
                 segments.append(segment)
@@ -175,7 +168,12 @@ def _is_secret_file_arg(argument: object) -> bool:
     if not parts:
         return False
     basename = parts[-1]
-    if basename in _ENV_FILE_BASENAMES or basename in _SHELL_RC_BASENAMES:
+    if (
+        basename == ".env"
+        or basename.startswith(".env.")
+        or basename == ".envrc"
+        or basename in _SHELL_RC_BASENAMES
+    ):
         return True
     return _is_opensquilla_config(
         path,
@@ -195,32 +193,74 @@ def _is_env_dump_command(command: str) -> bool:
     return False
 
 
-def _command_reads_secret_file(command: str) -> bool:
+def _command_file_read_classification(command: str) -> tuple[bool, bool, bool]:
+    """Return ordinary-read, secret-read, and unknown-segment flags."""
+    reads_file = False
+    reads_secret_file = False
+    has_unknown_segment = False
     for segment in _command_segments(command):
-        tokens = segment.split()
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
         if not tokens:
             continue
         reader = tokens[0].rsplit("/", 1)[-1].lower()
         if reader not in _FILE_READ_COMMANDS:
+            has_unknown_segment = True
             continue
         positional = [argument for argument in tokens[1:] if not argument.startswith("-")]
         if reader in _PATTERN_FIRST_COMMANDS:
             positional = positional[1:]
+        if not positional:
+            continue
         if any(_is_secret_file_arg(argument) for argument in positional):
-            return True
-    return False
+            reads_secret_file = True
+        else:
+            reads_file = True
+    return reads_file, reads_secret_file, has_unknown_segment
+
+
+def _redact_grep_search_result(value: Any) -> Any:
+    """Redact each grep match using the path emitted with that match."""
+    if not isinstance(value, str):
+        return redact_secret_value(value)
+    redacted_lines: list[str] = []
+    for line in value.splitlines(keepends=True):
+        match = _GREP_MATCH_RE.match(line)
+        if match is None:
+            redacted_lines.append(redact_secret_text(line))
+            continue
+        secret_file = _is_secret_file_arg(match.group("path"))
+        redacted_content = redact_secret_text(
+            match.group("content"),
+            code_file=not secret_file,
+            secret_file=secret_file,
+        )
+        redacted_lines.append(
+            match.group("prefix") + redacted_content + (match.group("ending") or "")
+        )
+    return "".join(redacted_lines)
 
 
 def _tool_result_redaction_options(call: ToolCall) -> dict[str, bool]:
     """Choose assignment redaction from the source that produced the result."""
-    if call.tool_name in _SOURCE_RESULT_TOOLS:
+    if call.tool_name in _DIRECT_FILE_RESULT_TOOLS:
         secret_file = _is_secret_file_arg(call.arguments.get("path"))
         return {"code_file": not secret_file, "secret_file": secret_file}
+    if call.tool_name == "source_symbols":
+        return {"code_file": True, "secret_file": False}
     if call.tool_name == "exec_command":
         command = call.arguments.get("command", "")
         command = command if isinstance(command, str) else ""
-        secret_output = _is_env_dump_command(command) or _command_reads_secret_file(command)
-        return {"code_file": not secret_output, "secret_file": secret_output}
+        reads_file, reads_secret_file, has_unknown_segment = (
+            _command_file_read_classification(command)
+        )
+        if _is_env_dump_command(command) or reads_secret_file:
+            return {"code_file": False, "secret_file": True}
+        if reads_file and not has_unknown_segment:
+            return {"code_file": True, "secret_file": False}
+        return {}
     return {}
 
 
@@ -504,12 +544,15 @@ async def finalize(
             terminates_turn=False,
         )
 
-    redaction_options = _tool_result_redaction_options(call)
-    result = redact_secret_value(
-        raw_result,
-        code_file=redaction_options.get("code_file", False),
-        secret_file=redaction_options.get("secret_file", False),
-    )
+    if call.tool_name == "grep_search":
+        result = _redact_grep_search_result(raw_result)
+    else:
+        redaction_options = _tool_result_redaction_options(call)
+        result = redact_secret_value(
+            raw_result,
+            code_file=redaction_options.get("code_file", False),
+            secret_file=redaction_options.get("secret_file", False),
+        )
 
     # ---------------- Approval-on-unsupported-surface branch ----------------
     if not _has_live_approval_surface(ctx):

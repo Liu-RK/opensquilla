@@ -536,7 +536,8 @@ async def test_dispatch_preserves_assignments_in_source_file_results() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_redacts_assignments_in_secret_file_results() -> None:
+@pytest.mark.parametrize("path", [".env.production", ".env.production.local"])
+async def test_dispatch_redacts_assignments_in_secret_file_results(path: str) -> None:
     registry = ToolRegistry()
 
     async def read_file(path: str) -> str:
@@ -558,12 +559,106 @@ async def test_dispatch_redacts_assignments_in_secret_file_results() -> None:
         ToolCall(
             tool_use_id="tc-secret-file-read",
             tool_name="read_file",
-            arguments={"path": ".env.production"},
+            arguments={"path": path},
         )
     )
 
     assert result.is_error is False
     assert result.content == "1\tAPI_TOKEN=[REDACTED]\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_match", "secret_match"),
+    [
+        (
+            "src/Fixer.php:2: $nextToken = $tokens[$index + 1];",
+            ".bashrc:1: export API_TOKEN=FAKE_REVIEW_PASSWORD_12345",
+        ),
+        (
+            "src/Fixer.php: $nextToken = $tokens[$index + 1];",
+            ".bashrc: API_TOKEN=FAKE_REVIEW_PASSWORD_12345",
+        ),
+    ],
+)
+async def test_dispatch_redacts_directory_grep_matches_from_secret_files(
+    source_match: str,
+    secret_match: str,
+) -> None:
+    registry = ToolRegistry()
+
+    async def grep_search(pattern: str, path: str, include: str) -> str:
+        del pattern, path, include
+        return f"{source_match}\n{secret_match}\n"
+
+    registry.register(
+        ToolSpec(
+            name="grep_search",
+            description="grep",
+            parameters={
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "include": {"type": "string"},
+            },
+            required=["pattern", "path", "include"],
+        ),
+        grep_search,
+    )
+    handler = build_tool_handler(registry)
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-secret-directory-grep",
+            tool_name="grep_search",
+            arguments={"pattern": "API_TOKEN", "path": ".", "include": ".bashrc"},
+        )
+    )
+
+    assert result.is_error is False
+    assert "$nextToken = $tokens[$index + 1];" in result.content
+    assert "FAKE_REVIEW_PASSWORD_12345" not in result.content
+    assert "API_TOKEN=[REDACTED]" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content .env",
+        "pwd\ncat .env",
+        "custom-credential-dump",
+        "cat src/settings.py\ncustom-credential-dump",
+    ],
+)
+async def test_dispatch_redacts_assignments_from_non_source_commands(command: str) -> None:
+    registry = ToolRegistry()
+
+    async def exec_command(command: str) -> str:
+        del command
+        return "PASSWORD=FAKE_REVIEW_PASSWORD_12345\n"
+
+    registry.register(
+        ToolSpec(
+            name="exec_command",
+            description="exec",
+            parameters={"command": {"type": "string"}},
+            required=["command"],
+        ),
+        exec_command,
+    )
+    handler = build_tool_handler(registry)
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-non-source-command",
+            tool_name="exec_command",
+            arguments={"command": command},
+        )
+    )
+
+    assert result.is_error is False
+    assert "FAKE_REVIEW_PASSWORD_12345" not in result.content
+    assert result.content == "PASSWORD=[REDACTED]\n"
 
 
 @pytest.mark.asyncio

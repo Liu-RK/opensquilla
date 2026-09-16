@@ -79,7 +79,23 @@ def test_redact_secret_text_does_not_mask_source_token_variables() -> None:
         "$searchEndToken = $tokens[$searchEndIndex];"
     )
 
-    assert redact_secret_text(source) == source
+    assert redact_secret_text(source, code_file=True) == source
+
+
+def test_redact_secret_text_strictly_masks_explicit_credential_assignments() -> None:
+    text = 'accessToken=abc123def45 refreshToken="abcdefghijklmnop"'
+
+    for options in ({}, {"secret_file": True}):
+        redacted = redact_secret_text(text, **options)
+        assert "abc123def45" not in redacted
+        assert "abcdefghijklmnop" not in redacted
+        assert redacted == "accessToken=[REDACTED] refreshToken=[REDACTED]"
+
+
+def test_redact_secret_value_does_not_expand_camel_case_structured_key_policy() -> None:
+    payload = {"accessToken": "abc123def45"}
+
+    assert redact_secret_value(payload) == payload
 
 
 def test_redact_secret_text_still_masks_opaque_camel_case_tokens() -> None:

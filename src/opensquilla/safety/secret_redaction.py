@@ -71,39 +71,18 @@ def is_secret_key(key: str) -> bool:
     return lowered in _SECRET_KEY_EXACT or any(part in lowered for part in _SECRET_KEY_PARTS)
 
 
-def _looks_like_opaque_credential(value: str) -> bool:
-    """Distinguish credentials from source expressions for ambiguous token names."""
-    candidate = value.strip().strip("\"'")
-    if candidate == _REDACTED:
-        return True
-    if candidate.startswith("$"):
-        return False
-    if len(candidate) >= 16 and re.fullmatch(r"[A-Fa-f0-9]+", candidate):
-        return True
-    if len(candidate) >= 20 and re.fullmatch(r"[A-Za-z0-9_./+=-]+", candidate):
-        return True
-    if len(candidate) < 12:
-        return False
-    return sum(
-        bool(re.search(pattern, candidate))
-        for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]")
-    ) >= 2
-
-
-def _is_secret_assignment_key(key: str, value: str) -> bool:
+def _is_secret_assignment_key(key: str) -> bool:
     lowered = key.lower()
     if lowered == "authorization":
         return False
-    if is_secret_key(lowered) or lowered.endswith((".token", "_token", "-token")):
-        return True
-    if lowered.endswith("token"):
-        return _looks_like_opaque_credential(value)
-    return False
+    return is_secret_key(lowered) or lowered.endswith(
+        ("token", ".token", "_token", "-token")
+    )
 
 
 def _redact_assignment(match: re.Match[str]) -> str:
-    key, separator, value = match.group(1), match.group(2), match.group(3)
-    if not _is_secret_assignment_key(key, value):
+    key, separator = match.group(1), match.group(2)
+    if not _is_secret_assignment_key(key):
         return match.group(0)
     return f"{key}{separator}{_REDACTED}"
 
