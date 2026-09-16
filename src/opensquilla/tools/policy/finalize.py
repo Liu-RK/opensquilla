@@ -14,6 +14,8 @@ the result is normalised through the budget tracker.
 from __future__ import annotations
 
 import json
+import shlex
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -25,6 +27,7 @@ from opensquilla.execution_status import (
     mark_execution_status_truncated,
     normalize_execution_status,
 )
+from opensquilla.paths import default_opensquilla_home
 from opensquilla.result_budget import (
     ToolResultBudgetTracker,
     ToolRunBudgetExceededError,
@@ -43,11 +46,182 @@ _PENDING_APPROVAL_STATUSES: frozenset[str] = frozenset(
 )
 _MAX_TERMINAL_RESPONSE_CHARS = 2_000
 
+_SOURCE_RESULT_TOOLS = frozenset(
+    {"grep_search", "read_file", "read_source", "source_symbols"}
+)
+_ENV_FILE_BASENAMES = frozenset(
+    {
+        ".env",
+        ".env.development",
+        ".env.local",
+        ".env.production",
+        ".env.staging",
+        ".env.test",
+        ".envrc",
+    }
+)
+_SHELL_RC_BASENAMES = frozenset(
+    {
+        ".bash_login",
+        ".bash_profile",
+        ".bashrc",
+        ".profile",
+        ".zlogin",
+        ".zprofile",
+        ".zshenv",
+        ".zshrc",
+    }
+)
+_ENV_DUMP_COMMANDS = frozenset({"declare", "env", "export", "printenv", "set"})
+_FILE_READ_COMMANDS = frozenset(
+    {
+        "awk",
+        "bat",
+        "batcat",
+        "cat",
+        "grep",
+        "head",
+        "less",
+        "more",
+        "nl",
+        "sed",
+        "tac",
+        "tail",
+        "type",
+        "view",
+        "zcat",
+    }
+)
+_PATTERN_FIRST_COMMANDS = frozenset({"awk", "grep", "sed"})
+_OPENSQUILLA_HOME_PREFIXES = (
+    "$OPENSQUILLA_HOME/",
+    "${OPENSQUILLA_HOME}/",
+    "$OPENSQUILLA_STATE_DIR/",
+    "${OPENSQUILLA_STATE_DIR}/",
+)
+_HOME_PREFIXES = ("$HOME/", "${HOME}/")
+
 
 _DISPATCH_TRUNCATION_RETRIEVE_HINT = (
     "This tool result was truncated before entering model context. "
     "Use retrieve_tool_result with handle=<tool_result_handle> to inspect the original raw output."
 )
+
+
+def _command_segments(command: str) -> list[str]:
+    """Split shell pipelines and sequences without splitting quoted text."""
+    segments: list[str] = []
+    buffer: list[str] = []
+    quote: str | None = None
+    for character in command:
+        if quote:
+            buffer.append(character)
+            if character == quote:
+                quote = None
+            continue
+        if character in "'\"":
+            quote = character
+            buffer.append(character)
+            continue
+        if character in "|;&":
+            segment = "".join(buffer).strip()
+            if segment:
+                segments.append(segment)
+            buffer = []
+            continue
+        buffer.append(character)
+    segment = "".join(buffer).strip()
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def _is_opensquilla_config(
+    path: str,
+    parts: list[str],
+    *,
+    opensquilla_home: bool = False,
+) -> bool:
+    if not parts or parts[-1] != "config.toml":
+        return False
+    if opensquilla_home or ".opensquilla" in parts[:-1]:
+        return True
+    try:
+        candidate = Path(path.strip("\"'")).expanduser().resolve(strict=False)
+        home = default_opensquilla_home().expanduser().resolve(strict=False)
+        candidate.relative_to(home)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _is_secret_file_arg(argument: object) -> bool:
+    if not isinstance(argument, str) or not argument.strip():
+        return False
+    path = argument.strip("\"'").replace("\\", "/")
+    opensquilla_home = False
+    for prefix in _OPENSQUILLA_HOME_PREFIXES:
+        if path.startswith(prefix):
+            path = path[len(prefix) :]
+            opensquilla_home = True
+            break
+    for prefix in _HOME_PREFIXES:
+        if path.startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    if "$" in path:
+        return False
+    parts = [part.lower() for part in path.split("/") if part]
+    if not parts:
+        return False
+    basename = parts[-1]
+    if basename in _ENV_FILE_BASENAMES or basename in _SHELL_RC_BASENAMES:
+        return True
+    return _is_opensquilla_config(
+        path,
+        parts,
+        opensquilla_home=opensquilla_home,
+    )
+
+
+def _is_env_dump_command(command: str) -> bool:
+    for segment in _command_segments(command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        if tokens and tokens[0].rsplit("/", 1)[-1].lower() in _ENV_DUMP_COMMANDS:
+            return True
+    return False
+
+
+def _command_reads_secret_file(command: str) -> bool:
+    for segment in _command_segments(command):
+        tokens = segment.split()
+        if not tokens:
+            continue
+        reader = tokens[0].rsplit("/", 1)[-1].lower()
+        if reader not in _FILE_READ_COMMANDS:
+            continue
+        positional = [argument for argument in tokens[1:] if not argument.startswith("-")]
+        if reader in _PATTERN_FIRST_COMMANDS:
+            positional = positional[1:]
+        if any(_is_secret_file_arg(argument) for argument in positional):
+            return True
+    return False
+
+
+def _tool_result_redaction_options(call: ToolCall) -> dict[str, bool]:
+    """Choose assignment redaction from the source that produced the result."""
+    if call.tool_name in _SOURCE_RESULT_TOOLS:
+        secret_file = _is_secret_file_arg(call.arguments.get("path"))
+        return {"code_file": not secret_file, "secret_file": secret_file}
+    if call.tool_name == "exec_command":
+        command = call.arguments.get("command", "")
+        command = command if isinstance(command, str) else ""
+        secret_output = _is_env_dump_command(command) or _command_reads_secret_file(command)
+        return {"code_file": not secret_output, "secret_file": secret_output}
+    return {}
 
 
 def _registered_terminates_turn(registered: Any) -> bool:
@@ -330,7 +504,7 @@ async def finalize(
             terminates_turn=False,
         )
 
-    result = redact_secret_value(raw_result)
+    result = redact_secret_value(raw_result, **_tool_result_redaction_options(call))
 
     # ---------------- Approval-on-unsupported-surface branch ----------------
     if not _has_live_approval_surface(ctx):

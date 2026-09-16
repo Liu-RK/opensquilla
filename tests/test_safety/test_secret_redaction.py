@@ -72,6 +72,22 @@ def test_redact_secret_text_does_not_mask_token_counters() -> None:
     )
 
 
+def test_redact_secret_text_does_not_mask_source_token_variables() -> None:
+    source = (
+        "$nextToken = $tokens[$index + 1];\n"
+        "$searchToken = $tokens[$searchIndex];\n"
+        "$searchEndToken = $tokens[$searchEndIndex];"
+    )
+
+    assert redact_secret_text(source) == source
+
+
+def test_redact_secret_text_still_masks_opaque_camel_case_tokens() -> None:
+    assert redact_secret_text("nextToken=abcdefghijklmnopqrstuvwx") == (
+        "nextToken=[REDACTED]"
+    )
+
+
 def test_redact_secret_text_masks_non_bearer_authorization_credentials() -> None:
     basic = redact_secret_text("Authorization: Basic dXNlcjpwYXNz")
     assert "dXNlcjpwYXNz" not in basic

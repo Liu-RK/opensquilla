@@ -497,6 +497,146 @@ async def test_dispatch_redacts_secret_like_tool_result_content() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_preserves_assignments_in_source_file_results() -> None:
+    registry = ToolRegistry()
+    provider_key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz"
+
+    async def read_file(path: str) -> str:
+        del path
+        return (
+            '1\tTOKEN = "fixture-value"\n'
+            "2\t$nextToken = $tokens[$index + 1];\n"
+            f"3\tprovider_key = '{provider_key}'\n"
+        )
+
+    registry.register(
+        ToolSpec(
+            name="read_file",
+            description="read",
+            parameters={"path": {"type": "string"}},
+            required=["path"],
+        ),
+        read_file,
+    )
+    handler = build_tool_handler(registry)
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-source-read",
+            tool_name="read_file",
+            arguments={"path": "src/Fixer.php"},
+        )
+    )
+
+    assert result.is_error is False
+    assert 'TOKEN = "fixture-value"' in result.content
+    assert "$nextToken = $tokens[$index + 1];" in result.content
+    assert provider_key not in result.content
+    assert "provider_key = '[REDACTED]'" in result.content
+
+
+@pytest.mark.asyncio
+async def test_dispatch_redacts_assignments_in_secret_file_results() -> None:
+    registry = ToolRegistry()
+
+    async def read_file(path: str) -> str:
+        del path
+        return "1\tAPI_TOKEN=abcdefghijklmnopqrstuvwx\n"
+
+    registry.register(
+        ToolSpec(
+            name="read_file",
+            description="read",
+            parameters={"path": {"type": "string"}},
+            required=["path"],
+        ),
+        read_file,
+    )
+    handler = build_tool_handler(registry)
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-secret-file-read",
+            tool_name="read_file",
+            arguments={"path": ".env.production"},
+        )
+    )
+
+    assert result.is_error is False
+    assert result.content == "1\tAPI_TOKEN=[REDACTED]\n"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_distinguishes_source_commands_from_environment_dumps() -> None:
+    registry = ToolRegistry()
+
+    async def exec_command(command: str) -> str:
+        del command
+        return 'TOKEN="fixture-value"\n'
+
+    registry.register(
+        ToolSpec(
+            name="exec_command",
+            description="exec",
+            parameters={"command": {"type": "string"}},
+            required=["command"],
+        ),
+        exec_command,
+    )
+    handler = build_tool_handler(registry)
+
+    source_result = await handler(
+        ToolCall(
+            tool_use_id="tc-source-command",
+            tool_name="exec_command",
+            arguments={"command": "sed -n '1,20p' src/settings.py"},
+        )
+    )
+    env_result = await handler(
+        ToolCall(
+            tool_use_id="tc-env-command",
+            tool_name="exec_command",
+            arguments={"command": "printenv"},
+        )
+    )
+    secret_file_result = await handler(
+        ToolCall(
+            tool_use_id="tc-secret-file-command",
+            tool_name="exec_command",
+            arguments={"command": "cat .env.local"},
+        )
+    )
+    project_config_result = await handler(
+        ToolCall(
+            tool_use_id="tc-project-config-command",
+            tool_name="exec_command",
+            arguments={"command": "cat config.toml"},
+        )
+    )
+    opensquilla_config_result = await handler(
+        ToolCall(
+            tool_use_id="tc-opensquilla-config-command",
+            tool_name="exec_command",
+            arguments={"command": "cat ~/.opensquilla/config.toml"},
+        )
+    )
+    opensquilla_home_config_result = await handler(
+        ToolCall(
+            tool_use_id="tc-opensquilla-home-config-command",
+            tool_name="exec_command",
+            arguments={"command": "cat $HOME/.opensquilla/config.toml"},
+        )
+    )
+
+    assert source_result.content == 'TOKEN="fixture-value"\n'
+    assert env_result.content == "TOKEN=[REDACTED]\n"
+    assert secret_file_result.content == "TOKEN=[REDACTED]\n"
+    assert project_config_result.content == 'TOKEN="fixture-value"\n'
+    assert opensquilla_config_result.content == "TOKEN=[REDACTED]\n"
+    assert opensquilla_home_config_result.content == "TOKEN=[REDACTED]\n"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_rejects_unparsed_raw_tool_arguments_before_handler() -> None:
     handler = build_tool_handler(_build_registry())
 
