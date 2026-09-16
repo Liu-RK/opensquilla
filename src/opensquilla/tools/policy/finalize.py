@@ -504,7 +504,12 @@ async def finalize(
             terminates_turn=False,
         )
 
-    result = redact_secret_value(raw_result, **_tool_result_redaction_options(call))
+    redaction_options = _tool_result_redaction_options(call)
+    result = redact_secret_value(
+        raw_result,
+        code_file=redaction_options.get("code_file", False),
+        secret_file=redaction_options.get("secret_file", False),
+    )
 
     # ---------------- Approval-on-unsupported-surface branch ----------------
     if not _has_live_approval_surface(ctx):
